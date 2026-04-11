@@ -7,6 +7,7 @@ plotly>=5.20.0
 scikit-learn>=1.4.0
 scipy>=1.12.0
 statsmodels>=0.14.0
+openap>=2.5.0
 ipykernel
 notebook
 tqdm

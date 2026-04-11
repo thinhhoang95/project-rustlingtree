@@ -1,5 +1,4 @@
-def main():
-    print("Hello from project-rustlingtree!")
+from simap.examples.run_a320 import main
 
 
 if __name__ == "__main__":
