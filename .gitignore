@@ -1,0 +1,65 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+desktop.ini
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# dotenv environment variables
+.env
+.env.*
+
+# mypy, coverage, and test
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# logs and dumps
+*.log
+*.pot
+*.mo
+
+# distribution and packaging
+pip-wheel-metadata/
+*.manifest
+
+# C extensions
+*.so
+
+# Local config
+*.local
+
+# Test, coverage, and profiling artifacts
+.cache/
+.tox/
+.nox/
+.pyre/
+.pytype/
+coverage.xml
+
+# Temporary files
+*.swp
+*~
+*.bak
+
+._*
