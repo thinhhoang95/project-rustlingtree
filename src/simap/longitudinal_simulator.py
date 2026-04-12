@@ -15,6 +15,39 @@ from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 @dataclass(frozen=True)
 class LongitudinalScenario:
+    """Inputs that define a longitudinal approach simulation.
+
+    The scenario bundles the reference altitude profile, the raw calibrated-
+    airspeed schedule, and the ambient conditions used by the simulator. The
+    simulator turns this into a feasible speed schedule during initialization.
+
+    Parameters
+    ----------
+    altitude_profile:
+        Reference altitude over along-track distance.
+    raw_speed_schedule_cas:
+        Raw calibrated-airspeed schedule before feasibility filtering.
+    weather:
+        Weather model used during simulation. Defaults to still air and ISA.
+    feasibility:
+        Settings used to build the feasible speed schedule.
+    reference_track_rad:
+        Track angle used to project wind into the along-track axis.
+
+    Example
+    -------
+    >>> scenario = LongitudinalScenario(
+    ...     altitude_profile=altitude_profile,
+    ...     raw_speed_schedule_cas=speed_schedule,
+    ...     reference_track_rad=0.0,
+    ... )
+
+    Nuance
+    -------
+    The `weather` and `feasibility` values are not just bookkeeping: they
+    directly affect the feasible speed schedule built by
+    `LongitudinalApproachSimulator.__init__`.
+    """
     altitude_profile: ScalarProfile
     raw_speed_schedule_cas: ScalarProfile
     weather: WeatherProvider = field(default_factory=ConstantWeather)
@@ -24,6 +57,30 @@ class LongitudinalScenario:
 
 @dataclass(frozen=True)
 class LongitudinalTrajectory:
+    """Sampled output of a longitudinal simulation run.
+
+    Each field stores one sampled series from the simulation. All arrays should
+    have the same length, and `mode` stores the active mode name at each sample.
+
+    Example
+    -------
+    >>> traj = LongitudinalTrajectory(
+    ...     t_s=np.asarray([0.0, 1.0]),
+    ...     s_m=np.asarray([12_000.0, 11_930.0]),
+    ...     h_m=np.asarray([3_500.0, 3_498.0]),
+    ...     v_tas_mps=np.asarray([72.0, 71.5]),
+    ...     v_cas_mps=np.asarray([145.0, 144.0]),
+    ...     gs_mps=np.asarray([72.0, 71.0]),
+    ...     h_ref_m=np.asarray([3_500.0, 3_497.0]),
+    ...     v_ref_cas_mps=np.asarray([145.0, 144.0]),
+    ...     mode=("approach", "approach"),
+    ... )
+
+    Nuance
+    -------
+    The arrays are stored exactly as produced by `LongitudinalApproachSimulator.run`;
+    `to_pandas()` is the convenience method for analysis and plotting.
+    """
     t_s: np.ndarray
     s_m: np.ndarray
     h_m: np.ndarray
@@ -35,9 +92,46 @@ class LongitudinalTrajectory:
     mode: tuple[str, ...]
 
     def __len__(self) -> int:
+        """Return the number of recorded samples.
+
+        The trajectory length is defined by the time series length.
+
+        Example
+        -------
+        >>> len(traj)
+        2
+
+        Nuance
+        -------
+        The simulator writes all arrays together, so the returned length should
+        match the length of every other field as well.
+        """
         return int(len(self.t_s))
 
     def to_pandas(self) -> pd.DataFrame:
+        """Convert the trajectory to a tabular representation.
+
+        This is the preferred form for plotting, inspection, and downstream
+        analysis in pandas.
+
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame with columns `t_s`, `s_m`, `h_m`, `v_tas_mps`,
+            `v_cas_mps`, `gs_mps`, `h_ref_m`, `v_ref_cas_mps`, and `mode`.
+
+        Example
+        -------
+        >>> df = traj.to_pandas()
+        >>> list(df.columns)
+        ['t_s', 's_m', 'h_m', 'v_tas_mps', 'v_cas_mps', 'gs_mps',
+         'h_ref_m', 'v_ref_cas_mps', 'mode']
+
+        Nuance
+        -------
+        The `mode` column is explicitly stored as object dtype so the string
+        labels are preserved without implicit numeric coercion.
+        """
         return pd.DataFrame(
             {
                 "t_s": self.t_s,
@@ -54,12 +148,53 @@ class LongitudinalTrajectory:
 
 
 class LongitudinalApproachSimulator:
+    """Integrate the longitudinal approach model with fixed-step RK4.
+
+    The simulator combines a longitudinal control law, the aircraft performance
+    backend, and the scenario definition to produce a time history from an
+    initial state. It precomputes a feasible CAS schedule at construction time
+    and then uses that schedule during stepping and trajectory generation.
+
+    Example
+    -------
+    >>> simulator = LongitudinalApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
+    >>> traj = simulator.run(initial_state, dt_s=1.0, t_max_s=3_000.0)
+
+    Nuance
+    -------
+    The simulator is not a pure integrator: it clamps altitude, speed, and
+    along-track progression to keep the model in physically valid bounds.
+    """
     def __init__(
         self,
         cfg: AircraftConfig,
         perf: PerformanceBackend,
         scenario: LongitudinalScenario,
     ) -> None:
+        """Build a simulator and precompute the feasible CAS schedule.
+
+        Parameters
+        ----------
+        cfg:
+            Aircraft parameters and mode thresholds.
+        perf:
+            Performance backend used for drag and idle-thrust estimates.
+        scenario:
+            Simulation inputs including altitude profile, raw speed schedule,
+            weather, feasibility settings, and track angle.
+
+        Example
+        -------
+        >>> simulator = LongitudinalApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
+        >>> isinstance(simulator.feasible_speed_schedule_cas.value(12_000.0), float)
+        True
+
+        Nuance
+        -------
+        The feasible speed schedule is built once here because it depends on the
+        performance backend and the scenario feasibility settings, not just the
+        aircraft configuration.
+        """
         self.cfg = cfg
         self.perf = perf
         self.scenario = scenario
@@ -75,6 +210,35 @@ class LongitudinalApproachSimulator:
         )
 
     def step(self, state: LongitudinalState, dt_s: float) -> LongitudinalState:
+        """Advance the longitudinal state by one Runge-Kutta step.
+
+        This evaluates `longitudinal_rhs` four times and uses the classic RK4
+        update to produce the next state.
+
+        Parameters
+        ----------
+        state:
+            Current longitudinal state.
+        dt_s:
+            Step size in seconds.
+
+        Returns
+        -------
+        LongitudinalState
+            The updated state, with nonnegative altitude and at least 1 m/s TAS.
+
+        Example
+        -------
+        >>> next_state = simulator.step(state, dt_s=0.0)
+        >>> next_state == state
+        True
+
+        Nuance
+        -------
+        This method integrates only the dynamic state. It does not collect
+        samples or stop at the runway threshold; `run()` handles trajectory
+        recording and termination.
+        """
         y0 = np.asarray([state.s_m, state.h_m, state.v_tas_mps], dtype=float)
 
         def f(y: np.ndarray, t_s: float) -> np.ndarray:
@@ -113,6 +277,43 @@ class LongitudinalApproachSimulator:
         dt_s: float = 1.0,
         t_max_s: float = 4_000.0,
     ) -> LongitudinalTrajectory:
+        """Run the simulation and collect a full trajectory.
+
+        The simulator records the current state before each step, then advances
+        until either the time limit is reached or the along-track distance drops
+        to 1 m or below.
+
+        Parameters
+        ----------
+        initial:
+            Initial longitudinal state.
+        dt_s:
+            Fixed integration step in seconds.
+        t_max_s:
+            Maximum simulated time.
+
+        Returns
+        -------
+        LongitudinalTrajectory
+            The sampled trajectory, including state, ground speed, reference
+            altitude, reference CAS, and mode at each recorded time.
+
+        Example
+        -------
+        >>> traj = simulator.run(initial, dt_s=1.0, t_max_s=0.0)
+        >>> len(traj)
+        1
+        >>> list(traj.to_pandas().columns)
+        ['t_s', 's_m', 'h_m', 'v_tas_mps', 'v_cas_mps', 'gs_mps',
+         'h_ref_m', 'v_ref_cas_mps', 'mode']
+
+        Nuance
+        -------
+        Sampling happens before stepping, so the final state after the last
+        integration step is not appended unless it is reached at the start of a
+        loop iteration. This makes the trajectory a history of commanded
+        states, not a terminal event log.
+        """
         rows: dict[str, list[float] | list[str]] = {
             "t_s": [],
             "s_m": [],

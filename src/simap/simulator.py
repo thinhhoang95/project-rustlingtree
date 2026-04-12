@@ -49,6 +49,46 @@ class State:
         heading_offset_rad: float = 0.0,
         cross_track_m: float = 0.0,
     ) -> "State":
+        """Create an initial state anchored to a reference path location.
+
+        The helper looks up the path position at ``s_m``, shifts the aircraft
+        sideways by ``cross_track_m`` along the path normal, and sets the
+        initial heading to the local path tangent plus any requested heading
+        offset. It is the most convenient way to initialize the simulator when
+        the aircraft starts near the procedure rather than at an arbitrary
+        latitude/longitude.
+
+        Parameters
+        ----------
+        t_s, s_m, h_m, v_tas_mps:
+            Initial time, path coordinate, altitude, and true airspeed.
+        reference_path:
+            The path to anchor against.
+        bank_rad:
+            Initial bank angle. Defaults to wings-level.
+        heading_offset_rad:
+            Offset applied to the local path tangent, in radians.
+        cross_track_m:
+            Lateral displacement from the path, measured along the path normal.
+
+        Returns
+        -------
+        State
+            A state positioned near the reference path.
+
+        Examples
+        --------
+        If the path position at ``s_m=10_000`` is ``(east=2_000, north=3_000)``
+        and the local path normal points due north, then
+        ``cross_track_m=50`` places the aircraft at ``(2_000, 3_050)``.
+        With zero ``heading_offset_rad`` and zero bank, the returned state is
+        aligned with the path tangent and wings level.
+
+        Notes
+        -----
+        The returned coordinates are in the same local north/east frame used by
+        the rest of the simulator, not geodetic latitude/longitude.
+        """
         east_m, north_m = reference_path.position_ne(s_m)
         normal_hat = reference_path.normal_hat(s_m)
         psi_rad = wrap_angle_rad(reference_path.track_angle_rad(s_m) + heading_offset_rad)
@@ -82,9 +122,61 @@ class Trajectory:
     cross_track_m: np.ndarray
 
     def __len__(self) -> int:
+        """Return the number of samples in the trajectory.
+
+        Examples
+        --------
+        A trajectory with 121 time samples reports a length of ``121``.
+
+        >>> len(Trajectory(
+        ...     t_s=np.arange(3.0),
+        ...     s_m=np.arange(3.0),
+        ...     h_m=np.arange(3.0),
+        ...     v_tas_mps=np.arange(3.0),
+        ...     v_cas_mps=np.arange(3.0),
+        ...     gs_mps=np.arange(3.0),
+        ...     h_ref_m=np.arange(3.0),
+        ...     v_ref_cas_mps=np.arange(3.0),
+        ...     mode=("clean", "clean", "approach"),
+        ...     lat_deg=np.arange(3.0),
+        ...     lon_deg=np.arange(3.0),
+        ...     heading_rad=np.arange(3.0),
+        ...     bank_rad=np.arange(3.0),
+        ...     cross_track_m=np.arange(3.0),
+        ... ))
+        3
+
+        Notes
+        -----
+        The length is driven by ``t_s``; all trajectory arrays are expected to
+        have the same shape because they are populated sample-by-sample in
+        lockstep.
+        """
         return int(len(self.t_s))
 
     def to_pandas(self) -> pd.DataFrame:
+        """Convert the trajectory to a tabular ``pandas.DataFrame``.
+
+        This is mainly a convenience for analysis, plotting, and exporting.
+        Each field in the trajectory becomes a column with the same name.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A dataframe with one row per simulation sample.
+
+        Examples
+        --------
+        A 3-sample trajectory becomes a 3-row dataframe with columns such as
+        ``t_s``, ``h_m``, ``mode``, and ``cross_track_m``. For example, the
+        first row might contain ``t_s=0.0``, ``mode='clean'``, and
+        ``cross_track_m=12.5``.
+
+        Notes
+        -----
+        ``mode`` is stored as an object array so that string values survive the
+        conversion cleanly when written to CSV or inspected interactively.
+        """
         return pd.DataFrame(
             {
                 "t_s": self.t_s,
@@ -112,6 +204,56 @@ def coupled_rhs(
     scenario: Scenario,
     feasible_speed_schedule_cas: ScalarProfile,
 ) -> np.ndarray:
+    """Compute the coupled state derivatives for the longitudinal and lateral model.
+
+    This function is the continuous-time right-hand side used by the simulator's
+    integrator. It combines the current state with the lateral guidance law and
+    the longitudinal dynamics to produce derivatives for:
+
+    - path coordinate ``s``
+    - altitude ``h``
+    - true airspeed ``v_tas``
+    - east / north position
+    - heading ``psi``
+    - bank angle ``phi``
+
+    Parameters
+    ----------
+    state:
+        Current simulator state.
+    cfg:
+        Aircraft configuration.
+    perf:
+        Performance backend used by the longitudinal model.
+    scenario:
+        Altitude, speed, weather, and path inputs.
+    feasible_speed_schedule_cas:
+        The clipped CAS schedule actually used by the longitudinal model.
+
+    Returns
+    -------
+    numpy.ndarray
+        A 7-element derivative vector in the same order used by
+        :meth:`ApproachSimulator.step`.
+
+    Examples
+    --------
+    With a level wings-level state and a straight path, the output is a vector
+    of rates such as:
+
+    - ``s_dot``: negative when the aircraft is moving forward along the path
+    - ``h_dot``: climb or descent rate from the longitudinal model
+    - ``psi_dot``: near zero in coordinated straight flight
+    - ``phi_dot``: near zero when the requested bank matches the current bank
+
+    The exact numbers depend on the aircraft performance model and the current
+    altitude / speed schedule.
+
+    Notes
+    -----
+    ``s_dot`` is returned with the simulator's sign convention, where decreasing
+    ``s_m`` means progress toward the end of the path.
+    """
     mode = mode_for_s(cfg, state.s_m)
     command = compute_lateral_command(
         s_m=state.s_m,
@@ -172,6 +314,34 @@ class ApproachSimulator:
         perf: PerformanceBackend,
         scenario: Scenario,
     ) -> None:
+        """Build a simulator for one approach scenario.
+
+        The constructor precomputes the feasible CAS schedule once so repeated
+        calls to :meth:`run` or :meth:`step` can reuse it. That matters because
+        the longitudinal dynamics query both the raw schedule and the feasibility
+        constraints on every integration step.
+
+        Parameters
+        ----------
+        cfg:
+            Aircraft definition.
+        perf:
+            Performance model backend.
+        scenario:
+            The path, weather, altitude profile, and requested speed schedule.
+
+        Examples
+        --------
+        A typical simulator is constructed once and then reused:
+
+        - input: aircraft config, performance backend, scenario
+        - output: a simulator instance with cached feasible speed schedule
+
+        Notes
+        -----
+        This object is stateful only through the cached schedule; the simulation
+        state itself is always carried explicitly in :class:`State`.
+        """
         self.cfg = cfg
         self.perf = perf
         self.scenario = scenario
@@ -188,6 +358,40 @@ class ApproachSimulator:
         )
 
     def step(self, state: State, dt_s: float) -> State:
+        """Advance the simulator state by one Runge-Kutta integration step.
+
+        The method integrates the coupled longitudinal and lateral dynamics
+        over ``dt_s`` using a classical RK4 scheme. It is the low-level
+        primitive used by :meth:`run`.
+
+        Parameters
+        ----------
+        state:
+            State at the beginning of the step.
+        dt_s:
+            Integration step size in seconds.
+
+        Returns
+        -------
+        State
+            The propagated state at ``state.t_s + dt_s``.
+
+        Examples
+        --------
+        If the current state is at ``t_s=12`` and ``dt_s=1``, the returned
+        state has ``t_s=13``. In straight, steady flight the position and bank
+        angle may change only slightly over one second; during a turn the
+        heading and bank angle will evolve more noticeably.
+
+        Notes
+        -----
+        The method clamps a few physically meaningful quantities after
+        integration:
+
+        - ``s_m`` and ``h_m`` are prevented from going below zero
+        - ``v_tas_mps`` is prevented from dropping below ``1 m/s``
+        - ``psi_rad`` is wrapped back to ``[-pi, pi]``
+        """
         y0 = np.asarray(
             [
                 state.s_m,
@@ -202,6 +406,7 @@ class ApproachSimulator:
         )
 
         def f(y: np.ndarray, t_s: float) -> np.ndarray:
+            """Evaluate the derivative at a temporary RK4 sub-step state."""
             step_state = State(
                 t_s=t_s,
                 s_m=float(y[0]),
@@ -243,6 +448,45 @@ class ApproachSimulator:
         dt_s: float = 1.0,
         t_max_s: float = 4_000.0,
     ) -> Trajectory:
+        """Run a full simulation until the path is nearly complete or time expires.
+
+        The simulator repeatedly records the current state, then advances it
+        with :meth:`step` until either:
+
+        - the elapsed time reaches ``t_max_s``, or
+        - ``s_m`` drops to ``1.0`` or below, which means the aircraft has
+          effectively reached the end of the reference path.
+
+        Parameters
+        ----------
+        initial:
+            Initial simulator state.
+        dt_s:
+            Integration step size in seconds.
+        t_max_s:
+            Hard time limit for the simulation.
+
+        Returns
+        -------
+        Trajectory
+            The recorded simulation history.
+
+        Examples
+        --------
+        Starting from a state placed on the reference path, ``run`` returns a
+        trajectory whose first row matches the initial state and whose last row
+        is the final simulated state before termination. Typical output fields
+        include:
+
+        - ``t_s``: monotonically increasing sample times
+        - ``s_m``: decreasing path coordinate toward the runway threshold
+        - ``cross_track_m``: lateral deviation from the centerline
+
+        Notes
+        -----
+        The method records the state before advancing each step, so the initial
+        state is always included in the returned trajectory.
+        """
         rows: dict[str, list[float] | list[str]] = {
             "t_s": [],
             "s_m": [],
