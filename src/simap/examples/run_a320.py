@@ -16,6 +16,8 @@ from simap import (
     extract_aircraft_data,
     load_openap,
     suggest_approach_mass_kg,
+    plot_trajectory_map_scrubber,
+    plot_all_state_responses
 )
 from simap.backends import EffectivePolarBackend
 
@@ -64,5 +66,15 @@ def main() -> None:
     )
     trajectory = simulator.run(initial, dt_s=1.0)
     df = trajectory.to_pandas()
+
+    # Plot the state trajectory
+    fig, ax, slider, marker = plot_trajectory_map_scrubber(trajectory, reference_path=reference_path,
+                                        show_reference_turning_points=True, show=True)
+
+    fig, ax = plot_all_state_responses(trajectory)
+
     print(df.head())
     print(df.tail())
+
+if __name__ == "__main__":
+    main()

@@ -13,3 +13,4 @@ notebook
 tqdm
 python-dotenv
 rich
+cartopy

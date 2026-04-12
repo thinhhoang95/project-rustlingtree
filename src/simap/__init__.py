@@ -34,6 +34,7 @@ from .simap_plot import (
     plot_psi_response,
     plot_s_response,
     plot_state_overview,
+    plot_trajectory_map_scrubber,
 )
 from .simulator import ApproachSimulator, Scenario, State, Trajectory
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
@@ -79,6 +80,7 @@ __all__ = [
     "plot_psi_response",
     "plot_s_response",
     "plot_state_overview",
+    "plot_trajectory_map_scrubber",
     "suggest_approach_mass_kg",
     "wrap_default",
     "wrap_sample",

@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.widgets import Slider
+
+from .path_geometry import ReferencePath
 
 
 def _series(trajectory: Any, field: str) -> np.ndarray:
@@ -20,6 +24,15 @@ def _series(trajectory: Any, field: str) -> np.ndarray:
 def _match_time_and_values(t_s: np.ndarray, values: np.ndarray, label: str) -> None:
     if len(t_s) != len(values):
         raise ValueError(f"time series and {label} must have the same length")
+
+
+def _require_cartopy() -> tuple[Any, Any]:
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+    except ImportError as exc:  # pragma: no cover - exercised only when cartopy is absent
+        raise ImportError("plot_trajectory_map_scrubber requires cartopy to be installed") from exc
+    return ccrs, cfeature
 
 
 def _plot(
@@ -186,6 +199,143 @@ def plot_all_state_responses(
     )
 
 
+def plot_trajectory_map_scrubber(
+    trajectory: Any,
+    *,
+    reference_path: ReferencePath | None = None,
+    show_reference_turning_points: bool = True,
+    figsize: tuple[float, float] = (11.0, 8.0),
+    initial_time_s: float | None = None,
+    show: bool = True,
+    add_features: bool = True,
+    title: str = "Trajectory map scrubber",
+) -> tuple[Figure, Axes, Slider, Line2D]:
+    """Plot a cartopy map with a time scrubber and a movable aircraft marker.
+
+    The map, trajectory polyline, and any optional geographic features are
+    rendered once. The slider callback only updates the marker position and the
+    time annotation so the map itself is not redrawn.
+    """
+    t_s = _series(trajectory, "t_s")
+    lat_deg = _series(trajectory, "lat_deg")
+    lon_deg = _series(trajectory, "lon_deg")
+    _match_time_and_values(t_s, lat_deg, "lat_deg")
+    _match_time_and_values(t_s, lon_deg, "lon_deg")
+
+    ccrs, cfeature = _require_cartopy()
+    plate = ccrs.PlateCarree()
+
+    fig = plt.figure(figsize=figsize)
+    map_ax = fig.add_axes([0.05, 0.18, 0.9, 0.76], projection=plate)
+    slider_ax = fig.add_axes([0.12, 0.07, 0.76, 0.04])
+
+    lat_samples = [lat_deg]
+    lon_samples = [lon_deg]
+    if reference_path is not None:
+        lat_samples.append(np.asarray(reference_path.lat_deg, dtype=float))
+        lon_samples.append(np.asarray(reference_path.lon_deg, dtype=float))
+
+    lat_all = np.concatenate(lat_samples)
+    lon_all = np.concatenate(lon_samples)
+    lat_min = float(np.min(lat_all))
+    lat_max = float(np.max(lat_all))
+    lon_min = float(np.min(lon_all))
+    lon_max = float(np.max(lon_all))
+    lat_pad = max(0.01, 0.08 * max(1e-9, lat_max - lat_min))
+    lon_pad = max(0.01, 0.08 * max(1e-9, lon_max - lon_min))
+
+    map_ax.set_title(title)
+    map_ax.set_extent(
+        [lon_min - lon_pad, lon_max + lon_pad, lat_min - lat_pad, lat_max + lat_pad],
+        crs=plate,
+    )
+    map_ax.gridlines(draw_labels=True, linewidth=0.4, alpha=0.35, linestyle=":")
+    map_ax.plot(
+        lon_deg,
+        lat_deg,
+        transform=plate,
+        color="#6c757d",
+        linewidth=1.6,
+        alpha=0.9,
+        zorder=2,
+    )
+    if reference_path is not None:
+        map_ax.plot(
+            reference_path.lon_deg,
+            reference_path.lat_deg,
+            transform=plate,
+            color="#212529",
+            linewidth=1.4,
+            linestyle="--",
+            alpha=0.9,
+            zorder=2,
+        )
+        if show_reference_turning_points:
+            map_ax.scatter(
+                reference_path.waypoint_lon_deg,
+                reference_path.waypoint_lat_deg,
+                transform=plate,
+                s=26.0,
+                color="#f28e2b",
+                edgecolors="none",
+                zorder=4,
+            )
+
+    if add_features:
+        try:
+            map_ax.add_feature(cfeature.LAND, facecolor="#f1efe7", zorder=0)
+            map_ax.add_feature(cfeature.OCEAN, facecolor="#dceaf7", zorder=0)
+            map_ax.add_feature(cfeature.COASTLINE, linewidth=0.7, zorder=1)
+            map_ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.6, zorder=1)
+        except Exception:
+            # Natural Earth data may not be cached in all environments.
+            pass
+
+    start_index = 0 if initial_time_s is None else int(np.argmin(np.abs(t_s - float(initial_time_s))))
+    start_index = int(np.clip(start_index, 0, len(t_s) - 1))
+    marker, = map_ax.plot(
+        [lon_deg[start_index]],
+        [lat_deg[start_index]],
+        marker="o",
+        markersize=9,
+        color="#d62728",
+        linestyle="None",
+        transform=plate,
+        zorder=3,
+    )
+    time_label = map_ax.text(
+        0.02,
+        0.98,
+        f"t = {t_s[start_index]:.1f} s",
+        transform=map_ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.8, "edgecolor": "#cccccc"},
+    )
+
+    time_slider = Slider(
+        ax=slider_ax,
+        label="Time [s]",
+        valmin=float(t_s[0]),
+        valmax=float(t_s[-1]),
+        valinit=float(t_s[start_index]),
+    )
+
+    def _update_time(val: float) -> None:
+        idx = int(np.argmin(np.abs(t_s - float(val))))
+        marker.set_data([lon_deg[idx]], [lat_deg[idx]])
+        time_label.set_text(f"t = {t_s[idx]:.1f} s")
+        fig.canvas.draw_idle()
+
+    time_slider.on_changed(_update_time)
+    _update_time(float(t_s[start_index]))
+
+    if show:
+        plt.show()
+    return fig, map_ax, time_slider, marker
+
+
 __all__ = [
     "plot_all_state_responses",
     "plot_altitude_response",
@@ -195,4 +345,5 @@ __all__ = [
     "plot_psi_response",
     "plot_s_response",
     "plot_state_overview",
+    "plot_trajectory_map_scrubber",
 ]
