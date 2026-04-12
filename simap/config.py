@@ -52,6 +52,19 @@ def mode_for_s(cfg: AircraftConfig, s_m: float) -> ModeConfig:
     return cfg.clean
 
 
+def clamp_cas_to_mode_limits(mode: ModeConfig, v_cas_mps: float) -> float:
+    clipped = float(v_cas_mps)
+    if mode.cas_min_mps is not None:
+        clipped = max(clipped, mode.cas_min_mps)
+    if mode.cas_max_mps is not None:
+        clipped = min(clipped, mode.cas_max_mps)
+    return clipped
+
+
+def clamp_cas_for_s(cfg: AircraftConfig, s_m: float, v_cas_mps: float) -> float:
+    return clamp_cas_to_mode_limits(mode_for_s(cfg, s_m), v_cas_mps)
+
+
 def bank_limit_stall_rad(cfg: AircraftConfig, mode: ModeConfig, v_cas_mps: float) -> float:
     if v_cas_mps <= 0.0:
         return 0.0

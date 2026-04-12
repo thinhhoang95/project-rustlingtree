@@ -6,7 +6,7 @@ import numpy as np
 from openap import aero
 
 from .backends import PerformanceBackend
-from .config import AircraftConfig, mode_for_s
+from .config import AircraftConfig, clamp_cas_to_mode_limits, mode_for_s
 from .longitudinal_profiles import ScalarProfile, path_angle_rad
 from .weather import WeatherProvider, alongtrack_wind_mps
 
@@ -50,7 +50,7 @@ def longitudinal_rhs(
     hdot_cmd = hdot_ff + cfg.k_h_sinv * (h_ref_m - h_m)
     hdot_cmd = float(np.clip(hdot_cmd, mode.vs_min_mps, mode.vs_max_mps))
 
-    v_ref_cas_mps = speed_schedule_cas.value(s_m)
+    v_ref_cas_mps = clamp_cas_to_mode_limits(mode, speed_schedule_cas.value(s_m))
     v_ref_tas_mps = float(aero.cas2tas(v_ref_cas_mps, h_m, dT=delta_isa_K))
     vdot_cmd = (v_ref_tas_mps - v_tas_mps) / mode.tau_v_s
 

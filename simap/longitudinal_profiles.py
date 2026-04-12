@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from openap import aero
 
-from .config import AircraftConfig, mode_for_s
+from .config import AircraftConfig, clamp_cas_for_s, mode_for_s
 from .openap_adapter import wrap_default
 from .units import km_to_m
 
@@ -110,7 +110,7 @@ def build_feasible_cas_schedule(
     feasible_tas = np.empty_like(s_grid)
     feasible_cas = np.empty_like(s_grid)
 
-    initial_cas = raw_speed_schedule_cas.value(0.0)
+    initial_cas = clamp_cas_for_s(cfg, 0.0, raw_speed_schedule_cas.value(0.0))
     feasible_tas[0] = float(aero.cas2tas(initial_cas, altitudes[0], dT=feasibility.planning_delta_isa_K))
     feasible_cas[0] = initial_cas
 
@@ -118,7 +118,7 @@ def build_feasible_cas_schedule(
         s_upstream = float(s_grid[index])
         ds_m = float(s_grid[index] - s_grid[index - 1])
         h_m = float(altitudes[index])
-        raw_cas = raw_speed_schedule_cas.value(s_upstream)
+        raw_cas = clamp_cas_for_s(cfg, s_upstream, raw_speed_schedule_cas.value(s_upstream))
         raw_tas = float(aero.cas2tas(raw_cas, h_m, dT=feasibility.planning_delta_isa_K))
         mode = mode_for_s(cfg, s_upstream)
         gamma_rad = path_angle_rad(altitude_profile, s_upstream)
@@ -145,8 +145,13 @@ def build_feasible_cas_schedule(
         )
         feasible_upstream_tas = downstream_tas + a_dec_max * ds_m / gs_plan
         feasible_tas[index] = min(raw_tas, feasible_upstream_tas)
-        feasible_cas[index] = float(
-            aero.tas2cas(feasible_tas[index], h_m, dT=feasibility.planning_delta_isa_K)
+        feasible_cas[index] = clamp_cas_for_s(
+            cfg,
+            s_upstream,
+            float(aero.tas2cas(feasible_tas[index], h_m, dT=feasibility.planning_delta_isa_K)),
+        )
+        feasible_tas[index] = float(
+            aero.cas2tas(feasible_cas[index], h_m, dT=feasibility.planning_delta_isa_K)
         )
 
     return ScalarProfile(s_m=s_grid, y=feasible_cas)

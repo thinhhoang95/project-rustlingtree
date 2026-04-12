@@ -7,6 +7,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from openap import aero
 
+from simap.calibration import build_default_aircraft_config
+from simap.openap_adapter import extract_aircraft_data, load_openap
 from tests.helpers import a320_fixture
 
 
@@ -66,6 +68,17 @@ class CalibrationTests(unittest.TestCase):
 
         self.assertLess(abs(approach_drag - approach_ref) / approach_ref, 0.15)
         self.assertLess(abs(final_drag - final_ref) / final_ref, 0.15)
+
+    def test_extract_aircraft_data_uses_selected_engine(self) -> None:
+        openap = load_openap("A320", engine_name="V2527-A5")
+        aircraft_data = extract_aircraft_data(openap)
+
+        self.assertEqual(aircraft_data.engine_name, "V2527-A5")
+
+    def test_build_default_aircraft_config_keeps_selected_engine_metadata(self) -> None:
+        cfg, _ = build_default_aircraft_config("A320", mass_kg=65_000.0, engine_name="V2527-A5")
+
+        self.assertEqual(cfg.engine_name, "V2527-A5")
 
 
 if __name__ == "__main__":

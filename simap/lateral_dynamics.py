@@ -73,7 +73,7 @@ def compute_lateral_command(
         - (guidance.track_error_gain * track_error_rad) / lookahead_m
     )
     curvature_cmd_inv_m = ref_curvature_inv_m + curvature_feedback
-    phi_req_rad = float(np.arctan(v_tas_mps**2 * curvature_cmd_inv_m / aero.g0))
+    phi_req_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / aero.g0))
     delta_isa_K = weather.delta_isa_K(s_m, h_m, t_s)
     v_cas_mps = float(aero.tas2cas(v_tas_mps, h_m, dT=delta_isa_K))
     phi_max_rad = bank_limit_rad(cfg, mode, v_cas_mps)

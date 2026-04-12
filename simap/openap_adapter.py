@@ -52,7 +52,7 @@ def extract_aircraft_data(openap: OpenAPObjects) -> OpenAPAircraftData:
     aircraft = openap.aircraft
     return OpenAPAircraftData(
         typecode=str(aircraft["aircraft"]),
-        engine_name=str(aircraft["engine"]["default"]),
+        engine_name=str(openap.engine["name"]),
         wing_area_m2=float(aircraft["wing"]["area"]),
         clean_cd0=float(aircraft["drag"]["cd0"]),
         clean_k=float(aircraft["drag"]["k"]),

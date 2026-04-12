@@ -54,7 +54,7 @@ class SimulatorTests(unittest.TestCase):
             ),
         )
 
-        s_probe_m = 30_000.0
+        s_probe_m = 12_000.0
         self.assertLess(
             tailwind_sim.feasible_speed_schedule_cas.value(s_probe_m),
             headwind_sim.feasible_speed_schedule_cas.value(s_probe_m),

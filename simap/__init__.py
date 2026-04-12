@@ -25,6 +25,16 @@ from .openap_adapter import (
     wrap_sample,
 )
 from .path_geometry import ReferencePath
+from .simap_plot import (
+    plot_all_state_responses,
+    plot_altitude_response,
+    plot_lat_response,
+    plot_lon_response,
+    plot_phi_response,
+    plot_psi_response,
+    plot_s_response,
+    plot_state_overview,
+)
 from .simulator import ApproachSimulator, Scenario, State, Trajectory
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
@@ -61,6 +71,14 @@ __all__ = [
     "longitudinal_rhs",
     "mode_for_s",
     "path_angle_rad",
+    "plot_all_state_responses",
+    "plot_altitude_response",
+    "plot_lat_response",
+    "plot_lon_response",
+    "plot_phi_response",
+    "plot_psi_response",
+    "plot_s_response",
+    "plot_state_overview",
     "suggest_approach_mass_kg",
     "wrap_default",
     "wrap_sample",
