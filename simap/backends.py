@@ -20,6 +20,7 @@ class PerformanceBackend(Protocol):
         v_tas_mps: float,
         h_m: float,
         vs_mps: float,
+        bank_rad: float = 0.0,
         delta_isa_K: float = 0.0,
     ) -> float: ...
 
@@ -44,13 +45,16 @@ class EffectivePolarBackend:
         v_tas_mps: float,
         h_m: float,
         vs_mps: float,
+        bank_rad: float = 0.0,
         delta_isa_K: float = 0.0,
     ) -> float:
         v_tas_mps = max(1.0, float(v_tas_mps))
         _, rho, _ = aero.atmos(h_m, dT=delta_isa_K)
         dynamic_pressure = 0.5 * float(rho) * v_tas_mps**2
         sin_gamma = float(np.clip(vs_mps / v_tas_mps, -0.95, 0.95))
-        lift_newtons = mass_kg * aero.g0 * float(np.cos(np.arcsin(sin_gamma)))
+        cos_bank = float(np.clip(np.cos(bank_rad), 0.1, 1.0))
+        load_factor = 1.0 / cos_bank
+        lift_newtons = mass_kg * aero.g0 * float(np.cos(np.arcsin(sin_gamma))) * load_factor
         cl = lift_newtons / max(dynamic_pressure * wing_area_m2, 1e-6)
         cd = mode.cd0 + mode.k * cl**2
         return dynamic_pressure * wing_area_m2 * cd

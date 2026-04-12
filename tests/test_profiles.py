@@ -7,13 +7,13 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.profiles import ScalarProfile, build_simple_glidepath
+from simap.longitudinal_profiles import ScalarProfile, build_simple_glidepath
 
 
 class ScalarProfileTests(unittest.TestCase):
     def test_value_and_slope_interpolate_between_nodes(self) -> None:
         profile = ScalarProfile(
-            x_m=np.asarray([0.0, 10.0, 20.0], dtype=float),
+            s_m=np.asarray([0.0, 10.0, 20.0], dtype=float),
             y=np.asarray([0.0, 10.0, 30.0], dtype=float),
         )
         self.assertAlmostEqual(profile.value(5.0), 5.0)

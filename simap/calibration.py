@@ -16,6 +16,10 @@ from .openap_adapter import (
 from .units import fpm_to_mps, ft_to_m, mps_to_kts
 
 
+def _default_vs_1g_ref_cas_mps(*, target_cas_mps: float, factor: float) -> float:
+    return max(1.0, target_cas_mps / factor)
+
+
 @dataclass(frozen=True)
 class PolarFitResult:
     cd0: float
@@ -147,6 +151,14 @@ def build_default_aircraft_config(
         vs_max_mps=3.0,
         cd0=aircraft_data.clean_cd0,
         k=aircraft_data.clean_k,
+        phi_comfort_max_rad=np.deg2rad(25.0),
+        phi_procedure_max_rad=np.deg2rad(25.0),
+        tau_phi_s=2.0,
+        p_max_rps=np.deg2rad(6.0),
+        vs_1g_ref_cas_mps=_default_vs_1g_ref_cas_mps(
+            target_cas_mps=wrap_default(wrap, "descent_const_vcas"),
+            factor=1.8,
+        ),
         cas_max_mps=aircraft_data.vmo_kts * aero.kts,
     )
     approach = ModeConfig(
@@ -156,6 +168,14 @@ def build_default_aircraft_config(
         vs_max_mps=2.0,
         cd0=approach_fit.cd0,
         k=approach_fit.k,
+        phi_comfort_max_rad=np.deg2rad(22.0),
+        phi_procedure_max_rad=np.deg2rad(20.0),
+        tau_phi_s=2.5,
+        p_max_rps=np.deg2rad(5.0),
+        vs_1g_ref_cas_mps=_default_vs_1g_ref_cas_mps(
+            target_cas_mps=wrap_default(wrap, "finalapp_vcas"),
+            factor=1.3,
+        ),
         cas_min_mps=wrap_default(wrap, "finalapp_vcas"),
         cas_max_mps=wrap_default(wrap, "descent_const_vcas"),
     )
@@ -166,6 +186,14 @@ def build_default_aircraft_config(
         vs_max_mps=1.0,
         cd0=final_fit.cd0,
         k=final_fit.k,
+        phi_comfort_max_rad=np.deg2rad(18.0),
+        phi_procedure_max_rad=np.deg2rad(15.0),
+        tau_phi_s=3.0,
+        p_max_rps=np.deg2rad(4.0),
+        vs_1g_ref_cas_mps=_default_vs_1g_ref_cas_mps(
+            target_cas_mps=wrap_default(wrap, "landing_speed"),
+            factor=1.23,
+        ),
         cas_min_mps=wrap_default(wrap, "landing_speed"),
         cas_max_mps=wrap_default(wrap, "finalapp_vcas"),
     )
@@ -174,6 +202,7 @@ def build_default_aircraft_config(
         typecode=typecode,
         engine_name=aircraft_data.engine_name,
         mass_kg=mass_kg,
+        reference_mass_kg=aircraft_data.mlw_kg,
         wing_area_m2=aircraft_data.wing_area_m2,
         vmo_kts=aircraft_data.vmo_kts,
         mmo=aircraft_data.mmo,

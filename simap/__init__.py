@@ -1,7 +1,21 @@
 from .backends import EffectivePolarBackend, PerformanceBackend
 from .calibration import build_default_aircraft_config, suggest_approach_mass_kg
-from .config import AircraftConfig, ModeConfig, ModeName, mode_for_x
-from .dynamics import State
+from .config import AircraftConfig, ModeConfig, ModeName, bank_limit_rad, mode_for_s
+from .lateral_dynamics import LateralGuidanceConfig
+from .longitudinal_dynamics import LongitudinalState, longitudinal_rhs
+from .longitudinal_profiles import (
+    FeasibilityConfig,
+    ScalarProfile,
+    build_feasible_cas_schedule,
+    build_simple_glidepath,
+    build_speed_schedule_from_wrap,
+    path_angle_rad,
+)
+from .longitudinal_simulator import (
+    LongitudinalApproachSimulator,
+    LongitudinalScenario,
+    LongitudinalTrajectory,
+)
 from .openap_adapter import (
     OpenAPAircraftData,
     OpenAPObjects,
@@ -10,42 +24,42 @@ from .openap_adapter import (
     wrap_default,
     wrap_sample,
 )
-from .profiles import (
-    Centerline,
-    FeasibilityConfig,
-    ScalarProfile,
-    build_feasible_cas_schedule,
-    build_simple_glidepath,
-    build_speed_schedule_from_wrap,
-    path_angle_rad,
-)
-from .simulator import ApproachSimulator, Scenario, Trajectory
-from .weather import ConstantWeather, WeatherProvider
+from .path_geometry import ReferencePath
+from .simulator import ApproachSimulator, Scenario, State, Trajectory
+from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 __all__ = [
     "AircraftConfig",
     "ApproachSimulator",
-    "Centerline",
     "ConstantWeather",
     "EffectivePolarBackend",
     "FeasibilityConfig",
+    "LateralGuidanceConfig",
+    "LongitudinalApproachSimulator",
+    "LongitudinalScenario",
+    "LongitudinalState",
+    "LongitudinalTrajectory",
     "ModeConfig",
     "ModeName",
     "OpenAPAircraftData",
     "OpenAPObjects",
     "PerformanceBackend",
+    "ReferencePath",
     "ScalarProfile",
     "Scenario",
     "State",
     "Trajectory",
     "WeatherProvider",
+    "alongtrack_wind_mps",
+    "bank_limit_rad",
     "build_default_aircraft_config",
     "build_feasible_cas_schedule",
     "build_simple_glidepath",
     "build_speed_schedule_from_wrap",
     "extract_aircraft_data",
     "load_openap",
-    "mode_for_x",
+    "longitudinal_rhs",
+    "mode_for_s",
     "path_angle_rad",
     "suggest_approach_mass_kg",
     "wrap_default",
