@@ -93,9 +93,15 @@ class SimapPlotTests(unittest.TestCase):
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
         )
+        reference_path = ReferencePath.from_geographic(
+            lat_deg=np.asarray([48.52, 48.42, 48.34], dtype=float),
+            lon_deg=np.asarray([11.20, 11.48, 11.80], dtype=float),
+        )
 
-        fig, axes = plot_all_state_responses(trajectory, show=False)
-        self.assertEqual(axes.shape, (3, 2))
+        fig, axes = plot_all_state_responses(trajectory, reference_path=reference_path, show=False)
+        self.assertEqual(axes.shape, (4, 2))
+        self.assertEqual(axes[3, 0].name, "cartopy.geoaxes")
+        self.assertIs(axes[3, 0], axes[3, 1])
         plt.close(fig)
 
     def test_plot_trajectory_map_scrubber_moves_marker(self) -> None:
@@ -112,22 +118,24 @@ class SimapPlotTests(unittest.TestCase):
             bank_rad=np.linspace(-0.05, 0.05, n),
         )
 
-        fig, ax, slider, marker = plot_trajectory_map_scrubber(
+        fig, ax, slider, aircraft = plot_trajectory_map_scrubber(
             trajectory,
             show=False,
             add_features=False,
         )
 
         self.assertEqual(ax.name, "cartopy.geoaxes")
-        initial_x = float(marker.get_xdata()[0])
-        initial_y = float(marker.get_ydata()[0])
+        initial_offsets = aircraft.get_offsets().copy()
+        initial_u = float(aircraft.U[0])
+        initial_v = float(aircraft.V[0])
         slider.set_val(float(t_s[-1]))
-        updated_x = float(marker.get_xdata()[0])
-        updated_y = float(marker.get_ydata()[0])
+        updated_offsets = aircraft.get_offsets().copy()
 
-        self.assertNotEqual((initial_x, initial_y), (updated_x, updated_y))
-        self.assertAlmostEqual(updated_x, float(trajectory.lon_deg[-1]), places=6)
-        self.assertAlmostEqual(updated_y, float(trajectory.lat_deg[-1]), places=6)
+        self.assertNotEqual(tuple(initial_offsets[0]), tuple(updated_offsets[0]))
+        self.assertAlmostEqual(float(updated_offsets[0][0]), float(trajectory.lon_deg[-1]), places=6)
+        self.assertAlmostEqual(float(updated_offsets[0][1]), float(trajectory.lat_deg[-1]), places=6)
+        self.assertNotEqual(initial_u, float(aircraft.U[0]))
+        self.assertNotEqual(initial_v, float(aircraft.V[0]))
 
         plt.close(fig)
 
@@ -149,12 +157,18 @@ class SimapPlotTests(unittest.TestCase):
             lon_deg=np.asarray([11.02, 11.40, 11.78], dtype=float),
         )
 
-        fig, ax, slider, marker = plot_trajectory_map_scrubber(
+        fig, ax, slider, aircraft = plot_trajectory_map_scrubber(
             trajectory,
             reference_path=reference_path,
             show=False,
             add_features=False,
         )
+
+        reference_points = [line for line in ax.lines if line.get_marker() == "o"]
+        self.assertEqual(len(reference_points), 1)
+        initial_ref_lat, initial_ref_lon = reference_path.latlon(float(trajectory.s_m[0]))
+        self.assertAlmostEqual(float(reference_points[0].get_xdata()[0]), initial_ref_lon, places=6)
+        self.assertAlmostEqual(float(reference_points[0].get_ydata()[0]), initial_ref_lat, places=6)
 
         dashed_lines = [line for line in ax.lines if line.get_linestyle() == "--"]
         self.assertEqual(len(dashed_lines), 1)
@@ -162,8 +176,12 @@ class SimapPlotTests(unittest.TestCase):
         self.assertAlmostEqual(float(dashed_lines[0].get_ydata()[0]), float(reference_path.lat_deg[0]), places=6)
 
         slider.set_val(float(t_s[-1]))
-        self.assertAlmostEqual(float(marker.get_xdata()[0]), float(trajectory.lon_deg[-1]), places=6)
-        self.assertAlmostEqual(float(marker.get_ydata()[0]), float(trajectory.lat_deg[-1]), places=6)
+        offsets = aircraft.get_offsets()
+        self.assertAlmostEqual(float(offsets[0][0]), float(trajectory.lon_deg[-1]), places=6)
+        self.assertAlmostEqual(float(offsets[0][1]), float(trajectory.lat_deg[-1]), places=6)
+        final_ref_lat, final_ref_lon = reference_path.latlon(float(trajectory.s_m[-1]))
+        self.assertAlmostEqual(float(reference_points[0].get_xdata()[0]), final_ref_lon, places=6)
+        self.assertAlmostEqual(float(reference_points[0].get_ydata()[0]), final_ref_lat, places=6)
 
         plt.close(fig)
 
@@ -192,7 +210,12 @@ class SimapPlotTests(unittest.TestCase):
             show=False,
             add_features=False,
         )
-        self.assertEqual(len(ax.collections), 0)
+        waypoint_collections = [
+            collection
+            for collection in ax.collections
+            if len(collection.get_offsets()) == len(reference_path.waypoint_lat_deg)
+        ]
+        self.assertEqual(len(waypoint_collections), 0)
         plt.close(fig)
 
         fig, ax, _, _ = plot_trajectory_map_scrubber(
@@ -202,8 +225,13 @@ class SimapPlotTests(unittest.TestCase):
             show=False,
             add_features=False,
         )
-        self.assertEqual(len(ax.collections), 1)
-        offsets = ax.collections[0].get_offsets()
+        waypoint_collections = [
+            collection
+            for collection in ax.collections
+            if len(collection.get_offsets()) == len(reference_path.waypoint_lat_deg)
+        ]
+        self.assertEqual(len(waypoint_collections), 1)
+        offsets = waypoint_collections[0].get_offsets()
         self.assertEqual(len(offsets), len(reference_path.waypoint_lat_deg))
         plt.close(fig)
 

@@ -67,10 +67,11 @@ def main() -> None:
     trajectory = simulator.run(initial, dt_s=1.0)
     df = trajectory.to_pandas()
 
-    # Plot the state trajectory
+    # Plot the 2D flight path
     fig, ax, slider, marker = plot_trajectory_map_scrubber(trajectory, reference_path=reference_path,
                                         show_reference_turning_points=True, show=True)
 
+    # Plot the state trajectory
     fig, ax = plot_all_state_responses(trajectory)
 
     print(df.head())

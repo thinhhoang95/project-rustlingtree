@@ -258,6 +258,7 @@ class LongitudinalApproachSimulator:
                 track_angle_rad=self.scenario.reference_track_rad,
             )
 
+        # 4th order Runge-Kutta step
         k1 = f(y0, state.t_s)
         k2 = f(y0 + 0.5 * dt_s * k1, state.t_s + 0.5 * dt_s)
         k3 = f(y0 + 0.5 * dt_s * k2, state.t_s + 0.5 * dt_s)
