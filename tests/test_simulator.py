@@ -122,6 +122,8 @@ class SimulatorTests(unittest.TestCase):
         self.assertTrue((trajectory.s_m[1:] <= trajectory.s_m[:-1]).all())
         self.assertTrue((trajectory.h_m >= 0.0).all())
         self.assertTrue((trajectory.v_tas_mps > 0.0).all())
+        self.assertEqual(len(trajectory.vdot_cmd_mps2), len(trajectory))
+        self.assertEqual(len(trajectory.vdot_mps2), len(trajectory))
         self.assertIn("final", set(trajectory.mode))
         self.assertEqual(
             list(df.columns),
@@ -134,6 +136,8 @@ class SimulatorTests(unittest.TestCase):
                 "gs_mps",
                 "h_ref_m",
                 "v_ref_cas_mps",
+                "vdot_cmd_mps2",
+                "vdot_mps2",
                 "mode",
             ],
         )

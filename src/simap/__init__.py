@@ -9,6 +9,7 @@ from .longitudinal_profiles import (
     build_feasible_cas_schedule,
     build_simple_glidepath,
     build_speed_schedule_from_wrap,
+    longitudinal_deceleration_limit_mps2,
     path_angle_rad,
 )
 from .longitudinal_simulator import (
@@ -70,6 +71,7 @@ __all__ = [
     "extract_aircraft_data",
     "load_openap",
     "longitudinal_rhs",
+    "longitudinal_deceleration_limit_mps2",
     "mode_for_s",
     "path_angle_rad",
     "plot_all_state_responses",

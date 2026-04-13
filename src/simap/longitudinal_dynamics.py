@@ -7,7 +7,7 @@ from openap import aero
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, clamp_cas_to_mode_limits, mode_for_s
-from .longitudinal_profiles import ScalarProfile, path_angle_rad
+from .longitudinal_profiles import ScalarProfile, longitudinal_deceleration_limit_mps2, path_angle_rad
 from .weather import WeatherProvider, alongtrack_wind_mps
 
 
@@ -17,6 +17,67 @@ class LongitudinalState:
     s_m: float
     h_m: float
     v_tas_mps: float
+
+
+@dataclass(frozen=True)
+class LongitudinalCommand:
+    s_dot_mps: float
+    hdot_cmd_mps: float
+    vdot_cmd_mps2: float
+    vdot_mps2: float
+
+
+def longitudinal_command(
+    state: LongitudinalState,
+    cfg: AircraftConfig,
+    perf: PerformanceBackend,
+    altitude_profile: ScalarProfile,
+    speed_schedule_cas: ScalarProfile,
+    weather: WeatherProvider,
+    *,
+    track_angle_rad: float = 0.0,
+    bank_rad: float = 0.0,
+    s_dot_mps: float | None = None,
+) -> LongitudinalCommand:
+    s_m = state.s_m
+    h_m = state.h_m
+    v_tas_mps = max(1.0, state.v_tas_mps)
+    mode = mode_for_s(cfg, s_m)
+
+    delta_isa_K = weather.delta_isa_K(s_m, h_m, state.t_s)
+    if s_dot_mps is None:
+        wind_mps = alongtrack_wind_mps(weather, track_angle_rad, s_m, h_m, state.t_s)
+        gs_along_mps = max(1.0, v_tas_mps + wind_mps)
+        s_dot_mps = -gs_along_mps
+
+    h_ref_m = altitude_profile.value(s_m)
+    gamma_ref_rad = path_angle_rad(altitude_profile, s_m)
+    hdot_ff = altitude_profile.slope(s_m) * s_dot_mps
+    hdot_cmd = hdot_ff + cfg.k_h_sinv * (h_ref_m - h_m)
+    hdot_cmd = float(np.clip(hdot_cmd, mode.vs_min_mps, mode.vs_max_mps))
+
+    v_ref_cas_mps = clamp_cas_to_mode_limits(mode, speed_schedule_cas.value(s_m))
+    v_ref_tas_mps = float(aero.cas2tas(v_ref_cas_mps, h_m, dT=delta_isa_K))
+    vdot_cmd = float((v_ref_tas_mps - v_tas_mps) / mode.tau_v_s)
+
+    a_dec_max = longitudinal_deceleration_limit_mps2(
+        mode=mode,
+        cfg=cfg,
+        perf=perf,
+        v_tas_mps=v_tas_mps,
+        h_m=h_m,
+        vs_mps=hdot_cmd,
+        bank_rad=bank_rad,
+        delta_isa_K=delta_isa_K,
+        gamma_ref_rad=gamma_ref_rad,
+    )
+    vdot = float(np.clip(vdot_cmd, -a_dec_max, cfg.a_acc_max_mps2))
+    return LongitudinalCommand(
+        s_dot_mps=float(s_dot_mps),
+        hdot_cmd_mps=hdot_cmd,
+        vdot_cmd_mps2=vdot_cmd,
+        vdot_mps2=vdot,
+    )
 
 
 def longitudinal_rhs(
@@ -111,45 +172,15 @@ def longitudinal_rhs(
       thrust and subtracts the longitudinal gravity component for the reference
       path angle.
     """
-    s_m = state.s_m
-    h_m = state.h_m
-    v_tas_mps = max(1.0, state.v_tas_mps)
-    mode = mode_for_s(cfg, s_m)
-
-    delta_isa_K = weather.delta_isa_K(s_m, h_m, state.t_s)
-    if s_dot_mps is None:
-        wind_mps = alongtrack_wind_mps(weather, track_angle_rad, s_m, h_m, state.t_s)
-        gs_along_mps = max(1.0, v_tas_mps + wind_mps)
-        s_dot_mps = -gs_along_mps
-    else:
-        gs_along_mps = max(0.0, -s_dot_mps)
-
-    h_ref_m = altitude_profile.value(s_m)
-    gamma_ref_rad = path_angle_rad(altitude_profile, s_m)
-    hdot_ff = altitude_profile.slope(s_m) * s_dot_mps
-    hdot_cmd = hdot_ff + cfg.k_h_sinv * (h_ref_m - h_m)
-    hdot_cmd = float(np.clip(hdot_cmd, mode.vs_min_mps, mode.vs_max_mps))
-
-    v_ref_cas_mps = clamp_cas_to_mode_limits(mode, speed_schedule_cas.value(s_m))
-    v_ref_tas_mps = float(aero.cas2tas(v_ref_cas_mps, h_m, dT=delta_isa_K))
-    vdot_cmd = (v_ref_tas_mps - v_tas_mps) / mode.tau_v_s
-
-    drag_newtons = perf.drag_newtons(
-        mode=mode,
-        mass_kg=cfg.mass_kg,
-        wing_area_m2=cfg.wing_area_m2,
-        v_tas_mps=v_tas_mps,
-        h_m=h_m,
-        vs_mps=hdot_cmd,
+    command = longitudinal_command(
+        state=state,
+        cfg=cfg,
+        perf=perf,
+        altitude_profile=altitude_profile,
+        speed_schedule_cas=speed_schedule_cas,
+        weather=weather,
+        track_angle_rad=track_angle_rad,
         bank_rad=bank_rad,
-        delta_isa_K=delta_isa_K,
+        s_dot_mps=s_dot_mps,
     )
-    idle_thrust_newtons = perf.idle_thrust_newtons(v_tas_mps, h_m, delta_isa_K=delta_isa_K)
-
-    a_dec_max = max(
-        0.0,
-        (drag_newtons - idle_thrust_newtons) / cfg.mass_kg - aero.g0 * abs(np.sin(gamma_ref_rad)),
-    )
-    vdot = float(np.clip(vdot_cmd, -a_dec_max, cfg.a_acc_max_mps2))
-
-    return np.asarray([s_dot_mps, hdot_cmd, vdot], dtype=float)
+    return np.asarray([command.s_dot_mps, command.hdot_cmd_mps, command.vdot_mps2], dtype=float)

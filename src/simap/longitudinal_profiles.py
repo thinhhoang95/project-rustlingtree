@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 from openap import aero
 
-from .config import AircraftConfig, clamp_cas_for_s, mode_for_s
+from .backends import PerformanceBackend
+from .config import AircraftConfig, ModeConfig, clamp_cas_for_s, mode_for_s
 from .openap_adapter import wrap_default
 from .units import km_to_m
 
@@ -51,6 +52,42 @@ class ScalarProfile:
 
 def path_angle_rad(altitude_profile: ScalarProfile, s_m: float) -> float:
     return float(np.arctan(altitude_profile.slope(s_m)))
+
+
+def longitudinal_deceleration_limit_mps2(
+    *,
+    mode: ModeConfig,
+    cfg: AircraftConfig,
+    perf: PerformanceBackend,
+    v_tas_mps: float,
+    h_m: float,
+    vs_mps: float,
+    delta_isa_K: float,
+    gamma_ref_rad: float,
+    bank_rad: float = 0.0,
+) -> float:
+    """Return the maximum physically available deceleration for the current state.
+
+    This helper centralizes the longitudinal deceleration budget used both by
+    the feasible CAS schedule planner and by the online longitudinal command
+    law. It compares aerodynamic drag against idle thrust and subtracts the
+    along-path gravity component.
+    """
+    drag_newtons = perf.drag_newtons(
+        mode=mode,
+        mass_kg=cfg.mass_kg,
+        wing_area_m2=cfg.wing_area_m2,
+        v_tas_mps=v_tas_mps,
+        h_m=h_m,
+        vs_mps=vs_mps,
+        bank_rad=bank_rad,
+        delta_isa_K=delta_isa_K,
+    )
+    idle_thrust_newtons = perf.idle_thrust_newtons(v_tas_mps, h_m, delta_isa_K=delta_isa_K)
+    return max(
+        0.0,
+        (drag_newtons - idle_thrust_newtons) / cfg.mass_kg - aero.g0 * abs(np.sin(gamma_ref_rad)),
+    )
 
 
 def build_simple_glidepath(
@@ -125,23 +162,15 @@ def build_feasible_cas_schedule(
         downstream_tas = float(feasible_tas[index - 1])
         gs_plan = max(1.0, downstream_tas + feasibility.planning_tailwind_mps)
         vs_plan = -gs_plan * np.tan(gamma_rad)
-        drag_newtons = perf.drag_newtons(
+        a_dec_max = longitudinal_deceleration_limit_mps2(
             mode=mode,
-            mass_kg=cfg.mass_kg,
-            wing_area_m2=cfg.wing_area_m2,
+            cfg=cfg,
+            perf=perf,
             v_tas_mps=downstream_tas,
             h_m=h_m,
             vs_mps=vs_plan,
             delta_isa_K=feasibility.planning_delta_isa_K,
-        )
-        idle_thrust_newtons = perf.idle_thrust_newtons(
-            downstream_tas,
-            h_m,
-            delta_isa_K=feasibility.planning_delta_isa_K,
-        )
-        a_dec_max = max(
-            0.0,
-            (drag_newtons - idle_thrust_newtons) / cfg.mass_kg - aero.g0 * abs(np.sin(gamma_rad)),
+            gamma_ref_rad=gamma_rad,
         )
         feasible_upstream_tas = downstream_tas + a_dec_max * ds_m / gs_plan
         feasible_tas[index] = min(raw_tas, feasible_upstream_tas)

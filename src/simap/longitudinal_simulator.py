@@ -8,7 +8,7 @@ from openap import aero
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s
-from .longitudinal_dynamics import LongitudinalState, longitudinal_rhs
+from .longitudinal_dynamics import LongitudinalState, longitudinal_command, longitudinal_rhs
 from .longitudinal_profiles import FeasibilityConfig, ScalarProfile, build_feasible_cas_schedule
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
@@ -89,6 +89,8 @@ class LongitudinalTrajectory:
     gs_mps: np.ndarray
     h_ref_m: np.ndarray
     v_ref_cas_mps: np.ndarray
+    vdot_cmd_mps2: np.ndarray
+    vdot_mps2: np.ndarray
     mode: tuple[str, ...]
 
     def __len__(self) -> int:
@@ -142,6 +144,8 @@ class LongitudinalTrajectory:
                 "gs_mps": self.gs_mps,
                 "h_ref_m": self.h_ref_m,
                 "v_ref_cas_mps": self.v_ref_cas_mps,
+                "vdot_cmd_mps2": self.vdot_cmd_mps2,
+                "vdot_mps2": self.vdot_mps2,
                 "mode": np.asarray(self.mode, dtype=object),
             }
         )
@@ -324,6 +328,8 @@ class LongitudinalApproachSimulator:
             "gs_mps": [],
             "h_ref_m": [],
             "v_ref_cas_mps": [],
+            "vdot_cmd_mps2": [],
+            "vdot_mps2": [],
             "mode": [],
         }
 
@@ -341,6 +347,15 @@ class LongitudinalApproachSimulator:
             v_cas_mps = float(aero.tas2cas(state.v_tas_mps, state.h_m, dT=delta_isa_K))
             h_ref_m = self.altitude_profile.value(state.s_m)
             v_ref_cas_mps = self.feasible_speed_schedule_cas.value(state.s_m)
+            long_command = longitudinal_command(
+                state=state,
+                cfg=self.cfg,
+                perf=self.perf,
+                altitude_profile=self.altitude_profile,
+                speed_schedule_cas=self.feasible_speed_schedule_cas,
+                weather=self.weather,
+                track_angle_rad=self.scenario.reference_track_rad,
+            )
             mode_name = mode_for_s(self.cfg, state.s_m).name
 
             rows["t_s"].append(state.t_s)
@@ -351,6 +366,8 @@ class LongitudinalApproachSimulator:
             rows["gs_mps"].append(gs_mps)
             rows["h_ref_m"].append(h_ref_m)
             rows["v_ref_cas_mps"].append(v_ref_cas_mps)
+            rows["vdot_cmd_mps2"].append(long_command.vdot_cmd_mps2)
+            rows["vdot_mps2"].append(long_command.vdot_mps2)
             rows["mode"].append(mode_name)
 
             state = self.step(state, dt_s)
@@ -364,5 +381,7 @@ class LongitudinalApproachSimulator:
             gs_mps=np.asarray(rows["gs_mps"], dtype=float),
             h_ref_m=np.asarray(rows["h_ref_m"], dtype=float),
             v_ref_cas_mps=np.asarray(rows["v_ref_cas_mps"], dtype=float),
+            vdot_cmd_mps2=np.asarray(rows["vdot_cmd_mps2"], dtype=float),
+            vdot_mps2=np.asarray(rows["vdot_mps2"], dtype=float),
             mode=tuple(str(value) for value in rows["mode"]),
         )

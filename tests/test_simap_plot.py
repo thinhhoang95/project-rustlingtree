@@ -31,6 +31,8 @@ class DummyTrajectory:
     h_ref_m: np.ndarray
     heading_rad: np.ndarray
     bank_rad: np.ndarray
+    vdot_cmd_mps2: np.ndarray
+    vdot_mps2: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(np.deg2rad(170.0), np.deg2rad(180.0), n),
             bank_rad=np.deg2rad(np.sin(np.linspace(0.0, 2.0 * np.pi, n)) * 10.0),
+            vdot_cmd_mps2=np.linspace(-0.5, 0.1, n),
+            vdot_mps2=np.linspace(-0.4, 0.1, n),
         )
 
         fig, axes = plot_state_overview(trajectory, show=False)
@@ -92,6 +96,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(1_500.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            vdot_cmd_mps2=np.linspace(-0.2, 0.1, n),
+            vdot_mps2=np.linspace(-0.15, 0.08, n),
         )
         reference_path = ReferencePath.from_geographic(
             lat_deg=np.asarray([48.52, 48.42, 48.34], dtype=float),
@@ -116,6 +122,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
+            vdot_mps2=np.linspace(-0.25, 0.08, n),
         )
 
         fig, ax, slider, aircraft = plot_trajectory_map_scrubber(
@@ -151,6 +159,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
+            vdot_mps2=np.linspace(-0.25, 0.08, n),
         )
         reference_path = ReferencePath.from_geographic(
             lat_deg=np.asarray([48.82, 48.58, 48.34], dtype=float),
@@ -163,6 +173,16 @@ class SimapPlotTests(unittest.TestCase):
             show=False,
             add_features=False,
         )
+
+        status_texts = [text for text in ax.texts if text.get_text().startswith("Cross-track error:")]
+        self.assertEqual(len(status_texts), 1)
+        initial_status = status_texts[0].get_text()
+        self.assertIn("Track error:", initial_status)
+        self.assertIn("Curvature cmd:", initial_status)
+        self.assertIn("Phi req", initial_status)
+        self.assertIn("Phi:", initial_status)
+        self.assertIn("Vdot cmd:", initial_status)
+        self.assertIn("Vdot:", initial_status)
 
         reference_points = [line for line in ax.lines if line.get_marker() == "o"]
         self.assertEqual(len(reference_points), 1)
@@ -182,6 +202,8 @@ class SimapPlotTests(unittest.TestCase):
         final_ref_lat, final_ref_lon = reference_path.latlon(float(trajectory.s_m[-1]))
         self.assertAlmostEqual(float(reference_points[0].get_xdata()[0]), final_ref_lon, places=6)
         self.assertAlmostEqual(float(reference_points[0].get_ydata()[0]), final_ref_lat, places=6)
+        updated_status = status_texts[0].get_text()
+        self.assertNotEqual(initial_status, updated_status)
 
         plt.close(fig)
 
@@ -197,6 +219,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
+            vdot_mps2=np.linspace(-0.25, 0.08, n),
         )
         reference_path = ReferencePath.from_geographic(
             lat_deg=np.asarray([48.82, 48.58, 48.34], dtype=float),

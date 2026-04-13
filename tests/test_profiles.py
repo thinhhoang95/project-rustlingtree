@@ -8,12 +8,13 @@ from openap import aero
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.longitudinal_dynamics import LongitudinalState, longitudinal_rhs
+from simap.longitudinal_dynamics import LongitudinalState, longitudinal_command, longitudinal_rhs
 from simap.longitudinal_profiles import (
     FeasibilityConfig,
     ScalarProfile,
     build_feasible_cas_schedule,
     build_simple_glidepath,
+    longitudinal_deceleration_limit_mps2,
 )
 from simap.weather import ConstantWeather
 from tests.helpers import a320_fixture
@@ -94,6 +95,42 @@ class ScalarProfileTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(float(rates[2]), -1e-9)
+
+    def test_longitudinal_deceleration_helper_matches_command_clip(self) -> None:
+        fixture = a320_fixture()
+        cfg = fixture["cfg"]
+        perf = fixture["perf"]
+        altitude_profile = ScalarProfile(
+            s_m=np.asarray([0.0, 20_000.0], dtype=float),
+            y=np.asarray([450.0, 450.0], dtype=float),
+        )
+        raw_schedule = ScalarProfile(
+            s_m=np.asarray([0.0, 20_000.0], dtype=float),
+            y=np.asarray([10.0, 10.0], dtype=float),
+        )
+        state = LongitudinalState(t_s=0.0, s_m=1_000.0, h_m=450.0, v_tas_mps=160.0)
+
+        command = longitudinal_command(
+            state=state,
+            cfg=cfg,
+            perf=perf,
+            altitude_profile=altitude_profile,
+            speed_schedule_cas=raw_schedule,
+            weather=ConstantWeather(),
+        )
+        a_dec_max = longitudinal_deceleration_limit_mps2(
+            mode=cfg.final,
+            cfg=cfg,
+            perf=perf,
+            v_tas_mps=state.v_tas_mps,
+            h_m=state.h_m,
+            vs_mps=command.hdot_cmd_mps,
+            delta_isa_K=0.0,
+            gamma_ref_rad=0.0,
+        )
+
+        self.assertLessEqual(command.vdot_cmd_mps2, -a_dec_max + 1e-9)
+        self.assertAlmostEqual(command.vdot_mps2, -a_dec_max, places=9)
 
 
 if __name__ == "__main__":

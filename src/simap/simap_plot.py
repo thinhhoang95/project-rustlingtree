@@ -8,6 +8,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.widgets import Slider
 
+from .lateral_dynamics import LateralGuidanceConfig, wrap_angle_rad
 from .path_geometry import EARTH_RADIUS_M, ReferencePath
 
 
@@ -119,6 +120,96 @@ def _heading_uv_deg(
     u = np.rad2deg(east_m / (EARTH_RADIUS_M * cos_lat))
     v = np.rad2deg(north_m / EARTH_RADIUS_M)
     return u, v
+
+
+def _ground_track_rad(
+    t_s: np.ndarray,
+    lat_deg: np.ndarray,
+    lon_deg: np.ndarray,
+    idx: int,
+) -> float:
+    if len(t_s) < 2:
+        return 0.0
+    if idx <= 0:
+        i0, i1 = 0, 1
+    elif idx >= len(t_s) - 1:
+        i0, i1 = len(t_s) - 2, len(t_s) - 1
+    else:
+        i0, i1 = idx - 1, idx + 1
+    lat_mid_rad = np.deg2rad(0.5 * (float(lat_deg[i0]) + float(lat_deg[i1])))
+    east_m = EARTH_RADIUS_M * np.cos(lat_mid_rad) * np.deg2rad(float(lon_deg[i1]) - float(lon_deg[i0]))
+    north_m = EARTH_RADIUS_M * np.deg2rad(float(lat_deg[i1]) - float(lat_deg[i0]))
+    return float(np.arctan2(north_m, east_m))
+
+
+def _tracking_status_text(
+    *,
+    trajectory: Any,
+    reference_path: ReferencePath,
+    idx: int,
+    guidance: LateralGuidanceConfig | None = None,
+) -> str:
+    guidance = LateralGuidanceConfig() if guidance is None else guidance
+    s_m = _series(trajectory, "s_m")
+    t_s = _series(trajectory, "t_s")
+    lat_deg = _series(trajectory, "lat_deg")
+    lon_deg = _series(trajectory, "lon_deg")
+    cross_track_series = _series(trajectory, "cross_track_m") if hasattr(trajectory, "cross_track_m") else None
+    v_tas_mps = _series(trajectory, "v_tas_mps") if hasattr(trajectory, "v_tas_mps") else None
+    v_cas_mps = _series(trajectory, "v_cas_mps") if hasattr(trajectory, "v_cas_mps") else None
+    gs_mps = _series(trajectory, "gs_mps") if hasattr(trajectory, "gs_mps") else None
+    bank_rad = _series(trajectory, "bank_rad") if hasattr(trajectory, "bank_rad") else _series(trajectory, "phi_rad")
+    phi_req_series = _series(trajectory, "phi_req_rad") if hasattr(trajectory, "phi_req_rad") else None
+    phi_max_series = _series(trajectory, "phi_max_rad") if hasattr(trajectory, "phi_max_rad") else None
+    vdot_cmd_series = _series(trajectory, "vdot_cmd_mps2") if hasattr(trajectory, "vdot_cmd_mps2") else None
+    vdot_series = _series(trajectory, "vdot_mps2") if hasattr(trajectory, "vdot_mps2") else None
+
+    ref_track_rad = reference_path.track_angle_rad(float(s_m[idx]))
+    ref_curvature_inv_m = reference_path.curvature(float(s_m[idx]))
+    if cross_track_series is not None:
+        cross_track_m = float(cross_track_series[idx])
+    else:
+        ref_east_m, ref_north_m = reference_path.position_ne(float(s_m[idx]))
+        east_m = EARTH_RADIUS_M * np.cos(np.deg2rad(reference_path.origin_lat_deg)) * np.deg2rad(
+            float(lon_deg[idx]) - reference_path.origin_lon_deg
+        )
+        north_m = EARTH_RADIUS_M * np.deg2rad(float(lat_deg[idx]) - reference_path.origin_lat_deg)
+        error_vector = np.asarray([east_m - ref_east_m, north_m - ref_north_m], dtype=float)
+        cross_track_m = float(np.dot(error_vector, reference_path.normal_hat(float(s_m[idx]))))
+    track_error_rad = wrap_angle_rad(_ground_track_rad(t_s, lat_deg, lon_deg, idx) - ref_track_rad)
+    ground_speed_mps = float(gs_mps[idx]) if gs_mps is not None else float(v_tas_mps[idx] if v_tas_mps is not None else 1.0)
+    curvature_feedback = (
+        -(guidance.cross_track_gain * cross_track_m) / (max(1.0, guidance.lookahead_m) ** 2)
+        - (guidance.track_error_gain * track_error_rad) / max(1.0, guidance.lookahead_m)
+    )
+    curvature_cmd_inv_m = ref_curvature_inv_m + curvature_feedback
+    phi_req_est_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / 9.80665))
+    if phi_req_series is not None:
+        phi_req_rad = float(phi_req_series[idx])
+        phi_req_label = "Phi req"
+    else:
+        # Trajectory samples do not include the simulator's bank-limit clipping by default.
+        phi_req_rad = phi_req_est_rad
+        phi_req_label = "Phi req (est, unclipped)"
+    phi_max_rad = float(phi_max_series[idx]) if phi_max_series is not None else None
+
+    lines = [
+        f"Cross-track error: {cross_track_m:+.1f} m",
+        f"Track error: {np.rad2deg(track_error_rad):+.2f} deg",
+        f"Curvature cmd: {curvature_cmd_inv_m:+.5f} 1/m",
+        f"{phi_req_label}: {np.rad2deg(phi_req_rad):+.2f} deg",
+    ]
+    if v_cas_mps is not None:
+        cas_mps = float(v_cas_mps[idx])
+        lines.append(f"CAS: {cas_mps:.2f} m/s ({cas_mps / 0.514444:.1f} kt)")
+    if vdot_cmd_series is not None:
+        lines.append(f"Vdot cmd: {float(vdot_cmd_series[idx]):+.3f} m/s^2")
+    if vdot_series is not None:
+        lines.append(f"Vdot: {float(vdot_series[idx]):+.3f} m/s^2")
+    if phi_max_rad is not None:
+        lines.append(f"Phi max: {np.rad2deg(phi_max_rad):+.2f} deg")
+    lines.append(f"Phi: {np.rad2deg(float(bank_rad[idx])):+.2f} deg")
+    return "\n".join(lines)
 
 
 def _plot(
@@ -338,6 +429,7 @@ def plot_trajectory_map_scrubber(
     *,
     reference_path: ReferencePath | None = None,
     show_reference_turning_points: bool = True,
+    show_tracking_labels: bool = True,
     figsize: tuple[float, float] = (11.0, 8.0),
     initial_time_s: float | None = None,
     show: bool = True,
@@ -415,6 +507,24 @@ def plot_trajectory_map_scrubber(
             transform=plate,
             zorder=5,
         )
+    status_text = None
+    if show_tracking_labels and reference_path is not None:
+        status_text = map_ax.text(
+            0.02,
+            0.34,
+            _tracking_status_text(
+                trajectory=trajectory,
+                reference_path=reference_path,
+                idx=start_index,
+            ),
+            transform=map_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            family="monospace",
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.85, "edgecolor": "#cccccc"},
+            zorder=6,
+        )
     time_label = map_ax.text(
         0.02,
         0.98,
@@ -441,6 +551,14 @@ def plot_trajectory_map_scrubber(
         if reference_point is not None:
             ref_lat, ref_lon = reference_path.latlon(float(s_m[idx]))
             reference_point.set_data([ref_lon], [ref_lat])
+        if status_text is not None:
+            status_text.set_text(
+                _tracking_status_text(
+                    trajectory=trajectory,
+                    reference_path=reference_path,
+                    idx=idx,
+                )
+            )
         time_label.set_text(f"t = {t_s[idx]:.1f} s")
         fig.canvas.draw_idle()
 

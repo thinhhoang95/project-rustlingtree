@@ -55,6 +55,8 @@ class CoupledSimulatorTests(unittest.TestCase):
         self.assertTrue((trajectory.s_m[1:] <= trajectory.s_m[:-1]).all())
         self.assertGreater(np.max(np.abs(trajectory.bank_rad)), np.deg2rad(1.0))
         self.assertLess(np.max(np.abs(trajectory.bank_rad)), cfg.clean.phi_comfort_max_rad + 1e-6)
+        self.assertEqual(len(trajectory.vdot_cmd_mps2), len(trajectory))
+        self.assertEqual(len(trajectory.vdot_mps2), len(trajectory))
 
     def test_crosswind_tracking_crabs_heading_into_the_wind(self) -> None:
         fixture = a320_fixture()

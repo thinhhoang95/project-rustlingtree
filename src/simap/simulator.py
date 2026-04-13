@@ -9,7 +9,7 @@ from openap import aero
 from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s
 from .lateral_dynamics import LateralGuidanceConfig, compute_lateral_command, lateral_rates, wrap_angle_rad
-from .longitudinal_dynamics import LongitudinalState, longitudinal_rhs
+from .longitudinal_dynamics import LongitudinalState, longitudinal_command, longitudinal_rhs
 from .longitudinal_profiles import FeasibilityConfig, ScalarProfile, build_feasible_cas_schedule
 from .path_geometry import ReferencePath
 from .weather import ConstantWeather, WeatherProvider
@@ -114,6 +114,8 @@ class Trajectory:
     gs_mps: np.ndarray
     h_ref_m: np.ndarray
     v_ref_cas_mps: np.ndarray
+    vdot_cmd_mps2: np.ndarray
+    vdot_mps2: np.ndarray
     mode: tuple[str, ...]
     lat_deg: np.ndarray
     lon_deg: np.ndarray
@@ -187,6 +189,8 @@ class Trajectory:
                 "gs_mps": self.gs_mps,
                 "h_ref_m": self.h_ref_m,
                 "v_ref_cas_mps": self.v_ref_cas_mps,
+                "vdot_cmd_mps2": self.vdot_cmd_mps2,
+                "vdot_mps2": self.vdot_mps2,
                 "mode": np.asarray(self.mode, dtype=object),
                 "lat_deg": self.lat_deg,
                 "lon_deg": self.lon_deg,
@@ -496,6 +500,8 @@ class ApproachSimulator:
             "gs_mps": [],
             "h_ref_m": [],
             "v_ref_cas_mps": [],
+            "vdot_cmd_mps2": [],
+            "vdot_mps2": [],
             "mode": [],
             "lat_deg": [],
             "lon_deg": [],
@@ -525,6 +531,22 @@ class ApproachSimulator:
             v_cas_mps = float(aero.tas2cas(state.v_tas_mps, state.h_m, dT=delta_isa_K))
             h_ref_m = self.altitude_profile.value(state.s_m)
             v_ref_cas_mps = self.feasible_speed_schedule_cas.value(state.s_m)
+            long_command = longitudinal_command(
+                state=LongitudinalState(
+                    t_s=state.t_s,
+                    s_m=state.s_m,
+                    h_m=state.h_m,
+                    v_tas_mps=state.v_tas_mps,
+                ),
+                cfg=self.cfg,
+                perf=self.perf,
+                altitude_profile=self.altitude_profile,
+                speed_schedule_cas=self.feasible_speed_schedule_cas,
+                weather=self.weather,
+                track_angle_rad=self.reference_path.track_angle_rad(state.s_m),
+                bank_rad=state.phi_rad,
+                s_dot_mps=-command.alongtrack_speed_mps,
+            )
             lat_deg, lon_deg = self.reference_path.latlon_from_ne(state.east_m, state.north_m)
 
             rows["t_s"].append(state.t_s)
@@ -535,6 +557,8 @@ class ApproachSimulator:
             rows["gs_mps"].append(command.ground_speed_mps)
             rows["h_ref_m"].append(h_ref_m)
             rows["v_ref_cas_mps"].append(v_ref_cas_mps)
+            rows["vdot_cmd_mps2"].append(long_command.vdot_cmd_mps2)
+            rows["vdot_mps2"].append(long_command.vdot_mps2)
             rows["mode"].append(mode.name)
             rows["lat_deg"].append(lat_deg)
             rows["lon_deg"].append(lon_deg)
@@ -553,6 +577,8 @@ class ApproachSimulator:
             gs_mps=np.asarray(rows["gs_mps"], dtype=float),
             h_ref_m=np.asarray(rows["h_ref_m"], dtype=float),
             v_ref_cas_mps=np.asarray(rows["v_ref_cas_mps"], dtype=float),
+            vdot_cmd_mps2=np.asarray(rows["vdot_cmd_mps2"], dtype=float),
+            vdot_mps2=np.asarray(rows["vdot_mps2"], dtype=float),
             mode=tuple(str(value) for value in rows["mode"]),
             lat_deg=np.asarray(rows["lat_deg"], dtype=float),
             lon_deg=np.asarray(rows["lon_deg"], dtype=float),
