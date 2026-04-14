@@ -1,3 +1,4 @@
+# Remember to replace the OpenAP's a320.yml file with the one in the root directory
 from __future__ import annotations
 
 import numpy as np
