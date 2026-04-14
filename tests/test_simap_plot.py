@@ -13,11 +13,13 @@ matplotlib.use("Agg", force=True)
 
 from simap.simap_plot import (
     plot_all_state_responses,
+    plot_initial_profiles,
     plot_phi_response,
     plot_psi_response,
     plot_state_overview,
     plot_trajectory_map_scrubber,
 )
+from simap.longitudinal_profiles import ScalarProfile
 from simap.path_geometry import ReferencePath
 
 
@@ -31,8 +33,12 @@ class DummyTrajectory:
     h_ref_m: np.ndarray
     heading_rad: np.ndarray
     bank_rad: np.ndarray
+    v_tas_mps: np.ndarray
+    v_ref_tas_mps: np.ndarray
     vdot_cmd_mps2: np.ndarray
     vdot_mps2: np.ndarray
+    v_cas_mps: np.ndarray | None = None
+    v_ref_cas_mps: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,32 @@ class DummyLegacyAngleTrajectory:
 
 
 class SimapPlotTests(unittest.TestCase):
+    def test_plot_initial_profiles_overlays_feasible_cas(self) -> None:
+        reference_path = ReferencePath.from_geographic(
+            lat_deg=np.asarray([48.82, 48.58, 48.34], dtype=float),
+            lon_deg=np.asarray([11.02, 11.40, 11.78], dtype=float),
+        )
+        s_nodes = np.asarray([0.0, 4_000.0, 8_000.0], dtype=float)
+        altitude_profile = ScalarProfile(s_m=s_nodes, y=np.asarray([450.0, 700.0, 1_000.0], dtype=float))
+        raw_speed_schedule_cas = ScalarProfile(s_m=s_nodes, y=np.asarray([62.0, 70.0, 76.0], dtype=float))
+        feasible_speed_schedule_cas = ScalarProfile(s_m=s_nodes, y=np.asarray([60.0, 66.0, 71.0], dtype=float))
+
+        fig, axes = plot_initial_profiles(
+            reference_path=reference_path,
+            altitude_profile=altitude_profile,
+            raw_speed_schedule_cas=raw_speed_schedule_cas,
+            feasible_speed_schedule_cas=feasible_speed_schedule_cas,
+            show=False,
+            add_features=False,
+        )
+
+        speed_ax = axes[2]
+        labels_to_lines = {line.get_label(): line for line in speed_ax.get_lines()}
+        self.assertIn("Raw CAS", labels_to_lines)
+        self.assertIn("Feasible CAS", labels_to_lines)
+        self.assertEqual(labels_to_lines["Feasible CAS"].get_linestyle(), "--")
+        plt.close(fig)
+
     def test_plot_state_overview_draws_six_panels(self) -> None:
         n = 40
         t_s = np.linspace(0.0, 39.0, n)
@@ -55,6 +87,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(np.deg2rad(170.0), np.deg2rad(180.0), n),
             bank_rad=np.deg2rad(np.sin(np.linspace(0.0, 2.0 * np.pi, n)) * 10.0),
+            v_tas_mps=np.linspace(78.0, 64.0, n),
+            v_ref_tas_mps=np.linspace(76.0, 62.0, n),
             vdot_cmd_mps2=np.linspace(-0.5, 0.1, n),
             vdot_mps2=np.linspace(-0.4, 0.1, n),
         )
@@ -96,8 +130,12 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(1_500.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            v_tas_mps=np.linspace(75.0, 60.0, n),
+            v_ref_tas_mps=np.linspace(74.0, 58.0, n),
             vdot_cmd_mps2=np.linspace(-0.2, 0.1, n),
             vdot_mps2=np.linspace(-0.15, 0.08, n),
+            v_cas_mps=np.linspace(73.0, 58.0, n),
+            v_ref_cas_mps=np.linspace(72.0, 56.0, n),
         )
         reference_path = ReferencePath.from_geographic(
             lat_deg=np.asarray([48.52, 48.42, 48.34], dtype=float),
@@ -106,6 +144,9 @@ class SimapPlotTests(unittest.TestCase):
 
         fig, axes = plot_all_state_responses(trajectory, reference_path=reference_path, show=False)
         self.assertEqual(axes.shape, (4, 2))
+        self.assertEqual(axes[0, 1].get_title(), "TAS")
+        self.assertEqual(axes[1, 0].get_title(), "CAS")
+        self.assertEqual(axes[1, 1].get_title(), "Altitude")
         self.assertEqual(axes[3, 0].name, "cartopy.geoaxes")
         self.assertIs(axes[3, 0], axes[3, 1])
         plt.close(fig)
@@ -122,6 +163,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            v_tas_mps=np.linspace(78.0, 62.0, n),
+            v_ref_tas_mps=np.linspace(77.0, 60.0, n),
             vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
             vdot_mps2=np.linspace(-0.25, 0.08, n),
         )
@@ -159,6 +202,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            v_tas_mps=np.linspace(78.0, 62.0, n),
+            v_ref_tas_mps=np.linspace(77.0, 60.0, n),
             vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
             vdot_mps2=np.linspace(-0.25, 0.08, n),
         )
@@ -174,15 +219,15 @@ class SimapPlotTests(unittest.TestCase):
             add_features=False,
         )
 
-        status_texts = [text for text in ax.texts if text.get_text().startswith("Cross-track error:")]
+        status_texts = [text for text in ax.texts if text.get_text().startswith("Reference s:")]
         self.assertEqual(len(status_texts), 1)
         initial_status = status_texts[0].get_text()
-        self.assertIn("Track error:", initial_status)
-        self.assertIn("Curvature cmd:", initial_status)
-        self.assertIn("Phi req", initial_status)
-        self.assertIn("Phi:", initial_status)
-        self.assertIn("Vdot cmd:", initial_status)
-        self.assertIn("Vdot:", initial_status)
+        self.assertIn("TAS:", initial_status)
+        self.assertIn("Altitude:", initial_status)
+        self.assertIn("Cross-track error:", initial_status)
+        self.assertIn("Track-error:", initial_status)
+        self.assertIn("Heading:", initial_status)
+        self.assertIn("Bank angle:", initial_status)
 
         reference_points = [line for line in ax.lines if line.get_marker() == "o"]
         self.assertEqual(len(reference_points), 1)
@@ -219,6 +264,8 @@ class SimapPlotTests(unittest.TestCase):
             h_ref_m=np.linspace(3_450.0, 450.0, n),
             heading_rad=np.linspace(0.0, 0.1, n),
             bank_rad=np.linspace(-0.05, 0.05, n),
+            v_tas_mps=np.linspace(78.0, 62.0, n),
+            v_ref_tas_mps=np.linspace(77.0, 60.0, n),
             vdot_cmd_mps2=np.linspace(-0.3, 0.1, n),
             vdot_mps2=np.linspace(-0.25, 0.08, n),
         )

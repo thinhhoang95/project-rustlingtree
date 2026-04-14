@@ -73,6 +73,9 @@ class LongitudinalTrajectory:
     ...     gs_mps=np.asarray([72.0, 71.0]),
     ...     h_ref_m=np.asarray([3_500.0, 3_497.0]),
     ...     v_ref_cas_mps=np.asarray([145.0, 144.0]),
+    ...     v_ref_tas_mps=np.asarray([75.0, 74.5]),
+    ...     vdot_cmd_mps2=np.asarray([-0.2, -0.1]),
+    ...     vdot_mps2=np.asarray([-0.2, -0.1]),
     ...     mode=("approach", "approach"),
     ... )
 
@@ -89,6 +92,7 @@ class LongitudinalTrajectory:
     gs_mps: np.ndarray
     h_ref_m: np.ndarray
     v_ref_cas_mps: np.ndarray
+    v_ref_tas_mps: np.ndarray
     vdot_cmd_mps2: np.ndarray
     vdot_mps2: np.ndarray
     mode: tuple[str, ...]
@@ -120,14 +124,16 @@ class LongitudinalTrajectory:
         -------
         pd.DataFrame
             A DataFrame with columns `t_s`, `s_m`, `h_m`, `v_tas_mps`,
-            `v_cas_mps`, `gs_mps`, `h_ref_m`, `v_ref_cas_mps`, and `mode`.
+            `v_cas_mps`, `gs_mps`, `h_ref_m`, `v_ref_cas_mps`,
+            `v_ref_tas_mps`, `vdot_cmd_mps2`, `vdot_mps2`, and `mode`.
 
         Example
         -------
         >>> df = traj.to_pandas()
         >>> list(df.columns)
         ['t_s', 's_m', 'h_m', 'v_tas_mps', 'v_cas_mps', 'gs_mps',
-         'h_ref_m', 'v_ref_cas_mps', 'mode']
+         'h_ref_m', 'v_ref_cas_mps', 'v_ref_tas_mps',
+         'vdot_cmd_mps2', 'vdot_mps2', 'mode']
 
         Nuance
         -------
@@ -144,6 +150,7 @@ class LongitudinalTrajectory:
                 "gs_mps": self.gs_mps,
                 "h_ref_m": self.h_ref_m,
                 "v_ref_cas_mps": self.v_ref_cas_mps,
+                "v_ref_tas_mps": self.v_ref_tas_mps,
                 "vdot_cmd_mps2": self.vdot_cmd_mps2,
                 "vdot_mps2": self.vdot_mps2,
                 "mode": np.asarray(self.mode, dtype=object),
@@ -310,7 +317,8 @@ class LongitudinalApproachSimulator:
         1
         >>> list(traj.to_pandas().columns)
         ['t_s', 's_m', 'h_m', 'v_tas_mps', 'v_cas_mps', 'gs_mps',
-         'h_ref_m', 'v_ref_cas_mps', 'mode']
+         'h_ref_m', 'v_ref_cas_mps', 'v_ref_tas_mps',
+         'vdot_cmd_mps2', 'vdot_mps2', 'mode']
 
         Nuance
         -------
@@ -328,6 +336,7 @@ class LongitudinalApproachSimulator:
             "gs_mps": [],
             "h_ref_m": [],
             "v_ref_cas_mps": [],
+            "v_ref_tas_mps": [],
             "vdot_cmd_mps2": [],
             "vdot_mps2": [],
             "mode": [],
@@ -366,6 +375,7 @@ class LongitudinalApproachSimulator:
             rows["gs_mps"].append(gs_mps)
             rows["h_ref_m"].append(h_ref_m)
             rows["v_ref_cas_mps"].append(v_ref_cas_mps)
+            rows["v_ref_tas_mps"].append(long_command.v_ref_tas_mps)
             rows["vdot_cmd_mps2"].append(long_command.vdot_cmd_mps2)
             rows["vdot_mps2"].append(long_command.vdot_mps2)
             rows["mode"].append(mode_name)
@@ -381,6 +391,7 @@ class LongitudinalApproachSimulator:
             gs_mps=np.asarray(rows["gs_mps"], dtype=float),
             h_ref_m=np.asarray(rows["h_ref_m"], dtype=float),
             v_ref_cas_mps=np.asarray(rows["v_ref_cas_mps"], dtype=float),
+            v_ref_tas_mps=np.asarray(rows["v_ref_tas_mps"], dtype=float),
             vdot_cmd_mps2=np.asarray(rows["vdot_cmd_mps2"], dtype=float),
             vdot_mps2=np.asarray(rows["vdot_mps2"], dtype=float),
             mode=tuple(str(value) for value in rows["mode"]),

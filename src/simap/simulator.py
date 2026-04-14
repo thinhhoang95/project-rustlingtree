@@ -114,6 +114,7 @@ class Trajectory:
     gs_mps: np.ndarray
     h_ref_m: np.ndarray
     v_ref_cas_mps: np.ndarray
+    v_ref_tas_mps: np.ndarray
     vdot_cmd_mps2: np.ndarray
     vdot_mps2: np.ndarray
     mode: tuple[str, ...]
@@ -139,6 +140,9 @@ class Trajectory:
         ...     gs_mps=np.arange(3.0),
         ...     h_ref_m=np.arange(3.0),
         ...     v_ref_cas_mps=np.arange(3.0),
+        ...     v_ref_tas_mps=np.arange(3.0),
+        ...     vdot_cmd_mps2=np.arange(3.0),
+        ...     vdot_mps2=np.arange(3.0),
         ...     mode=("clean", "clean", "approach"),
         ...     lat_deg=np.arange(3.0),
         ...     lon_deg=np.arange(3.0),
@@ -189,6 +193,7 @@ class Trajectory:
                 "gs_mps": self.gs_mps,
                 "h_ref_m": self.h_ref_m,
                 "v_ref_cas_mps": self.v_ref_cas_mps,
+                "v_ref_tas_mps": self.v_ref_tas_mps,
                 "vdot_cmd_mps2": self.vdot_cmd_mps2,
                 "vdot_mps2": self.vdot_mps2,
                 "mode": np.asarray(self.mode, dtype=object),
@@ -500,6 +505,7 @@ class ApproachSimulator:
             "gs_mps": [],
             "h_ref_m": [],
             "v_ref_cas_mps": [],
+            "v_ref_tas_mps": [],
             "vdot_cmd_mps2": [],
             "vdot_mps2": [],
             "mode": [],
@@ -557,6 +563,7 @@ class ApproachSimulator:
             rows["gs_mps"].append(command.ground_speed_mps)
             rows["h_ref_m"].append(h_ref_m)
             rows["v_ref_cas_mps"].append(v_ref_cas_mps)
+            rows["v_ref_tas_mps"].append(long_command.v_ref_tas_mps)
             rows["vdot_cmd_mps2"].append(long_command.vdot_cmd_mps2)
             rows["vdot_mps2"].append(long_command.vdot_mps2)
             rows["mode"].append(mode.name)
@@ -577,6 +584,7 @@ class ApproachSimulator:
             gs_mps=np.asarray(rows["gs_mps"], dtype=float),
             h_ref_m=np.asarray(rows["h_ref_m"], dtype=float),
             v_ref_cas_mps=np.asarray(rows["v_ref_cas_mps"], dtype=float),
+            v_ref_tas_mps=np.asarray(rows["v_ref_tas_mps"], dtype=float),
             vdot_cmd_mps2=np.asarray(rows["vdot_cmd_mps2"], dtype=float),
             vdot_mps2=np.asarray(rows["vdot_mps2"], dtype=float),
             mode=tuple(str(value) for value in rows["mode"]),

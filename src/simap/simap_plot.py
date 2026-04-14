@@ -8,7 +8,8 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.widgets import Slider
 
-from .lateral_dynamics import LateralGuidanceConfig, wrap_angle_rad
+from .lateral_dynamics import wrap_angle_rad
+from .longitudinal_profiles import ScalarProfile
 from .path_geometry import EARTH_RADIUS_M, ReferencePath
 
 
@@ -105,6 +106,60 @@ def _plot_cartopy_trajectory(
             pass
 
 
+def _plot_cartopy_reference_path(
+    ax: Axes,
+    *,
+    reference_path: ReferencePath,
+    plate: Any,
+    cfeature: Any | None = None,
+    show_reference_turning_points: bool = True,
+    add_features: bool = True,
+) -> None:
+    lat_deg = np.asarray(reference_path.lat_deg, dtype=float)
+    lon_deg = np.asarray(reference_path.lon_deg, dtype=float)
+    waypoint_lat_deg = np.asarray(reference_path.waypoint_lat_deg, dtype=float)
+    waypoint_lon_deg = np.asarray(reference_path.waypoint_lon_deg, dtype=float)
+
+    lat_min = float(np.min(np.concatenate([lat_deg, waypoint_lat_deg])))
+    lat_max = float(np.max(np.concatenate([lat_deg, waypoint_lat_deg])))
+    lon_min = float(np.min(np.concatenate([lon_deg, waypoint_lon_deg])))
+    lon_max = float(np.max(np.concatenate([lon_deg, waypoint_lon_deg])))
+    lat_pad = max(0.01, 0.08 * max(1e-9, lat_max - lat_min))
+    lon_pad = max(0.01, 0.08 * max(1e-9, lon_max - lon_min))
+
+    ax.set_extent([lon_min - lon_pad, lon_max + lon_pad, lat_min - lat_pad, lat_max + lat_pad], crs=plate)
+    ax.gridlines(draw_labels=True, linewidth=0.4, alpha=0.35, linestyle=":")
+    ax.plot(
+        lon_deg,
+        lat_deg,
+        transform=plate,
+        color="#212529",
+        linewidth=1.8,
+        alpha=0.95,
+        zorder=2,
+    )
+    if show_reference_turning_points:
+        ax.scatter(
+            waypoint_lon_deg,
+            waypoint_lat_deg,
+            transform=plate,
+            s=26.0,
+            color="#f28e2b",
+            edgecolors="none",
+            zorder=4,
+        )
+
+    if add_features and cfeature is not None:
+        try:
+            ax.add_feature(cfeature.LAND, facecolor="#f1efe7", zorder=0)
+            ax.add_feature(cfeature.OCEAN, facecolor="#dceaf7", zorder=0)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.7, zorder=1)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.6, zorder=1)
+        except Exception:
+            # Natural Earth data may not be cached in all environments.
+            pass
+
+
 def _heading_uv_deg(
     lat_deg: np.ndarray,
     heading_rad: np.ndarray,
@@ -142,30 +197,126 @@ def _ground_track_rad(
     return float(np.arctan2(north_m, east_m))
 
 
+def _optional_series(trajectory: Any, *fields: str) -> np.ndarray | None:
+    for field in fields:
+        if hasattr(trajectory, field):
+            return _series(trajectory, field)
+    return None
+
+
+def _format_tracking_transition(
+    unclamped_text: str | None,
+    clamped_text: str | None,
+    *,
+    bracketed: bool,
+) -> str:
+    if unclamped_text is not None and clamped_text is not None:
+        body = f"{unclamped_text} -> {clamped_text}"
+    elif clamped_text is not None:
+        body = f"-> {clamped_text}"
+    elif unclamped_text is not None:
+        body = f"{unclamped_text} ->"
+    else:
+        return ""
+    return f"[{body}]" if bracketed else body
+
+
+def _format_tracking_line(
+    label: str,
+    *,
+    unclamped_target: str | None = None,
+    clamped_target: str | None = None,
+    unclamped_value: str | None = None,
+    clamped_value: str | None = None,
+) -> str:
+    target_text = _format_tracking_transition(unclamped_target, clamped_target, bracketed=True)
+    value_text = _format_tracking_transition(unclamped_value, clamped_value, bracketed=False)
+    if target_text and value_text:
+        return f"{label}: {target_text} {value_text}"
+    if target_text:
+        return f"{label}: {target_text}"
+    if value_text:
+        return f"{label}: {value_text}"
+    return f"{label}: n/a"
+
+
 def _tracking_status_text(
     *,
     trajectory: Any,
     reference_path: ReferencePath,
     idx: int,
-    guidance: LateralGuidanceConfig | None = None,
 ) -> str:
-    guidance = LateralGuidanceConfig() if guidance is None else guidance
     s_m = _series(trajectory, "s_m")
     t_s = _series(trajectory, "t_s")
     lat_deg = _series(trajectory, "lat_deg")
     lon_deg = _series(trajectory, "lon_deg")
-    cross_track_series = _series(trajectory, "cross_track_m") if hasattr(trajectory, "cross_track_m") else None
-    v_tas_mps = _series(trajectory, "v_tas_mps") if hasattr(trajectory, "v_tas_mps") else None
-    v_cas_mps = _series(trajectory, "v_cas_mps") if hasattr(trajectory, "v_cas_mps") else None
-    gs_mps = _series(trajectory, "gs_mps") if hasattr(trajectory, "gs_mps") else None
-    bank_rad = _series(trajectory, "bank_rad") if hasattr(trajectory, "bank_rad") else _series(trajectory, "phi_rad")
-    phi_req_series = _series(trajectory, "phi_req_rad") if hasattr(trajectory, "phi_req_rad") else None
-    phi_max_series = _series(trajectory, "phi_max_rad") if hasattr(trajectory, "phi_max_rad") else None
-    vdot_cmd_series = _series(trajectory, "vdot_cmd_mps2") if hasattr(trajectory, "vdot_cmd_mps2") else None
-    vdot_series = _series(trajectory, "vdot_mps2") if hasattr(trajectory, "vdot_mps2") else None
+    cross_track_series = _optional_series(trajectory, "cross_track_m")
+    s_unclamped_series = _optional_series(trajectory, "s_unclamped_m")
+    h_m = _optional_series(trajectory, "h_m")
+    h_ref_series = _optional_series(trajectory, "h_ref_m")
+    h_ref_unclamped_series = _optional_series(
+        trajectory,
+        "h_ref_unclamped_m",
+        "h_ref_raw_m",
+    )
+    v_tas_mps = _optional_series(trajectory, "v_tas_mps")
+    v_tas_unclamped_series = _optional_series(
+        trajectory,
+        "v_tas_unclamped_mps",
+        "v_tas_raw_mps",
+    )
+    v_ref_tas_series = _optional_series(trajectory, "v_ref_tas_mps")
+    v_ref_tas_unclamped_series = _optional_series(
+        trajectory,
+        "v_ref_tas_unclamped_mps",
+        "v_ref_unclamped_tas_mps",
+        "v_ref_raw_tas_mps",
+    )
+    heading_series = _optional_series(trajectory, "heading_rad", "psi_rad")
+    heading_target_unclamped_series = _optional_series(
+        trajectory,
+        "heading_target_unclamped_rad",
+        "psi_target_unclamped_rad",
+    )
+    heading_target_series = _optional_series(
+        trajectory,
+        "heading_target_rad",
+        "psi_target_rad",
+    )
+    bank_rad = _optional_series(trajectory, "bank_rad", "phi_rad")
+    phi_req_series = _optional_series(trajectory, "phi_req_rad", "bank_target_rad", "phi_target_rad")
+    phi_req_unclamped_series = _optional_series(
+        trajectory,
+        "phi_req_unclamped_rad",
+        "phi_req_unclipped_rad",
+        "phi_req_raw_rad",
+        "bank_target_unclamped_rad",
+    )
+    phi_max_series = _optional_series(trajectory, "phi_max_rad")
+
+    optional_series = [
+        cross_track_series,
+        s_unclamped_series,
+        h_m,
+        h_ref_series,
+        h_ref_unclamped_series,
+        v_tas_mps,
+        v_tas_unclamped_series,
+        v_ref_tas_series,
+        v_ref_tas_unclamped_series,
+        heading_series,
+        heading_target_unclamped_series,
+        heading_target_series,
+        bank_rad,
+        phi_req_series,
+        phi_req_unclamped_series,
+        phi_max_series,
+    ]
+    for values in optional_series:
+        if values is not None:
+            _match_time_and_values(t_s, values, "tracking series")
 
     ref_track_rad = reference_path.track_angle_rad(float(s_m[idx]))
-    ref_curvature_inv_m = reference_path.curvature(float(s_m[idx]))
     if cross_track_series is not None:
         cross_track_m = float(cross_track_series[idx])
     else:
@@ -177,38 +328,97 @@ def _tracking_status_text(
         error_vector = np.asarray([east_m - ref_east_m, north_m - ref_north_m], dtype=float)
         cross_track_m = float(np.dot(error_vector, reference_path.normal_hat(float(s_m[idx]))))
     track_error_rad = wrap_angle_rad(_ground_track_rad(t_s, lat_deg, lon_deg, idx) - ref_track_rad)
-    ground_speed_mps = float(gs_mps[idx]) if gs_mps is not None else float(v_tas_mps[idx] if v_tas_mps is not None else 1.0)
-    curvature_feedback = (
-        -(guidance.cross_track_gain * cross_track_m) / (max(1.0, guidance.lookahead_m) ** 2)
-        - (guidance.track_error_gain * track_error_rad) / max(1.0, guidance.lookahead_m)
-    )
-    curvature_cmd_inv_m = ref_curvature_inv_m + curvature_feedback
-    phi_req_est_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / 9.80665))
+
+    bank_target_unclamped_rad = float(phi_req_unclamped_series[idx]) if phi_req_unclamped_series is not None else None
+
     if phi_req_series is not None:
-        phi_req_rad = float(phi_req_series[idx])
-        phi_req_label = "Phi req"
+        bank_target_clamped_rad = float(phi_req_series[idx])
+    elif phi_max_series is not None and bank_target_unclamped_rad is not None:
+        phi_max_rad = float(phi_max_series[idx])
+        bank_target_clamped_rad = float(np.clip(bank_target_unclamped_rad, -phi_max_rad, phi_max_rad))
     else:
-        # Trajectory samples do not include the simulator's bank-limit clipping by default.
-        phi_req_rad = phi_req_est_rad
-        phi_req_label = "Phi req (est, unclipped)"
-    phi_max_rad = float(phi_max_series[idx]) if phi_max_series is not None else None
+        bank_target_clamped_rad = None
+
+    def _fmt_speed(value_mps: float) -> str:
+        return f"{value_mps:.2f} m/s ({value_mps / 0.514444:.1f} kt)"
+
+    def _fmt_scalar_meter(value_m: float) -> str:
+        return f"{value_m:.1f} m"
+
+    def _fmt_error_meter(value_m: float) -> str:
+        return f"{value_m:+.1f} m"
+
+    def _fmt_angle_deg(value_rad: float) -> str:
+        return f"{np.rad2deg(value_rad):+.2f} deg"
+
+    reference_s_unclamped = float(s_unclamped_series[idx]) if s_unclamped_series is not None else None
+    reference_s_clamped = float(s_m[idx])
+    tas_target_unclamped = (
+        _fmt_speed(float(v_ref_tas_unclamped_series[idx])) if v_ref_tas_unclamped_series is not None else None
+    )
+    tas_target_clamped = _fmt_speed(float(v_ref_tas_series[idx])) if v_ref_tas_series is not None else None
+    tas_value_unclamped = _fmt_speed(float(v_tas_unclamped_series[idx])) if v_tas_unclamped_series is not None else None
+    tas_value_clamped = _fmt_speed(float(v_tas_mps[idx])) if v_tas_mps is not None else None
+    altitude_target_unclamped = _fmt_scalar_meter(float(h_ref_unclamped_series[idx])) if h_ref_unclamped_series is not None else None
+    altitude_target_clamped = _fmt_scalar_meter(float(h_ref_series[idx])) if h_ref_series is not None else None
+    altitude_value_unclamped = None
+    altitude_value_clamped = _fmt_scalar_meter(float(h_m[idx])) if h_m is not None else None
+    heading_target_unclamped = (
+        _fmt_angle_deg(float(heading_target_unclamped_series[idx])) if heading_target_unclamped_series is not None else None
+    )
+    heading_target_clamped = _fmt_angle_deg(float(heading_target_series[idx])) if heading_target_series is not None else None
+    heading_value_unclamped = None
+    heading_value_clamped = _fmt_angle_deg(float(heading_series[idx])) if heading_series is not None else None
+    bank_target_unclamped = _fmt_angle_deg(bank_target_unclamped_rad) if bank_target_unclamped_rad is not None else None
+    bank_target_clamped = _fmt_angle_deg(bank_target_clamped_rad) if bank_target_clamped_rad is not None else None
+    bank_value_unclamped = None
+    bank_value_clamped = _fmt_angle_deg(float(bank_rad[idx])) if bank_rad is not None else None
 
     lines = [
-        f"Cross-track error: {cross_track_m:+.1f} m",
-        f"Track error: {np.rad2deg(track_error_rad):+.2f} deg",
-        f"Curvature cmd: {curvature_cmd_inv_m:+.5f} 1/m",
-        f"{phi_req_label}: {np.rad2deg(phi_req_rad):+.2f} deg",
+        _format_tracking_line(
+            "Reference s",
+            unclamped_value=f"{reference_s_unclamped:.1f} m" if reference_s_unclamped is not None else None,
+            clamped_value=f"{reference_s_clamped:.1f} m",
+        ),
+        _format_tracking_line(
+            "TAS",
+            unclamped_target=tas_target_unclamped,
+            clamped_target=tas_target_clamped,
+            unclamped_value=tas_value_unclamped,
+            clamped_value=tas_value_clamped,
+        ),
+        _format_tracking_line(
+            "Altitude",
+            unclamped_target=altitude_target_unclamped,
+            clamped_target=altitude_target_clamped,
+            unclamped_value=altitude_value_unclamped,
+            clamped_value=altitude_value_clamped,
+        ),
+        _format_tracking_line(
+            "Cross-track error",
+            clamped_target=_fmt_error_meter(0.0),
+            clamped_value=_fmt_error_meter(cross_track_m),
+        ),
+        _format_tracking_line(
+            "Track-error",
+            clamped_target=_fmt_angle_deg(0.0),
+            clamped_value=_fmt_angle_deg(track_error_rad),
+        ),
+        _format_tracking_line(
+            "Heading",
+            unclamped_target=heading_target_unclamped,
+            clamped_target=heading_target_clamped,
+            unclamped_value=heading_value_unclamped,
+            clamped_value=heading_value_clamped,
+        ),
+        _format_tracking_line(
+            "Bank angle",
+            unclamped_target=bank_target_unclamped,
+            clamped_target=bank_target_clamped,
+            unclamped_value=bank_value_unclamped,
+            clamped_value=bank_value_clamped,
+        ),
     ]
-    if v_cas_mps is not None:
-        cas_mps = float(v_cas_mps[idx])
-        lines.append(f"CAS: {cas_mps:.2f} m/s ({cas_mps / 0.514444:.1f} kt)")
-    if vdot_cmd_series is not None:
-        lines.append(f"Vdot cmd: {float(vdot_cmd_series[idx]):+.3f} m/s^2")
-    if vdot_series is not None:
-        lines.append(f"Vdot: {float(vdot_series[idx]):+.3f} m/s^2")
-    if phi_max_rad is not None:
-        lines.append(f"Phi max: {np.rad2deg(phi_max_rad):+.2f} deg")
-    lines.append(f"Phi: {np.rad2deg(float(bank_rad[idx])):+.2f} deg")
     return "\n".join(lines)
 
 
@@ -250,6 +460,90 @@ def plot_s_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
     return _plot(axis, t_s, s_m, title="Along-track Distance", ylabel="s [m]", color="#1f77b4")
 
 
+def plot_initial_profiles(
+    reference_path: ReferencePath,
+    altitude_profile: ScalarProfile,
+    raw_speed_schedule_cas: ScalarProfile,
+    *,
+    feasible_speed_schedule_cas: ScalarProfile | None = None,
+    figsize: tuple[float, float] = (12.0, 8.5),
+    show_reference_turning_points: bool = True,
+    add_features: bool = True,
+    show: bool = True,
+) -> tuple[Figure, np.ndarray]:
+    """Plot the geographic reference path and the initial scalar profiles.
+
+    The top panel shows the planned route on a map. The bottom panel overlays
+    altitude and raw CAS schedule against along-track distance. When provided,
+    the feasible CAS profile is overlaid as a dashed line.
+    """
+    ccrs, cfeature = _require_cartopy()
+    plate = ccrs.PlateCarree()
+
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(2, 1, height_ratios=(1.15, 1.0), hspace=0.35)
+    map_ax = fig.add_subplot(gs[0], projection=plate)
+    profile_ax = fig.add_subplot(gs[1])
+    speed_ax = profile_ax.twinx()
+
+    map_ax.set_title("Reference Path")
+    _plot_cartopy_reference_path(
+        map_ax,
+        reference_path=reference_path,
+        plate=plate,
+        cfeature=cfeature,
+        show_reference_turning_points=show_reference_turning_points,
+        add_features=add_features,
+    )
+
+    profile_ax.plot(
+        altitude_profile.s_m,
+        altitude_profile.y,
+        color="#2ca02c",
+        linewidth=1.8,
+        label="Altitude",
+    )
+    speed_ax.plot(
+        raw_speed_schedule_cas.s_m,
+        raw_speed_schedule_cas.y,
+        color="#1f77b4",
+        linewidth=1.8,
+        label="Raw CAS",
+    )
+    if feasible_speed_schedule_cas is not None:
+        speed_ax.plot(
+            feasible_speed_schedule_cas.s_m,
+            feasible_speed_schedule_cas.y,
+            color="#1f77b4",
+            linewidth=1.8,
+            linestyle="--",
+            label="Feasible CAS",
+        )
+    profile_ax.set_title("Initial Longitudinal Profiles")
+    profile_ax.set_xlabel("Along-track distance [m]")
+    profile_ax.set_ylabel("Altitude [m]", color="#2ca02c")
+    speed_ax.set_ylabel("CAS [m/s]", color="#1f77b4")
+    profile_ax.tick_params(axis="y", colors="#2ca02c")
+    speed_ax.tick_params(axis="y", colors="#1f77b4")
+    profile_ax.grid(True, alpha=0.3)
+    s_nodes = [altitude_profile.s_m, raw_speed_schedule_cas.s_m]
+    if feasible_speed_schedule_cas is not None:
+        s_nodes.append(feasible_speed_schedule_cas.s_m)
+    profile_ax.set_xlim(float(min(np.min(nodes) for nodes in s_nodes)), float(max(np.max(nodes) for nodes in s_nodes)))
+
+    lines = profile_ax.get_lines() + speed_ax.get_lines()
+    labels = [line.get_label() for line in lines]
+    profile_ax.legend(lines, labels, loc="best")
+
+    fig.suptitle("SIMAP Initial Profiles")
+    fig.subplots_adjust(top=0.93, bottom=0.07, left=0.07, right=0.93)
+    if show:
+        plt.show()
+
+    axes = np.asarray([map_ax, profile_ax, speed_ax], dtype=object)
+    return fig, axes
+
+
 def plot_lat_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
     t_s = _series(trajectory, "t_s")
     lat_deg = _series(trajectory, "lat_deg")
@@ -283,6 +577,46 @@ def plot_altitude_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
         color="#2ca02c",
         reference=h_ref_m,
         reference_label="h_ref",
+    )
+
+
+def plot_tas_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
+    t_s = _series(trajectory, "t_s")
+    v_tas_mps = _series(trajectory, "v_tas_mps")
+    _match_time_and_values(t_s, v_tas_mps, "v_tas_mps")
+    v_ref_tas_mps = _series(trajectory, "v_ref_tas_mps") if hasattr(trajectory, "v_ref_tas_mps") else None
+    if v_ref_tas_mps is not None:
+        _match_time_and_values(t_s, v_ref_tas_mps, "v_ref_tas_mps")
+    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
+    return _plot(
+        axis,
+        t_s,
+        v_tas_mps,
+        title="TAS",
+        ylabel="v_tas [m/s]",
+        color="#1f77b4",
+        reference=v_ref_tas_mps,
+        reference_label="v_ref_tas",
+    )
+
+
+def plot_cas_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
+    t_s = _series(trajectory, "t_s")
+    v_cas_mps = _series(trajectory, "v_cas_mps")
+    _match_time_and_values(t_s, v_cas_mps, "v_cas_mps")
+    v_ref_cas_mps = _series(trajectory, "v_ref_cas_mps") if hasattr(trajectory, "v_ref_cas_mps") else None
+    if v_ref_cas_mps is not None:
+        _match_time_and_values(t_s, v_ref_cas_mps, "v_ref_cas_mps")
+    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
+    return _plot(
+        axis,
+        t_s,
+        v_cas_mps,
+        title="CAS",
+        ylabel="v_cas [m/s]",
+        color="#ff7f0e",
+        reference=v_ref_cas_mps,
+        reference_label="v_ref_cas",
     )
 
 
@@ -370,15 +704,19 @@ def plot_all_state_responses(
     add_features: bool = True,
     show: bool = True,
 ) -> tuple[Figure, np.ndarray]:
-    """Draw the six state plots plus a cartopy map in one figure window."""
+    """Draw the state and longitudinal response plots plus a cartopy map."""
     t_s = _series(trajectory, "t_s")
     s_m = _series(trajectory, "s_m")
     lat_deg = _series(trajectory, "lat_deg")
     lon_deg = _series(trajectory, "lon_deg")
+    v_tas_mps = _series(trajectory, "v_tas_mps")
+    v_cas_mps = _series(trajectory, "v_cas_mps")
     h_m = _series(trajectory, "h_m")
     _match_time_and_values(t_s, s_m, "s_m")
     _match_time_and_values(t_s, lat_deg, "lat_deg")
     _match_time_and_values(t_s, lon_deg, "lon_deg")
+    _match_time_and_values(t_s, v_tas_mps, "v_tas_mps")
+    _match_time_and_values(t_s, v_cas_mps, "v_cas_mps")
     _match_time_and_values(t_s, h_m, "h_m")
 
     ccrs, cfeature = _require_cartopy()
@@ -399,8 +737,8 @@ def plot_all_state_responses(
     axes[3, 1] = map_ax
 
     plot_s_response(trajectory, ax=axes[0, 0])
-    plot_lat_response(trajectory, ax=axes[0, 1])
-    plot_lon_response(trajectory, ax=axes[1, 0])
+    plot_tas_response(trajectory, ax=axes[0, 1])
+    plot_cas_response(trajectory, ax=axes[1, 0])
     plot_altitude_response(trajectory, ax=axes[1, 1])
     plot_psi_response(trajectory, ax=axes[2, 0], in_degrees=in_degrees)
     plot_phi_response(trajectory, ax=axes[2, 1], in_degrees=in_degrees)
@@ -573,10 +911,13 @@ def plot_trajectory_map_scrubber(
 __all__ = [
     "plot_all_state_responses",
     "plot_altitude_response",
+    "plot_cas_response",
+    "plot_initial_profiles",
     "plot_lat_response",
     "plot_lon_response",
     "plot_phi_response",
     "plot_psi_response",
+    "plot_tas_response",
     "plot_s_response",
     "plot_state_overview",
     "plot_trajectory_map_scrubber",

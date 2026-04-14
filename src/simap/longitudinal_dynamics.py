@@ -23,6 +23,7 @@ class LongitudinalState:
 class LongitudinalCommand:
     s_dot_mps: float
     hdot_cmd_mps: float
+    v_ref_tas_mps: float
     vdot_cmd_mps2: float
     vdot_mps2: float
 
@@ -75,6 +76,7 @@ def longitudinal_command(
     return LongitudinalCommand(
         s_dot_mps=float(s_dot_mps),
         hdot_cmd_mps=hdot_cmd,
+        v_ref_tas_mps=v_ref_tas_mps,
         vdot_cmd_mps2=vdot_cmd,
         vdot_mps2=vdot,
     )

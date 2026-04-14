@@ -17,7 +17,8 @@ from simap import (
     load_openap,
     suggest_approach_mass_kg,
     plot_trajectory_map_scrubber,
-    plot_all_state_responses
+    plot_all_state_responses,
+    plot_initial_profiles,
 )
 from simap.backends import EffectivePolarBackend
 
@@ -54,6 +55,13 @@ def main() -> None:
         feasibility=FeasibilityConfig(planning_tailwind_mps=5.0, distance_step_m=250.0),
     )
     simulator = ApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
+    # Plot the initial profiles with the feasibility-clamped CAS overlay.
+    plot_initial_profiles(
+        reference_path=reference_path,
+        altitude_profile=scenario.altitude_profile,
+        raw_speed_schedule_cas=scenario.raw_speed_schedule_cas,
+        feasible_speed_schedule_cas=simulator.feasible_speed_schedule_cas,
+    )
 
     v0_cas_mps = simulator.feasible_speed_schedule_cas.value(intercept_distance_m)
     v0_tas_mps = float(aero.cas2tas(v0_cas_mps, intercept_altitude_m, dT=0.0))
