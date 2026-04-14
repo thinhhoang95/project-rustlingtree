@@ -1,7 +1,7 @@
 aircraft: Airbus A320
 
 clean:
-  cd0:         0.040
+  cd0:         0.042
   k:           0.039
   e:           0.799
 
