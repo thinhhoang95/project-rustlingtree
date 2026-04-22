@@ -14,3 +14,4 @@ tqdm
 python-dotenv
 rich
 cartopy
+pdf2image
