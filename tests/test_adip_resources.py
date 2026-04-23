@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from scenario.adip_resources.download_kdfw_charts import (
+from scenario.adip_charts.download_kdfw_charts import (
     download_charts,
     iter_chart_entries,
     load_manifest,
@@ -62,7 +62,7 @@ def test_download_charts_skips_existing_and_downloads_missing(
         raise AssertionError(f"Unexpected URL: {url}")
 
     monkeypatch.setattr(
-        "scenario.adip_resources.download_kdfw_charts.urlopen",
+        "scenario.adip_charts.download_kdfw_charts.urlopen",
         fake_urlopen,
     )
 
@@ -87,4 +87,3 @@ def test_load_manifest_validates_root(tmp_path: Path) -> None:
         assert "Manifest root" in str(exc)
     else:
         raise AssertionError("Expected ValueError")
-

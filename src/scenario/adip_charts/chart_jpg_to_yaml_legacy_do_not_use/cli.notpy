@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+# Usage example:
+# python -m scenario.adip_resources.chart_jpg_to_yaml.cli \
+#   data/adip/charts/img \
+#   --output-dir data/adip/charts/yaml
+
+"""Parse ADIP chart JPEG pages into YAML with OpenRouter."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
+from rich.text import Text
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "data/adip/charts/img"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/adip/charts/yaml"
+DEFAULT_PROMPT_PATH = PROJECT_ROOT / "src/scenario/adip_resources/charter.md"
+DEFAULT_MODEL = "openai/gpt-5.4-mini"
+DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
+DEFAULT_API_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_TIMEOUT_SECONDS = 180
+DEFAULT_REASONING_EFFORT = "medium"
+SUPPORTED_SUFFIXES = {".jpg", ".jpeg"}
+USER_PROMPT = (
+    "Extract this single chart page into the required YAML schema. "
+    "Be conservative: only include links, altitude constraints, and holdings that are clearly visible."
+)
+
+
+@dataclass(slots=True)
+class ParseSummary:
+    """Aggregate result from a parsing run."""
+
+    input_dir: Path
+    output_dir: Path
+    prompt_path: Path
+    model: str
+    total_images: int
+    parsed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    failures: list[str] = field(default_factory=list)
+
+
+def iter_chart_images(input_dir: Path | str) -> list[Path]:
+    """Return chart JPEG pages in a stable order."""
+
+    path = Path(input_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"Chart image directory does not exist: {path}")
+    if not path.is_dir():
+        raise NotADirectoryError(f"Chart image path is not a directory: {path}")
+
+    images = [
+        image_path
+        for image_path in sorted(path.iterdir())
+        if image_path.is_file()
+        and image_path.suffix.lower() in SUPPORTED_SUFFIXES
+        and not image_path.name.startswith("._")
+        and image_path.name != ".DS_Store"
+    ]
+    if not images:
+        raise FileNotFoundError(f"No JPEG chart pages found in: {path}")
+    return images
+
+
+def select_chart_images(
+    input_dir: Path | str,
+    *,
+    chart_names: list[str] | None = None,
+    limit: int | None = None,
+) -> list[Path]:
+    """Return selected chart images based on optional stem filters and limit."""
+
+    images = iter_chart_images(input_dir)
+
+    if chart_names:
+        wanted = {name.casefold() for name in chart_names}
+        images = [image_path for image_path in images if image_path.stem.casefold() in wanted]
+        if not images:
+            raise FileNotFoundError(
+                "No chart pages matched the requested names: "
+                + ", ".join(sorted(chart_names))
+            )
+
+    if limit is not None:
+        if limit <= 0:
+            raise ValueError("--limit must be greater than 0.")
+        images = images[:limit]
+
+    return images
+
+
+def load_system_prompt(prompt_path: Path | str = DEFAULT_PROMPT_PATH) -> str:
+    """Load the chart extraction instructions used as the system prompt."""
+
+    path = Path(prompt_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file does not exist: {path}")
+    prompt = path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise ValueError(f"Prompt file is empty: {path}")
+    return prompt
+
+
+def build_output_path(output_dir: Path, image_path: Path) -> Path:
+    """Return the YAML output path for one chart image."""
+
+    return output_dir / f"{image_path.stem}.yaml"
+
+
+def _guess_mime_type(image_path: Path) -> str:
+    mime_type, _ = mimetypes.guess_type(image_path.name)
+    if mime_type:
+        return mime_type
+    return "image/jpeg"
+
+
+def encode_image_as_data_url(image_path: Path) -> str:
+    """Encode a local image as a data URL for the multimodal request."""
+
+    mime_type = _guess_mime_type(image_path)
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def build_request_payload(
+    *,
+    model: str,
+    system_prompt: str,
+    image_data_url: str,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+) -> dict[str, Any]:
+    """Build the OpenRouter chat-completions request payload."""
+
+    return {
+        "model": model,
+        "reasoning": {
+            "effort": reasoning_effort,
+        },
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": USER_PROMPT},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            },
+        ],
+        'stream': True
+    }
+
+
+def _extract_message_text(message_content: Any) -> str:
+    """Extract assistant text from OpenRouter's normalized message payload."""
+
+    if isinstance(message_content, str):
+        return message_content
+
+    if isinstance(message_content, list):
+        text_parts: list[str] = []
+        for item in message_content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        if text_parts:
+            return "\n".join(text_parts)
+
+    raise ValueError("Model response did not contain text content.")
+
+
+def _extract_error_message(payload: dict[str, Any]) -> str:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return "Unknown API error."
+
+
+def _stream_suffix(previous: str, incoming: str) -> str:
+    """Return only the newly added suffix from a cumulative stream chunk."""
+
+    if not incoming:
+        return ""
+    if not previous:
+        return incoming
+    if incoming.startswith(previous):
+        return incoming[len(previous) :]
+    return incoming
+
+
+def _iter_sse_events(response: Any) -> dict[str, Any]:
+    """Yield JSON objects from an SSE stream."""
+
+    pending: list[str] = []
+    while True:
+        line = response.readline()
+        if not line:
+            if pending:
+                payload = "\n".join(pending).strip()
+                if payload and payload != "[DONE]":
+                    yield json.loads(payload)
+            return
+
+        decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not decoded:
+            if not pending:
+                continue
+            payload = "\n".join(pending).strip()
+            pending = []
+            if payload == "[DONE]":
+                return
+            if payload:
+                yield json.loads(payload)
+            continue
+
+        if decoded.startswith(":"):
+            continue
+
+        if decoded.startswith("data:"):
+            pending.append(decoded[5:].lstrip())
+
+
+@dataclass(slots=True)
+class StreamPreview:
+    """Transient preview of streaming reasoning and response text."""
+
+    reasoning: str = ""
+    response: str = ""
+    status: str = "Waiting for model output..."
+
+    def update_reasoning(self, delta: str) -> None:
+        if not delta:
+            return
+        self.reasoning += delta
+
+    def update_response(self, delta: str) -> None:
+        if not delta:
+            return
+        self.response += delta
+
+    def render(self, title: str) -> Panel:
+        reasoning_text = Text(self.reasoning or "(no reasoning streamed yet)", style="dim")
+        response_text = Text(self.response or "(waiting for response)", style="green")
+        body = Text()
+        body.append("Reasoning\n", style="bold cyan")
+        body.append_text(reasoning_text)
+        body.append("\n\nResponse\n", style="bold green")
+        body.append_text(response_text)
+        body.append(f"\n\n{self.status}", style="yellow")
+        return Panel(body, title=title, expand=True)
+
+
+def call_openrouter(
+    *,
+    api_key: str,
+    api_base: str,
+    payload: dict[str, Any],
+    timeout_seconds: int,
+    referer: str | None = None,
+    title: str | None = None,
+) -> str:
+    """Send one multimodal chart request to OpenRouter and return the response text."""
+
+    endpoint = f"{api_base.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+
+    request = Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace").strip()
+        if details:
+            raise RuntimeError(f"OpenRouter API request failed ({exc.code}): {details}") from exc
+        raise RuntimeError(f"OpenRouter API request failed ({exc.code}): {exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenRouter API request failed: {exc.reason}") from exc
+
+    if "error" in response_payload:
+        raise RuntimeError(f"OpenRouter API error: {_extract_error_message(response_payload)}")
+
+    choices = response_payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("OpenRouter response did not contain any choices.")
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise ValueError("OpenRouter response choice had an unexpected shape.")
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise ValueError("OpenRouter response choice did not include a message.")
+
+    return _extract_message_text(message.get("content"))
+
+
+def stream_openrouter(
+    *,
+    api_key: str,
+    api_base: str,
+    payload: dict[str, Any],
+    timeout_seconds: int,
+    referer: str | None = None,
+    title: str | None = None,
+    on_update: Any | None = None,
+) -> tuple[str, str]:
+    """Stream a chart request and return the accumulated reasoning and response text."""
+
+    endpoint = f"{api_base.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+
+    request = Request(
+        endpoint,
+        data=json.dumps({**payload, "stream": True}).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    reasoning_parts: list[str] = []
+    response_parts: list[str] = []
+    reasoning_seen = ""
+    response_seen = ""
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            for event in _iter_sse_events(response):
+                if "error" in event:
+                    raise RuntimeError(
+                        f"OpenRouter API error: {_extract_error_message(event)}"
+                    )
+
+                choices = event.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    continue
+
+                delta = choice.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+
+                reasoning_chunk = delta.get("reasoning")
+                if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                    suffix = _stream_suffix(reasoning_seen, reasoning_chunk)
+                    reasoning_seen = reasoning_chunk
+                    if suffix:
+                        reasoning_parts.append(suffix)
+                        if on_update is not None:
+                            on_update("reasoning", suffix)
+
+                reasoning_details = delta.get("reasoning_details")
+                if isinstance(reasoning_details, list):
+                    for item in reasoning_details:
+                        if not isinstance(item, dict):
+                            continue
+                        kind = item.get("type")
+                        if kind == "reasoning.text":
+                            text_chunk = item.get("text")
+                            if isinstance(text_chunk, str) and text_chunk:
+                                suffix = _stream_suffix(reasoning_seen, text_chunk)
+                                reasoning_seen = text_chunk
+                                if suffix:
+                                    reasoning_parts.append(suffix)
+                                    if on_update is not None:
+                                        on_update("reasoning", suffix)
+                        elif kind == "reasoning.summary":
+                            summary_chunk = item.get("summary")
+                            if isinstance(summary_chunk, str) and summary_chunk:
+                                suffix = _stream_suffix(reasoning_seen, summary_chunk)
+                                reasoning_seen = summary_chunk
+                                if suffix:
+                                    reasoning_parts.append(suffix)
+                                    if on_update is not None:
+                                        on_update("reasoning", suffix)
+                        elif kind == "reasoning.encrypted":
+                            data_chunk = item.get("data")
+                            if isinstance(data_chunk, str) and data_chunk:
+                                placeholder = "[encrypted reasoning omitted]"
+                                if placeholder != reasoning_seen:
+                                    reasoning_seen = placeholder
+                                    reasoning_parts.append(placeholder)
+                                    if on_update is not None:
+                                        on_update("reasoning", placeholder)
+
+                content_chunk = delta.get("content")
+                if isinstance(content_chunk, str) and content_chunk:
+                    suffix = _stream_suffix(response_seen, content_chunk)
+                    response_seen = content_chunk
+                    if suffix:
+                        response_parts.append(suffix)
+                        if on_update is not None:
+                            on_update("response", suffix)
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace").strip()
+        if details:
+            raise RuntimeError(f"OpenRouter API request failed ({exc.code}): {details}") from exc
+        raise RuntimeError(f"OpenRouter API request failed ({exc.code}): {exc.reason}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenRouter API request failed: {exc.reason}") from exc
+
+    return "".join(reasoning_parts), "".join(response_parts)
+
+
+def strip_markdown_fences(text: str) -> str:
+    """Remove optional fenced-code wrappers from the model output."""
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", cleaned, count=1)
+        cleaned = re.sub(r"\s*```$", "", cleaned, count=1)
+    return cleaned.strip()
+
+
+def validate_yaml_payload(text: str) -> str:
+    """Apply lightweight validation to the emitted YAML text."""
+
+    cleaned = strip_markdown_fences(text)
+    if not cleaned:
+        raise ValueError("Model returned an empty response.")
+
+    required_keys = ("links:", "altitude_constraints:", "holdings:")
+    missing = [key[:-1] for key in required_keys if key not in cleaned]
+    if missing:
+        raise ValueError(
+            "Model response is missing required top-level key(s): " + ", ".join(missing)
+        )
+
+    return cleaned.rstrip() + "\n"
+
+
+def parse_chart_pages(
+    input_dir: Path | str = DEFAULT_INPUT_DIR,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    *,
+    prompt_path: Path | str = DEFAULT_PROMPT_PATH,
+    model: str = DEFAULT_MODEL,
+    api_base: str = DEFAULT_API_BASE,
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    overwrite: bool = False,
+    chart_names: list[str] | None = None,
+    limit: int | None = None,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    console: Console | None = None,
+) -> ParseSummary:
+    """Parse every selected chart page into YAML using OpenRouter."""
+
+    load_dotenv()
+
+    console = console or Console()
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    prompt_path = Path(prompt_path)
+
+    api_key = os.getenv(api_key_env, "").strip()
+    if not api_key:
+        raise EnvironmentError(
+            f"Missing API key. Set the {api_key_env} environment variable."
+        )
+
+    system_prompt = load_system_prompt(prompt_path)
+    images = select_chart_images(input_dir, chart_names=chart_names, limit=limit)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip() or None
+    title = os.getenv("OPENROUTER_X_TITLE", "").strip() or "project-rustlingtree/adip-chart-parser"
+
+    summary = ParseSummary(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        prompt_path=prompt_path,
+        model=model,
+        total_images=len(images),
+    )
+
+    console.print(
+        Panel.fit(
+            f"[bold]Input:[/bold] {input_dir}\n"
+            f"[bold]Output:[/bold] {output_dir}\n"
+            f"[bold]Prompt:[/bold] {prompt_path}\n"
+            f"[bold]Model:[/bold] {model}\n"
+            f"[bold]Pages:[/bold] {summary.total_images} total",
+            title="ADIP Chart JPG to YAML",
+        )
+    )
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
+
+    with progress:
+        overall_task = progress.add_task("[cyan]Chart pages", total=summary.total_images)
+        for image_path in images:
+            output_path = build_output_path(output_dir, image_path)
+            if output_path.exists() and not overwrite:
+                summary.skipped += 1
+                progress.console.print(
+                    f"[yellow]Skip[/yellow] {image_path.name} -> {output_path.name} already exists"
+                )
+                progress.advance(overall_task)
+                continue
+
+            progress.console.print(f"[cyan]Parsing[/cyan] {image_path.name}")
+            try:
+                image_data_url = encode_image_as_data_url(image_path)
+                payload = build_request_payload(
+                    model=model,
+                    system_prompt=system_prompt,
+                    image_data_url=image_data_url,
+                    reasoning_effort=DEFAULT_REASONING_EFFORT,
+                )
+                preview = StreamPreview(
+                    status="Streaming reasoning and response; preview clears before the next file."
+                )
+                preview_title = f"Preview: {image_path.name}"
+                started_at = time.time()
+                with Live(
+                    preview.render(preview_title),
+                    console=console,
+                    refresh_per_second=12,
+                    transient=True,
+                ) as live:
+                    def _handle_update(kind: str, chunk: str) -> None:
+                        if kind == "reasoning":
+                            preview.update_reasoning(chunk)
+                        elif kind == "response":
+                            preview.update_response(chunk)
+                        preview.status = "Streaming reasoning and response..."
+                        live.update(preview.render(preview_title))
+
+                    reasoning_text, response_text = stream_openrouter(
+                        api_key=api_key,
+                        api_base=api_base,
+                        payload=payload,
+                        timeout_seconds=timeout_seconds,
+                        referer=referer,
+                        title=title,
+                        on_update=_handle_update,
+                    )
+                    preview.reasoning = reasoning_text
+                    preview.response = response_text
+                    preview.status = (
+                        f"Completed in {time.time() - started_at:.1f}s. "
+                        "Preview will disappear automatically."
+                    )
+                    live.update(preview.render(preview_title))
+                yaml_text = validate_yaml_payload(response_text)
+                output_path.write_text(yaml_text, encoding="utf-8")
+                summary.parsed += 1
+                progress.console.print(
+                    f"[green]Saved[/green] {output_path.name}"
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                summary.failed += 1
+                summary.failures.append(f"{image_path.name}: {exc}")
+                progress.console.print(f"[red]Failed[/red] {image_path.name}: {exc}")
+            progress.advance(overall_task)
+
+    _render_summary(console, summary)
+    return summary
+
+
+def _render_summary(console: Console, summary: ParseSummary) -> None:
+    table = Table(title="Parse Summary", expand=False)
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Input directory", str(summary.input_dir))
+    table.add_row("Output directory", str(summary.output_dir))
+    table.add_row("Prompt file", str(summary.prompt_path))
+    table.add_row("Model", summary.model)
+    table.add_row("Pages processed", str(summary.total_images))
+    table.add_row("Parsed", str(summary.parsed))
+    table.add_row("Skipped", str(summary.skipped))
+    table.add_row("Failed", str(summary.failed))
+    console.print(table)
+
+    if summary.failures:
+        failure_table = Table(title="Failures", expand=False)
+        failure_table.add_column("Chart", style="bold red")
+        failure_table.add_column("Error")
+        for failure in summary.failures:
+            chart_name, _, message = failure.partition(": ")
+            failure_table.add_row(chart_name, message)
+        console.print(failure_table)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Parse ADIP chart JPEG pages into YAML using OpenRouter."
+    )
+    parser.add_argument(
+        "input_dir",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_INPUT_DIR,
+        help=f"Directory containing chart JPEG pages (default: {DEFAULT_INPUT_DIR})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Directory where YAML files will be saved (default: {DEFAULT_OUTPUT_DIR})",
+    )
+    parser.add_argument(
+        "--prompt-path",
+        type=Path,
+        default=DEFAULT_PROMPT_PATH,
+        help=f"Path to the system prompt markdown file (default: {DEFAULT_PROMPT_PATH})",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"OpenRouter model slug to use (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--api-base",
+        default=DEFAULT_API_BASE,
+        help=f"OpenRouter API base URL (default: {DEFAULT_API_BASE})",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=DEFAULT_API_KEY_ENV,
+        help=f"Environment variable containing the API key (default: {DEFAULT_API_KEY_ENV})",
+    )
+    parser.add_argument(
+        "--chart",
+        dest="chart_names",
+        action="append",
+        default=None,
+        help="Parse only specific chart stem(s). Repeatable, for example: --chart 06039BOWIE",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Parse only the first N chart pages after sorting.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"Per-request timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing YAML outputs instead of skipping them.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        parse_chart_pages(
+            args.input_dir,
+            args.output_dir,
+            prompt_path=args.prompt_path,
+            model=args.model,
+            api_base=args.api_base,
+            api_key_env=args.api_key_env,
+            overwrite=args.overwrite,
+            chart_names=args.chart_names,
+            limit=args.limit,
+            timeout_seconds=args.timeout,
+        )
+    except Exception as exc:
+        Console(stderr=True).print(f"[red]Error:[/red] {exc}")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
