@@ -62,7 +62,7 @@ Because `s_m` decreases toward the runway, the phase changes happen as the aircr
 
 - CAS min/max limits
 - altitude-rate limits
-- speed time constant
+- speed time constant, which measures the speed response time 
 - bank comfort and procedure limits
 - roll-rate limit
 - stall-based bank limiting
