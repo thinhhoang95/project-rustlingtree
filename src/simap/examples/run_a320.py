@@ -1,34 +1,24 @@
-# Remember to replace the OpenAP's a320.yml file with the one in the root directory
 from __future__ import annotations
 
 import numpy as np
-from openap import aero
 
 from simap import (
-    ApproachSimulator,
-    ConstantWeather,
-    FeasibilityConfig,
-    ReferencePath,
-    Scenario,
-    State,
+    ConstraintEnvelope,
+    EffectivePolarBackend,
+    LongitudinalPlanRequest,
+    OptimizerConfig,
+    ScalarProfile,
+    ThresholdBoundary,
+    UpstreamBoundary,
     build_default_aircraft_config,
-    build_simple_glidepath,
     build_speed_schedule_from_wrap,
     extract_aircraft_data,
     load_openap,
+    plan_longitudinal_descent,
+    plot_constraint_envelope,
+    plot_longitudinal_plan,
     suggest_approach_mass_kg,
-    plot_trajectory_map_scrubber,
-    plot_all_state_responses,
-    plot_initial_profiles,
 )
-from simap.backends import EffectivePolarBackend
-
-
-def build_reference_path_example() -> ReferencePath:
-    return ReferencePath.from_geographic(
-        lat_deg=np.asarray([48.7600, 48.5600, 48.3538], dtype=float),
-        lon_deg=np.asarray([11.0500, 11.3000, 11.7861], dtype=float),
-    )
 
 
 def main() -> None:
@@ -38,53 +28,69 @@ def main() -> None:
     cfg, openap = build_default_aircraft_config("A320", mass_kg=mass_kg, openap_objects=openap)
     perf = EffectivePolarBackend(cfg=cfg, openap=openap)
 
-    reference_path = build_reference_path_example()
-    intercept_distance_m = reference_path.total_length_m
-    threshold_elevation_m = 450.0
-    intercept_altitude_m = 3_500.0
-
-    scenario = Scenario(
-        altitude_profile=build_simple_glidepath(
-            threshold_elevation_m=threshold_elevation_m,
-            intercept_distance_m=intercept_distance_m,
-            intercept_altitude_m=intercept_altitude_m,
-            glide_deg=3.0,
+    threshold = ThresholdBoundary(
+        h_m=450.0,
+        cas_mps=float(openap.wrap.landing_speed()["default"]),
+        gamma_rad=-np.deg2rad(3.0),
+    )
+    upstream = UpstreamBoundary(
+        h_m=3_500.0,
+        cas_window_mps=(
+            float(openap.wrap.finalapp_vcas()["default"]),
+            float(openap.wrap.descent_const_vcas()["default"]),
         ),
-        raw_speed_schedule_cas=build_speed_schedule_from_wrap(openap.wrap),
-        reference_path=reference_path,
-        weather=ConstantWeather(wind_east_mps=-8.0, wind_north_mps=2.0, delta_isa_offset_K=0.0),
-        feasibility=FeasibilityConfig(planning_tailwind_mps=5.0, distance_step_m=250.0),
     )
-    simulator = ApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
-    # Plot the initial profiles with the feasibility-clamped CAS overlay.
-    plot_initial_profiles(
-        reference_path=reference_path,
-        altitude_profile=scenario.altitude_profile,
-        raw_speed_schedule_cas=scenario.raw_speed_schedule_cas,
-        feasible_speed_schedule_cas=simulator.feasible_speed_schedule_cas,
+    speed_schedule = build_speed_schedule_from_wrap(openap.wrap)
+    max_s_m = 60_000.0
+    envelope = ConstraintEnvelope.from_profiles(
+        altitude_lower=ScalarProfile(
+            s_m=np.asarray([0.0, max_s_m], dtype=float),
+            y=np.asarray([threshold.h_m, upstream.h_m - 75.0], dtype=float),
+        ),
+        altitude_upper=ScalarProfile(
+            s_m=np.asarray([0.0, max_s_m], dtype=float),
+            y=np.asarray([threshold.h_m + 25.0, upstream.h_m + 150.0], dtype=float),
+        ),
+        cas_lower=ScalarProfile(
+            s_m=speed_schedule.s_m,
+            y=np.maximum(speed_schedule.y - 8.0 * 0.514444, threshold.cas_mps),
+        ),
+        cas_upper=ScalarProfile(
+            s_m=speed_schedule.s_m,
+            y=speed_schedule.y,
+        ),
+        gamma_lower=ScalarProfile(
+            s_m=np.asarray([0.0, max_s_m], dtype=float),
+            y=np.asarray([-np.deg2rad(4.5), -np.deg2rad(0.5)], dtype=float),
+        ),
+        gamma_upper=ScalarProfile(
+            s_m=np.asarray([0.0, max_s_m], dtype=float),
+            y=np.asarray([-np.deg2rad(2.0), np.deg2rad(0.5)], dtype=float),
+        ),
+    )
+    request = LongitudinalPlanRequest(
+        cfg=cfg,
+        perf=perf,
+        threshold=threshold,
+        upstream=upstream,
+        constraints=envelope,
+        optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
+    )
+    plan = plan_longitudinal_descent(request)
+
+    plot_constraint_envelope(envelope)
+    plot_longitudinal_plan(plan, envelope=envelope)
+    print(plan.to_pandas().head())
+    print(plan.to_pandas().tail())
+    print(
+        {
+            "success": plan.solver_success,
+            "tod_m": plan.tod_m,
+            "collocation_residual_max": plan.collocation_residual_max,
+            "replay_residual_max": plan.replay_residual_max,
+        }
     )
 
-    v0_cas_mps = simulator.feasible_speed_schedule_cas.value(intercept_distance_m)
-    v0_tas_mps = float(aero.cas2tas(v0_cas_mps, intercept_altitude_m, dT=0.0))
-    initial = State.on_reference_path(
-        t_s=0.0,
-        s_m=intercept_distance_m,
-        h_m=intercept_altitude_m,
-        v_tas_mps=v0_tas_mps,
-        reference_path=reference_path,
-    )
-    trajectory = simulator.run(initial, dt_s=1.0)
-    df = trajectory.to_pandas()
-
-    # Plot the 2D flight path
-    fig, ax, slider, marker = plot_trajectory_map_scrubber(trajectory, reference_path=reference_path,
-                                        show_reference_turning_points=True, show=True)
-
-    # Plot the state trajectory
-    fig, ax = plot_all_state_responses(trajectory)
-
-    print(df.head())
-    print(df.tail())
 
 if __name__ == "__main__":
     main()

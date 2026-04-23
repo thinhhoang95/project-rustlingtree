@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 import unittest
 
-from openap import aero
-
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
+from simap import aero
 from simap.config import mode_for_s
 from simap.lateral_dynamics import LateralGuidanceConfig, compute_lateral_command
 from simap.simulator import State
@@ -21,7 +20,7 @@ class LateralDynamicsTests(unittest.TestCase):
         reference_path = fixture["reference_path"]
         curvature_index = int(abs(reference_path.curvature_inv_m).argmax())
         s_m = float(reference_path.s_m[curvature_index])
-        h_m = fixture["intercept_altitude_m"]
+        h_m = fixture["upstream"].h_m
         v_tas_mps = float(aero.cas2tas(140.0, h_m, dT=0.0))
         state = State.on_reference_path(
             t_s=0.0,

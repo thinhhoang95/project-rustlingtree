@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from openap import aero
-
+from simap import aero
 from simap.calibration import build_default_aircraft_config
 from simap.openap_adapter import extract_aircraft_data, load_openap
 from tests.helpers import a320_fixture
@@ -28,6 +29,8 @@ class CalibrationTests(unittest.TestCase):
         cfg = fixture["cfg"]
         perf = fixture["perf"]
         openap = fixture["openap"]
+        approach_gamma_rad = float(np.arcsin(np.clip((-700.0 * aero.fpm) / (150.0 * aero.kts), -0.95, 0.95)))
+        final_gamma_rad = float(np.arcsin(np.clip((-650.0 * aero.fpm) / (135.0 * aero.kts), -0.95, 0.95)))
 
         approach_drag = perf.drag_newtons(
             mode=cfg.approach,
@@ -35,7 +38,7 @@ class CalibrationTests(unittest.TestCase):
             wing_area_m2=cfg.wing_area_m2,
             v_tas_mps=150.0 * aero.kts,
             h_m=3_000.0 * aero.ft,
-            vs_mps=-700.0 * aero.fpm,
+            gamma_rad=approach_gamma_rad,
         )
         approach_ref = float(
             openap.drag.nonclean(
@@ -53,7 +56,7 @@ class CalibrationTests(unittest.TestCase):
             wing_area_m2=cfg.wing_area_m2,
             v_tas_mps=135.0 * aero.kts,
             h_m=1_500.0 * aero.ft,
-            vs_mps=-650.0 * aero.fpm,
+            gamma_rad=final_gamma_rad,
         )
         final_ref = float(
             openap.drag.nonclean(
@@ -68,6 +71,20 @@ class CalibrationTests(unittest.TestCase):
 
         self.assertLess(abs(approach_drag - approach_ref) / approach_ref, 0.15)
         self.assertLess(abs(final_drag - final_ref) / final_ref, 0.15)
+
+    def test_thrust_bounds_are_ordered_and_positive(self) -> None:
+        fixture = a320_fixture()
+        cfg = fixture["cfg"]
+        perf = fixture["perf"]
+
+        lower, upper = perf.thrust_bounds_newtons(
+            mode=cfg.approach,
+            v_tas_mps=150.0 * aero.kts,
+            h_m=3_000.0 * aero.ft,
+        )
+
+        self.assertGreater(lower, 0.0)
+        self.assertGreater(upper, lower)
 
     def test_extract_aircraft_data_uses_selected_engine(self) -> None:
         openap = load_openap("A320", engine_name="V2527-A5")
