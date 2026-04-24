@@ -21,6 +21,7 @@ from rich.progress import (
     DownloadColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
@@ -114,7 +115,7 @@ def iter_chart_entries(
             )
 
 
-def _download_to_path(url: str, destination: Path, progress: Progress, task_id: int) -> None:
+def _download_to_path(url: str, destination: Path, progress: Progress, task_id: TaskID) -> None:
     """Stream one URL to disk with a temporary file and a progress task."""
 
     request = Request(

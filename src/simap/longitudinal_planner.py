@@ -9,7 +9,7 @@ import pandas as pd
 from openap import aero
 from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, NonlinearConstraint, minimize
-from scipy.sparse import csr_matrix, lil_matrix
+from scipy.sparse import csr_array, csr_matrix, lil_matrix
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s, planned_cas_bounds_mps
@@ -1142,4 +1142,4 @@ def _constraint_jacobian_sparsity(
         inequality[row, slack_index] = 1
         row += 1
 
-    return equality.tocsr(), inequality.tocsr()
+    return cast(Any, equality.tocsr()), cast(Any, inequality.tocsr())

@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib.util
 import os
 from functools import lru_cache
+from typing import TypedDict
 
 import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from simap.backends import EffectivePolarBackend
+from simap.config import AircraftConfig
 from simap.calibration import build_default_aircraft_config, suggest_approach_mass_kg
 from simap.longitudinal_planner import (
     LongitudinalPlanRequest,
@@ -19,13 +21,25 @@ from simap.longitudinal_planner import (
 from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
 from simap.openap_adapter import extract_aircraft_data, load_openap
 from simap.path_geometry import ReferencePath
+from simap.openap_adapter import OpenAPObjects
 from simap.weather import ConstantWeather
 
 HAS_OPENAP = importlib.util.find_spec("openap") is not None
 
 
+class A320Fixture(TypedDict):
+    cfg: AircraftConfig
+    openap: OpenAPObjects
+    perf: EffectivePolarBackend
+    reference_path: ReferencePath
+    threshold: ThresholdBoundary
+    upstream: UpstreamBoundary
+    constraint_envelope: ConstraintEnvelope
+    planner_request: LongitudinalPlanRequest
+
+
 @lru_cache(maxsize=1)
-def a320_fixture() -> dict[str, object]:
+def a320_fixture() -> A320Fixture:
     if not HAS_OPENAP:
         raise RuntimeError("openap is not installed")
 

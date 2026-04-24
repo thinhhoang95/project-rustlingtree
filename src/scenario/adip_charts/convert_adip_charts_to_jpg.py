@@ -9,8 +9,8 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pdf2image import convert_from_path
-from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError
+from pdf2image import convert_from_path  # pyright: ignore[reportMissingImports]
+from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError  # pyright: ignore[reportMissingImports]
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn

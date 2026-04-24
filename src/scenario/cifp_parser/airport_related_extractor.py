@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import warnings
 
-import arinc424
+import arinc424  # pyright: ignore[reportMissingImports]
 import pandas as pd
 
 TRANSITION_COLUMNS = [
@@ -424,9 +424,10 @@ def _build_fix_row(
 
 
 def _frame_from_rows(rows: list[dict[str, object]], columns: list[str]) -> pd.DataFrame:
+    column_index = pd.Index(columns)
     if not rows:
-        return pd.DataFrame(columns=columns)
-    return pd.DataFrame(rows).reindex(columns=columns)
+        return pd.DataFrame(columns=column_index)
+    return pd.DataFrame(rows).reindex(columns=column_index)
 
 
 def _clean(value: object | None) -> str | None:
