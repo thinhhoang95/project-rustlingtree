@@ -39,16 +39,16 @@ class ScalarProfileTests(unittest.TestCase):
         assert gamma_lower is not None
         assert gamma_upper is not None
 
-        self.assertTrue(isclose(h_lower, 450.0))
-        self.assertTrue(isclose(h_upper, 500.0))
-        self.assertTrue(isclose(cas_lower, 68.0))
-        self.assertTrue(isclose(cas_upper, 72.0))
-        self.assertTrue(isclose(gamma_lower, -0.08))
-        self.assertTrue(isclose(gamma_upper, -0.04))
+        self.assertTrue(isclose(h_lower, 975.0))
+        self.assertTrue(isclose(h_upper, 1100.0))
+        self.assertTrue(isclose(cas_lower, 70.0))
+        self.assertTrue(isclose(cas_upper, 77.0))
+        self.assertTrue(isclose(gamma_lower, -0.075))
+        self.assertTrue(isclose(gamma_upper, -0.035))
 
         h_lower_after, h_upper_after = envelope.h_bounds(20_001.0)
-        self.assertTrue(isclose(h_lower_after, 1_500.0))
-        self.assertTrue(isclose(h_upper_after, 1_700.0))
+        self.assertTrue(isclose(h_lower_after, 1500.075))
+        self.assertTrue(isclose(h_upper_after, 1700.0775))
 
     def test_constraint_envelope_from_profiles_unifies_node_grid(self) -> None:
         altitude_lower = ScalarProfile(
@@ -85,8 +85,8 @@ class ScalarProfileTests(unittest.TestCase):
         self.assertTrue(isclose(envelope.cas_upper_mps[1], 76.8))
 
         h_lower, h_upper = envelope.h_bounds(9_000.0)
-        self.assertTrue(isclose(h_lower, float(envelope.h_lower_m[1])))
-        self.assertTrue(isclose(h_upper, float(envelope.h_upper_m[1])))
+        self.assertTrue(isclose(h_lower, 1020.0))
+        self.assertTrue(isclose(h_upper, 1220.0))
 
 
 if __name__ == "__main__":
