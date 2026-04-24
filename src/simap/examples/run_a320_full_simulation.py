@@ -149,9 +149,9 @@ def main() -> None:
             reference_path=reference_path,
             weather=request.weather,
             guidance=LateralGuidanceConfig(
-                lookahead_m=700.0,
-                cross_track_gain=3.0,
-                track_error_gain=4.0,
+                lookahead_m=1_500.0,
+                cross_track_gain=1.0,
+                track_error_gain=2.0,
             ),
             dt_s=0.5,
             threshold_tolerance_m=0.0,
