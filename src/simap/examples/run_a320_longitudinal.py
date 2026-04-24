@@ -38,7 +38,7 @@ def main() -> None:
     perf = EffectivePolarBackend(cfg=cfg, openap=openap)
 
     # Boundary condition at the runway threshold
-    threshold = ThresholdBoundary(
+    threshold = ThresholdBoundary( 
         h_m=450.0,
         cas_mps=float(openap.wrap.landing_speed()["default"]),
         gamma_rad=-np.deg2rad(3.0),
@@ -48,8 +48,8 @@ def main() -> None:
     upstream = UpstreamBoundary(
         h_m=3_000.0,
         cas_window_mps=(
-            float(openap.wrap.finalapp_vcas()["default"]),
-            float(openap.wrap.descent_const_vcas()["default"]),
+            float(openap.wrap.finalapp_vcas()["default"]), # 140 knots
+            float(openap.wrap.descent_const_vcas()["default"]), # 290 knots
         ),
     )
 

@@ -39,7 +39,14 @@ from .simap_plot import (
     plot_tas_response,
     plot_thrust_response,
 )
-from .simulator import State
+from .simulator import (
+    LongitudinalPlanProfile,
+    LongitudinalPlanSample,
+    SimulationRequest,
+    SimulationResult,
+    State,
+    simulate_plan,
+)
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 __all__ = [
@@ -59,10 +66,14 @@ __all__ = [
     "PerformanceBackend",
     "ReferencePath",
     "ScalarProfile",
+    "SimulationRequest",
+    "SimulationResult",
     "State",
     "ThresholdBoundary",
     "UpstreamBoundary",
     "WeatherProvider",
+    "LongitudinalPlanProfile",
+    "LongitudinalPlanSample",
     "alongtrack_wind_mps",
     "bank_limit_rad",
     "build_default_aircraft_config",
@@ -81,6 +92,7 @@ __all__ = [
     "plot_tas_response",
     "plot_thrust_response",
     "quasi_steady_cl",
+    "simulate_plan",
     "stall_margin_cas_mps",
     "suggest_approach_mass_kg",
     "wrap_default",
