@@ -21,7 +21,7 @@ class ScalarProfileTests(unittest.TestCase):
         self.assertAlmostEqual(profile.slope(5.0), 1.0)
         self.assertAlmostEqual(profile.slope(15.0), 2.0)
 
-    def test_constraint_envelope_interpolates_and_enforces_monotone_bounds(self) -> None:
+    def test_constraint_envelope_is_piecewise_constant_between_nodes(self) -> None:
         envelope = ConstraintEnvelope(
             s_m=np.asarray([0.0, 20_000.0, 40_000.0], dtype=float),
             h_lower_m=np.asarray([450.0, 1_500.0, 3_000.0], dtype=float),
@@ -36,12 +36,16 @@ class ScalarProfileTests(unittest.TestCase):
         cas_lower, cas_upper = envelope.cas_bounds(10_000.0)
         gamma_lower, gamma_upper = envelope.gamma_bounds(10_000.0)
 
-        self.assertAlmostEqual(h_lower, 975.0)
-        self.assertAlmostEqual(h_upper, 1_100.0)
-        self.assertAlmostEqual(cas_lower, 70.0)
-        self.assertAlmostEqual(cas_upper, 77.0)
-        self.assertAlmostEqual(gamma_lower, -0.075)
-        self.assertAlmostEqual(gamma_upper, -0.035)
+        self.assertAlmostEqual(h_lower, 450.0)
+        self.assertAlmostEqual(h_upper, 500.0)
+        self.assertAlmostEqual(cas_lower, 68.0)
+        self.assertAlmostEqual(cas_upper, 72.0)
+        self.assertAlmostEqual(gamma_lower, -0.08)
+        self.assertAlmostEqual(gamma_upper, -0.04)
+
+        h_lower_after, h_upper_after = envelope.h_bounds(20_001.0)
+        self.assertAlmostEqual(h_lower_after, 1_500.0)
+        self.assertAlmostEqual(h_upper_after, 1_700.0)
 
     def test_constraint_envelope_from_profiles_unifies_node_grid(self) -> None:
         altitude_lower = ScalarProfile(
@@ -73,6 +77,13 @@ class ScalarProfileTests(unittest.TestCase):
         self.assertEqual(float(envelope.s_m[-1]), 40_000.0)
         self.assertLessEqual(envelope.h_lower_m[0], envelope.h_upper_m[0])
         self.assertLessEqual(envelope.cas_lower_mps[-1], envelope.cas_upper_mps[-1])
+        self.assertAlmostEqual(envelope.h_lower_m[1], 956.6666666666666)
+        self.assertAlmostEqual(envelope.h_upper_m[1], 1140.0)
+        self.assertAlmostEqual(envelope.cas_upper_mps[1], 76.8)
+
+        h_lower, h_upper = envelope.h_bounds(9_000.0)
+        self.assertAlmostEqual(h_lower, envelope.h_lower_m[1])
+        self.assertAlmostEqual(h_upper, envelope.h_upper_m[1])
 
 
 if __name__ == "__main__":

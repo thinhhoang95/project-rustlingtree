@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from scipy import stats
@@ -73,3 +73,8 @@ def wrap_sample(wrap: WRAP, method_name: str, rng: np.random.Generator) -> float
     model = getattr(stats, params["statmodel"])(*params["statmodel_params"])
     sample = model.rvs(random_state=rng)
     return float(np.clip(sample, params["minimum"], params["maximum"]))
+
+
+def openap_dT(delta_isa_K: float) -> int:
+    """Return a value that satisfies OpenAP's stubbed `dT: int` signature."""
+    return cast(int, delta_isa_K)

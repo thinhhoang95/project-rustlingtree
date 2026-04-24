@@ -44,13 +44,15 @@ def _plot(
 def _band(envelope: ConstraintEnvelope | None, s_m: np.ndarray, lower_field: str, upper_field: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     if envelope is None:
         return None, None
-    lower_values = getattr(envelope, lower_field)
-    upper_values = getattr(envelope, upper_field)
-    if lower_values is None or upper_values is None:
-        return None, None
-    lower = np.interp(s_m, envelope.s_m, np.asarray(lower_values, dtype=float))
-    upper = np.interp(s_m, envelope.s_m, np.asarray(upper_values, dtype=float))
-    return lower, upper
+    if lower_field == "h_lower_m" and upper_field == "h_upper_m":
+        return envelope.h_bounds_many(s_m)
+    if lower_field == "cas_lower_mps" and upper_field == "cas_upper_mps":
+        return envelope.cas_bounds_many(s_m)
+    if lower_field == "gamma_lower_rad" and upper_field == "gamma_upper_rad":
+        return envelope.gamma_bounds_many(s_m)
+    if lower_field == "thrust_lower_n" and upper_field == "thrust_upper_n":
+        return envelope.thrust_bounds_many(s_m)
+    raise ValueError(f"unsupported envelope band fields: {lower_field}, {upper_field}")
 
 
 def plot_altitude_response(

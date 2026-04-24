@@ -7,7 +7,7 @@ import numpy as np
 from openap import aero
 
 from .config import AircraftConfig, ModeConfig
-from .openap_adapter import OpenAPObjects
+from .openap_adapter import OpenAPObjects, openap_dT
 from .units import m_to_ft, mps_to_kts
 
 
@@ -61,7 +61,7 @@ class EffectivePolarBackend:
         delta_isa_K: float = 0.0,
     ) -> float:
         v_tas_mps = max(1.0, float(v_tas_mps))
-        _, rho, _ = aero.atmos(h_m, dT=delta_isa_K)
+        _, rho, _ = aero.atmos(h_m, dT=openap_dT(delta_isa_K))
         dynamic_pressure = 0.5 * float(rho) * v_tas_mps**2
         cos_bank = float(np.clip(np.cos(bank_rad), 0.1, 1.0))
         lift_newtons = mass_kg * aero.g0 * float(np.cos(gamma_rad)) / cos_bank
@@ -97,7 +97,7 @@ class EffectivePolarBackend:
         if not np.isfinite(max_thrust) or max_thrust <= 0.0:
             return float(idle), float(max(idle + 1.0, 2.0 * idle))
 
-        _, rho, _ = aero.atmos(h_m, dT=delta_isa_K)
+        _, rho, _ = aero.atmos(h_m, dT=openap_dT(delta_isa_K))
         rho_ratio = float(np.clip(rho / aero.rho0, 0.05, 1.25))
         tas_kts = mps_to_kts(v_tas_mps)
         speed_relief = max(0.35, 1.0 - 0.0008 * max(tas_kts - 120.0, 0.0))

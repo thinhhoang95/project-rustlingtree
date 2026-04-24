@@ -28,19 +28,26 @@ def main() -> None:
     cfg, openap = build_default_aircraft_config("A320", mass_kg=mass_kg, openap_objects=openap)
     perf = EffectivePolarBackend(cfg=cfg, openap=openap)
 
-    threshold = ThresholdBoundary(
+    # Boundary condition at the runway threshold
+    threshold = ThresholdBoundary( 
         h_m=450.0,
         cas_mps=float(openap.wrap.landing_speed()["default"]),
         gamma_rad=-np.deg2rad(3.0),
     )
+
+    # Boundary condition at upstream, before the top of descent. The top of descent will be determined by the optimizer.
     upstream = UpstreamBoundary(
-        h_m=3_500.0,
+        h_m=3_000.0,
         cas_window_mps=(
-            float(openap.wrap.finalapp_vcas()["default"]),
-            float(openap.wrap.descent_const_vcas()["default"]),
+            float(openap.wrap.finalapp_vcas()["default"]), # 140 knots
+            float(openap.wrap.descent_const_vcas()["default"]), # 290 knots
         ),
     )
+
+    # Speed schedule is built from speed constraints of configuration, where configuration changes happen at specific distances from the runway.
+    # s_m = array([0, 8km, 30km, 60km]) y = array([135 knots (touchdown), 140 knots (final), 280 knots (descent), 280 knots (descent)])
     speed_schedule = build_speed_schedule_from_wrap(openap.wrap)
+
     max_s_m = 60_000.0
     envelope = ConstraintEnvelope.from_profiles(
         altitude_lower=ScalarProfile(
@@ -76,9 +83,10 @@ def main() -> None:
         constraints=envelope,
         optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
     )
-    plan = plan_longitudinal_descent(request)
 
     plot_constraint_envelope(envelope)
+
+    plan = plan_longitudinal_descent(request)
     plot_longitudinal_plan(plan, envelope=envelope)
     print(plan.to_pandas().head())
     print(plan.to_pandas().tail())

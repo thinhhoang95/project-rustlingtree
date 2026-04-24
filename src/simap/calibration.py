@@ -11,6 +11,7 @@ from .openap_adapter import (
     OpenAPObjects,
     extract_aircraft_data,
     load_openap,
+    openap_dT,
     wrap_default,
 )
 from .units import fpm_to_mps, ft_to_m, mps_to_kts
@@ -159,7 +160,7 @@ def _fit_effective_polar(
         vs_mps,
         strict=True,
     ):
-        _, rho, _ = aero.atmos(float(h_m), dT=0.0)
+        _, rho, _ = aero.atmos(float(h_m), dT=openap_dT(0.0))
         dynamic_pressure = 0.5 * float(rho) * float(v_tas_mps) ** 2
         sin_gamma = float(np.clip(float(v_speed_mps) / max(float(v_tas_mps), 1.0), -0.95, 0.95))
         lift_newtons = mass_kg * aero.g0 * float(np.cos(np.arcsin(sin_gamma)))

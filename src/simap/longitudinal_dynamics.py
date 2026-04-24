@@ -5,6 +5,7 @@ from openap import aero
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, ModeConfig, mode_for_s
+from .openap_adapter import openap_dT
 from .weather import WeatherProvider, alongtrack_wind_mps
 
 
@@ -18,7 +19,7 @@ def quasi_steady_cl(
     delta_isa_K: float = 0.0,
 ) -> float:
     v_tas_mps = max(1.0, float(v_tas_mps))
-    _, rho, _ = aero.atmos(h_m, dT=delta_isa_K)
+    _, rho, _ = aero.atmos(h_m, dT=openap_dT(delta_isa_K))
     dynamic_pressure = 0.5 * float(rho) * v_tas_mps**2
     lift_newtons = mass_kg * aero.g0 * float(np.cos(gamma_rad))
     return float(lift_newtons / max(dynamic_pressure * wing_area_m2, 1e-6))

@@ -7,6 +7,14 @@ import numpy as np
 from .units import km_to_m
 
 
+def _piecewise_constant_sample(s_nodes_m: np.ndarray, values: np.ndarray, query_s_m: float | np.ndarray) -> np.ndarray:
+    query = np.asarray(query_s_m, dtype=float)
+    clipped = np.clip(query, s_nodes_m[0], s_nodes_m[-1])
+    indices = np.searchsorted(s_nodes_m, clipped, side="right") - 1
+    indices = np.clip(indices, 0, len(s_nodes_m) - 1)
+    return values[indices]
+
+
 @dataclass(frozen=True)
 class ScalarProfile:
     s_m: np.ndarray
@@ -137,14 +145,28 @@ class ConstraintEnvelope:
     def _interp(self, values: np.ndarray | None, s_m: float, *, fallback: float | None = None) -> float | None:
         if values is None:
             return fallback
-        s = float(np.clip(s_m, self.s_m[0], self.s_m[-1]))
-        return float(np.interp(s, self.s_m, values))
+        return float(_piecewise_constant_sample(self.s_m, values, s_m))
+
+    def _interp_many(self, values: np.ndarray | None, s_m: np.ndarray) -> np.ndarray | None:
+        if values is None:
+            return None
+        return np.asarray(_piecewise_constant_sample(self.s_m, values, s_m), dtype=float)
+
+    def _interp_required(self, values: np.ndarray, s_m: float) -> float:
+        result = self._interp(values, s_m)
+        assert result is not None
+        return float(result)
+
+    def _interp_many_required(self, values: np.ndarray, s_m: np.ndarray) -> np.ndarray:
+        result = self._interp_many(values, s_m)
+        assert result is not None
+        return result
 
     def h_bounds(self, s_m: float) -> tuple[float, float]:
-        return self._interp(self.h_lower_m, s_m), self._interp(self.h_upper_m, s_m)
+        return self._interp_required(self.h_lower_m, s_m), self._interp_required(self.h_upper_m, s_m)
 
     def cas_bounds(self, s_m: float) -> tuple[float, float]:
-        return self._interp(self.cas_lower_mps, s_m), self._interp(self.cas_upper_mps, s_m)
+        return self._interp_required(self.cas_lower_mps, s_m), self._interp_required(self.cas_upper_mps, s_m)
 
     def gamma_bounds(self, s_m: float) -> tuple[float | None, float | None]:
         return self._interp(self.gamma_lower_rad, s_m), self._interp(self.gamma_upper_rad, s_m)
@@ -154,6 +176,18 @@ class ConstraintEnvelope:
 
     def cl_upper(self, s_m: float) -> float | None:
         return self._interp(self.cl_max, s_m)
+
+    def h_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self._interp_many_required(self.h_lower_m, s_m), self._interp_many_required(self.h_upper_m, s_m)
+
+    def cas_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self._interp_many_required(self.cas_lower_mps, s_m), self._interp_many_required(self.cas_upper_mps, s_m)
+
+    def gamma_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+        return self._interp_many(self.gamma_lower_rad, s_m), self._interp_many(self.gamma_upper_rad, s_m)
+
+    def thrust_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+        return self._interp_many(self.thrust_lower_n, s_m), self._interp_many(self.thrust_upper_n, s_m)
 
 
 def build_speed_schedule_from_wrap(
@@ -170,4 +204,4 @@ def build_speed_schedule_from_wrap(
     v_mps = np.asarray([v_land_mps, v_final_mps, v_des_mps, v_des_mps], dtype=float)
     if len(s_km) != len(v_mps):
         raise ValueError("s_nodes_km must provide four schedule anchors")
-    return ScalarProfile(s_m=km_to_m(s_km), y=v_mps)
+    return ScalarProfile(s_m=s_km * 1_000.0, y=v_mps)

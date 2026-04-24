@@ -7,6 +7,7 @@ from openap import aero
 
 from .config import AircraftConfig, ModeConfig, bank_limit_rad
 from .path_geometry import ReferencePath
+from .openap_adapter import openap_dT
 from .weather import WeatherProvider
 
 
@@ -162,7 +163,7 @@ def compute_lateral_command(
     curvature_cmd_inv_m = ref_curvature_inv_m + curvature_feedback
     phi_req_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / aero.g0))
     delta_isa_K = weather.delta_isa_K(s_m, h_m, t_s)
-    v_cas_mps = float(aero.tas2cas(v_tas_mps, h_m, dT=delta_isa_K))
+    v_cas_mps = float(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(delta_isa_K)))
     phi_max_rad = bank_limit_rad(cfg, mode, v_cas_mps)
     phi_req_rad = float(np.clip(phi_req_rad, -phi_max_rad, phi_max_rad))
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s, planned_cas_bounds_mps
 from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
 from .longitudinal_profiles import ConstraintEnvelope
+from .openap_adapter import openap_dT
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 
@@ -128,7 +130,7 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
     num_nodes = optimizer.num_nodes
     max_tod_m = float(request.constraints.s_m[-1])
     threshold_delta_isa = request.weather.delta_isa_K(0.0, request.threshold.h_m, 0.0)
-    threshold_v_tas = float(aero.cas2tas(request.threshold.cas_mps, request.threshold.h_m, dT=threshold_delta_isa))
+    threshold_v_tas = float(aero.cas2tas(request.threshold.cas_mps, request.threshold.h_m, dT=openap_dT(threshold_delta_isa)))
     initial_tod_guess_m = _initial_tod_guess(request, threshold_v_tas=threshold_v_tas, max_tod_m=max_tod_m)
 
     scale = _PlannerScale.from_request(request)
@@ -170,6 +172,15 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
     )
 
     h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(result.x, optimizer.num_nodes)
+    h_m = np.array(h_m, dtype=float, copy=True)
+    v_tas_mps = np.array(v_tas_mps, dtype=float, copy=True)
+    gamma_rad = np.array(gamma_rad, dtype=float, copy=True)
+    thrust_n = np.array(thrust_n, dtype=float, copy=True)
+    h_m[0] = request.threshold.h_m
+    v_tas_mps[0] = threshold_v_tas
+    gamma_rad[0] = request.threshold.gamma_rad
+    h_m[-1] = request.upstream.h_m
+    gamma_rad[-1] = request.upstream.gamma_rad
     s_m = np.linspace(0.0, tod_m, optimizer.num_nodes, dtype=float)
     t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
     v_cas_mps = _cas_from_tas(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps, t_s=t_s)
@@ -288,7 +299,7 @@ def _initial_guess(
     v_tas_mps = np.empty_like(cas_guess)
     for idx, (s_val, h_val, cas_val) in enumerate(zip(s_m, h_m, cas_guess, strict=True)):
         delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), 0.0)
-        v_tas_mps[idx] = float(aero.cas2tas(float(cas_val), float(h_val), dT=delta_isa_K))
+        v_tas_mps[idx] = float(aero.cas2tas(float(cas_val), float(h_val), dT=openap_dT(delta_isa_K)))
 
     t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
 
@@ -376,7 +387,7 @@ def _decision_bounds(
     ):
         cas_clipped = min(float(cas_upper), request.cfg.vmo_kts * aero.kts)
         delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_upper), 0.0)
-        sample_upper_tas.append(float(aero.cas2tas(cas_clipped, float(h_upper), dT=delta_isa_K)))
+        sample_upper_tas.append(float(aero.cas2tas(cas_clipped, float(h_upper), dT=openap_dT(delta_isa_K))))
     upper_tas = max(max(sample_upper_tas, default=threshold_v_tas), threshold_v_tas) * 1.15
 
     thrust_upper = 1.25 * scale.thrust_n
@@ -399,7 +410,7 @@ def _decision_bounds(
             np.asarray([max_tod_m, 5.0], dtype=float),
         ]
     )
-    return Bounds(lower, upper)
+    return cast(Any, Bounds)(lower, upper)
 
 
 def _objective(z: np.ndarray, request: LongitudinalPlanRequest, scale: _PlannerScale) -> float:
@@ -580,7 +591,7 @@ def _cas_from_tas(
     result = np.empty_like(v_tas_mps)
     for idx, (s_val, h_val, v_tas, t_val) in enumerate(zip(s_m, h_m, v_tas_mps, t_s, strict=True)):
         delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), float(t_val))
-        result[idx] = float(aero.tas2cas(float(v_tas), float(h_val), dT=delta_isa_K))
+        result[idx] = float(aero.tas2cas(float(v_tas), float(h_val), dT=openap_dT(delta_isa_K)))
     return result
 
 
