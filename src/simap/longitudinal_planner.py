@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, cast
 
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 from openap import aero
 from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, NonlinearConstraint, minimize
+from scipy.sparse import csr_matrix, lil_matrix
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s, planned_cas_bounds_mps
@@ -106,6 +108,7 @@ class LongitudinalPlanResult:
     replay_t_error_s: float
     replay_residual_max: float
     constraint_slack: float
+    solve_profile: "LongitudinalSolveProfile"
 
     def __len__(self) -> int:
         return int(len(self.s_m))
@@ -125,7 +128,268 @@ class LongitudinalPlanResult:
         )
 
 
+@dataclass(frozen=True)
+class LongitudinalSolveProfile:
+    total_wall_time_s: float
+    postprocess_wall_time_s: float
+    objective_calls: int
+    objective_time_s: float
+    equality_calls: int
+    equality_time_s: float
+    inequality_calls: int
+    inequality_time_s: float
+    trajectory_evaluations: int
+    trajectory_eval_time_s: float
+    trajectory_cache_hits: int
+
+
+@dataclass
+class _SolverProfilingState:
+    objective_calls: int = 0
+    objective_time_s: float = 0.0
+    equality_calls: int = 0
+    equality_time_s: float = 0.0
+    inequality_calls: int = 0
+    inequality_time_s: float = 0.0
+    trajectory_evaluations: int = 0
+    trajectory_eval_time_s: float = 0.0
+    trajectory_cache_hits: int = 0
+
+    def snapshot(self, *, total_wall_time_s: float, postprocess_wall_time_s: float) -> LongitudinalSolveProfile:
+        return LongitudinalSolveProfile(
+            total_wall_time_s=float(total_wall_time_s),
+            postprocess_wall_time_s=float(postprocess_wall_time_s),
+            objective_calls=int(self.objective_calls),
+            objective_time_s=float(self.objective_time_s),
+            equality_calls=int(self.equality_calls),
+            equality_time_s=float(self.equality_time_s),
+            inequality_calls=int(self.inequality_calls),
+            inequality_time_s=float(self.inequality_time_s),
+            trajectory_evaluations=int(self.trajectory_evaluations),
+            trajectory_eval_time_s=float(self.trajectory_eval_time_s),
+            trajectory_cache_hits=int(self.trajectory_cache_hits),
+        )
+
+
+@dataclass
+class _TrajectoryEvaluation:
+    request: LongitudinalPlanRequest
+    h_m: np.ndarray
+    v_tas_mps: np.ndarray
+    gamma_rad: np.ndarray
+    thrust_n: np.ndarray
+    tod_m: float
+    constraint_slack: float
+    _s_m: np.ndarray | None = None
+    _t_s: np.ndarray | None = None
+    _delta_isa_K: np.ndarray | None = None
+    _mode_by_node: tuple[Any, ...] | None = None
+    _state_derivatives: np.ndarray | None = None
+    _v_cas_mps: np.ndarray | None = None
+    _idle_thrust_n: np.ndarray | None = None
+    _thrust_bounds_backend: tuple[np.ndarray, np.ndarray] | None = None
+
+    @property
+    def num_nodes(self) -> int:
+        return int(len(self.h_m))
+
+    @property
+    def constant_weather(self) -> ConstantWeather | None:
+        weather = self.request.weather
+        return weather if isinstance(weather, ConstantWeather) else None
+
+    @property
+    def s_m(self) -> np.ndarray:
+        if self._s_m is None:
+            self._s_m = np.linspace(0.0, self.tod_m, self.num_nodes, dtype=float)
+        return self._s_m
+
+    @property
+    def t_s(self) -> np.ndarray:
+        if self._t_s is None:
+            self._t_s = _integrate_time_profile(
+                self.request,
+                s_m=self.s_m,
+                h_m=self.h_m,
+                v_tas_mps=self.v_tas_mps,
+            )
+        return self._t_s
+
+    @property
+    def delta_isa_K(self) -> np.ndarray:
+        if self._delta_isa_K is None:
+            weather = self.constant_weather
+            if weather is not None:
+                self._delta_isa_K = np.full(self.num_nodes, weather.delta_isa_offset_K, dtype=float)
+            else:
+                self._delta_isa_K = np.asarray(
+                    [
+                        float(self.request.weather.delta_isa_K(float(s), float(h), float(t)))
+                        for s, h, t in zip(self.s_m, self.h_m, self.t_s, strict=True)
+                    ],
+                    dtype=float,
+                )
+        return self._delta_isa_K
+
+    @property
+    def mode_by_node(self) -> tuple[Any, ...]:
+        if self._mode_by_node is None:
+            cfg = self.request.cfg
+            s_m = self.s_m
+            final_mask = s_m <= cfg.final_gate_m
+            approach_mask = (s_m > cfg.final_gate_m) & (s_m <= cfg.approach_gate_m)
+            modes = np.empty(self.num_nodes, dtype=object)
+            modes[final_mask] = cfg.final
+            modes[approach_mask] = cfg.approach
+            modes[~(final_mask | approach_mask)] = cfg.clean
+            self._mode_by_node = tuple(modes.tolist())
+        return self._mode_by_node
+
+    @property
+    def state_derivatives(self) -> np.ndarray:
+        if self._state_derivatives is None:
+            cfg = self.request.cfg
+            derivatives = np.empty((self.num_nodes, 3), dtype=float)
+            weather = self.constant_weather
+            constant_wind = None
+            if weather is not None:
+                constant_wind = float(
+                    weather.wind_east_mps * np.cos(self.request.reference_track_rad)
+                    + weather.wind_north_mps * np.sin(self.request.reference_track_rad)
+                )
+            for idx, (s_val, h_val, v_val, t_val, gamma_val, thrust_val, mode, delta_isa_K) in enumerate(
+                zip(
+                    self.s_m,
+                    self.h_m,
+                    self.v_tas_mps,
+                    self.t_s,
+                    self.gamma_rad,
+                    self.thrust_n,
+                    self.mode_by_node,
+                    self.delta_isa_K,
+                    strict=True,
+                )
+            ):
+                drag_n = self.request.perf.drag_newtons(
+                    mode=mode,
+                    mass_kg=cfg.mass_kg,
+                    wing_area_m2=cfg.wing_area_m2,
+                    v_tas_mps=float(v_val),
+                    h_m=float(h_val),
+                    gamma_rad=float(gamma_val),
+                    delta_isa_K=float(delta_isa_K),
+                )
+                cos_gamma = float(np.clip(np.cos(gamma_val), 0.05, None))
+                v_tas = max(1.0, float(v_val))
+                alongtrack_wind = (
+                    float(constant_wind)
+                    if constant_wind is not None
+                    else alongtrack_wind_mps(
+                        self.request.weather,
+                        self.request.reference_track_rad,
+                        float(s_val),
+                        float(h_val),
+                        float(t_val),
+                    )
+                )
+                ground_speed = max(1.0, v_tas + alongtrack_wind)
+                derivatives[idx, 0] = -float(np.tan(gamma_val))
+                derivatives[idx, 1] = -(((float(thrust_val) - drag_n) / cfg.mass_kg) - aero.g0 * float(np.sin(gamma_val))) / (
+                    v_tas * cos_gamma
+                )
+                derivatives[idx, 2] = 1.0 / ground_speed
+            self._state_derivatives = derivatives
+        return self._state_derivatives
+
+    @property
+    def v_cas_mps(self) -> np.ndarray:
+        if self._v_cas_mps is None:
+            weather = self.constant_weather
+            if weather is not None:
+                self._v_cas_mps = np.asarray(
+                    aero.tas2cas(self.v_tas_mps, self.h_m, dT=openap_dT(weather.delta_isa_offset_K)),
+                    dtype=float,
+                )
+            else:
+                self._v_cas_mps = np.asarray(
+                    [
+                        float(aero.tas2cas(float(v_tas), float(h), dT=openap_dT(float(delta_isa_K))))
+                        for v_tas, h, delta_isa_K in zip(self.v_tas_mps, self.h_m, self.delta_isa_K, strict=True)
+                    ],
+                    dtype=float,
+                )
+        return self._v_cas_mps
+
+    @property
+    def idle_thrust_n(self) -> np.ndarray:
+        if self._idle_thrust_n is None:
+            self._idle_thrust_n = np.asarray(
+                [
+                    float(
+                        self.request.perf.idle_thrust_newtons(
+                            v_tas_mps=float(v_tas),
+                            h_m=float(h),
+                            delta_isa_K=float(delta_isa_K),
+                        )
+                    )
+                    for v_tas, h, delta_isa_K in zip(self.v_tas_mps, self.h_m, self.delta_isa_K, strict=True)
+                ],
+                dtype=float,
+            )
+        return self._idle_thrust_n
+
+    @property
+    def thrust_bounds_backend(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._thrust_bounds_backend is None:
+            lower = np.empty(self.num_nodes, dtype=float)
+            upper = np.empty(self.num_nodes, dtype=float)
+            for idx, (mode, v_tas, h, delta_isa_K) in enumerate(
+                zip(self.mode_by_node, self.v_tas_mps, self.h_m, self.delta_isa_K, strict=True)
+            ):
+                lower[idx], upper[idx] = self.request.perf.thrust_bounds_newtons(
+                    mode=mode,
+                    v_tas_mps=float(v_tas),
+                    h_m=float(h),
+                    delta_isa_K=float(delta_isa_K),
+                )
+            self._thrust_bounds_backend = (lower, upper)
+        return self._thrust_bounds_backend
+
+
+@dataclass
+class _TrajectoryEvaluationCache:
+    request: LongitudinalPlanRequest
+    profiling: _SolverProfilingState
+    _last_key: bytes | None = None
+    _last_eval: _TrajectoryEvaluation | None = None
+
+    def evaluate(self, z: np.ndarray) -> _TrajectoryEvaluation:
+        z_arr = np.ascontiguousarray(np.asarray(z, dtype=float))
+        key = z_arr.tobytes()
+        if self._last_key == key and self._last_eval is not None:
+            self.profiling.trajectory_cache_hits += 1
+            return self._last_eval
+
+        started_at = perf_counter()
+        h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(z_arr, self.request.optimizer.num_nodes)
+        evaluation = _TrajectoryEvaluation(
+            request=self.request,
+            h_m=np.array(h_m, dtype=float, copy=True),
+            v_tas_mps=np.array(v_tas_mps, dtype=float, copy=True),
+            gamma_rad=np.array(gamma_rad, dtype=float, copy=True),
+            thrust_n=np.array(thrust_n, dtype=float, copy=True),
+            tod_m=float(tod_m),
+            constraint_slack=float(constraint_slack),
+        )
+        self._last_key = key
+        self._last_eval = evaluation
+        self.profiling.trajectory_evaluations += 1
+        self.profiling.trajectory_eval_time_s += perf_counter() - started_at
+        return evaluation
+
+
 def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalPlanResult:
+    solve_started_at = perf_counter()
     optimizer = request.optimizer
     num_nodes = optimizer.num_nodes
     max_tod_m = float(request.constraints.s_m[-1])
@@ -146,31 +410,73 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
         max_tod_m=max_tod_m,
         scale=scale,
     )
+    profiling = _SolverProfilingState()
+    evaluation_cache = _TrajectoryEvaluationCache(request=request, profiling=profiling)
+    equality_jac_sparsity, inequality_jac_sparsity = _constraint_jacobian_sparsity(request)
+
+    def objective(z: np.ndarray) -> float:
+        started_at = perf_counter()
+        try:
+            return _objective(z, request=request, scale=scale, evaluation_cache=evaluation_cache)
+        finally:
+            profiling.objective_calls += 1
+            profiling.objective_time_s += perf_counter() - started_at
+
+    def equality_fun(z: np.ndarray) -> np.ndarray:
+        started_at = perf_counter()
+        try:
+            return _equality_constraints(
+                z,
+                request=request,
+                threshold_v_tas=threshold_v_tas,
+                evaluation_cache=evaluation_cache,
+            )
+        finally:
+            profiling.equality_calls += 1
+            profiling.equality_time_s += perf_counter() - started_at
+
+    def inequality_fun(z: np.ndarray) -> np.ndarray:
+        started_at = perf_counter()
+        try:
+            return _inequality_constraints(
+                z,
+                request=request,
+                scale=scale,
+                evaluation_cache=evaluation_cache,
+            )
+        finally:
+            profiling.inequality_calls += 1
+            profiling.inequality_time_s += perf_counter() - started_at
 
     equality = NonlinearConstraint(
-        lambda z: _equality_constraints(z, request=request, threshold_v_tas=threshold_v_tas),
+        equality_fun,
         0.0,
         0.0,
+        finite_diff_jac_sparsity=equality_jac_sparsity,
     )
     inequality = NonlinearConstraint(
-        lambda z: _inequality_constraints(z, request=request, scale=scale),
+        inequality_fun,
         0.0,
         np.inf,
+        finite_diff_jac_sparsity=inequality_jac_sparsity,
     )
 
+    solver_options = {
+        "maxiter": optimizer.maxiter,
+        "verbose": optimizer.verbose,
+    }
+    if equality_jac_sparsity is not None and inequality_jac_sparsity is not None:
+        solver_options["sparse_jacobian"] = True
     result = minimize(
-        _objective,
+        objective,
         z0,
-        args=(request, scale),
         method="trust-constr",
         bounds=bounds,
         constraints=[equality, inequality],
-        options={
-            "maxiter": optimizer.maxiter,
-            "verbose": optimizer.verbose,
-        },
+        options=solver_options,
     )
 
+    postprocess_started_at = perf_counter()
     h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(result.x, optimizer.num_nodes)
     h_m = np.array(h_m, dtype=float, copy=True)
     v_tas_mps = np.array(v_tas_mps, dtype=float, copy=True)
@@ -181,11 +487,29 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
     gamma_rad[0] = request.threshold.gamma_rad
     h_m[-1] = request.upstream.h_m
     gamma_rad[-1] = request.upstream.gamma_rad
-    s_m = np.linspace(0.0, tod_m, optimizer.num_nodes, dtype=float)
-    t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
-    v_cas_mps = _cas_from_tas(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps, t_s=t_s)
+    final_evaluation = _TrajectoryEvaluation(
+        request=request,
+        h_m=h_m,
+        v_tas_mps=v_tas_mps,
+        gamma_rad=gamma_rad,
+        thrust_n=thrust_n,
+        tod_m=float(tod_m),
+        constraint_slack=float(constraint_slack),
+    )
+    s_m = np.array(final_evaluation.s_m, dtype=float, copy=True)
+    t_s = np.array(final_evaluation.t_s, dtype=float, copy=True)
+    v_cas_mps = np.array(final_evaluation.v_cas_mps, dtype=float, copy=True)
     collocation_residual_max = float(
-        np.max(np.abs(_equality_constraints(result.x, request=request, threshold_v_tas=threshold_v_tas)))
+        np.max(
+            np.abs(
+                _equality_constraints(
+                    result.x,
+                    request=request,
+                    threshold_v_tas=threshold_v_tas,
+                    evaluation_cache=evaluation_cache,
+                )
+            )
+        )
     )
     replay = _replay_solution(
         request=request,
@@ -197,6 +521,10 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
         thrust_n=thrust_n,
     )
     mode = tuple(mode_for_s(request.cfg, float(s)).name for s in s_m)
+    solve_profile = profiling.snapshot(
+        total_wall_time_s=perf_counter() - solve_started_at,
+        postprocess_wall_time_s=perf_counter() - postprocess_started_at,
+    )
     return LongitudinalPlanResult(
         s_m=s_m,
         h_m=h_m,
@@ -217,6 +545,7 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
         replay_t_error_s=float(replay["t_error_s"]),
         replay_residual_max=float(replay["max_error"]),
         constraint_slack=float(constraint_slack),
+        solve_profile=solve_profile,
     )
 
 
@@ -296,10 +625,16 @@ def _initial_guess(
     cas_upper_end = min(request.upstream.cas_upper_mps, request.constraints.cas_bounds(initial_tod_guess_m)[1])
     cas_mid_end = 0.5 * (cas_lower_end + cas_upper_end)
     cas_guess = np.linspace(request.threshold.cas_mps, cas_mid_end, num_nodes, dtype=float)
-    v_tas_mps = np.empty_like(cas_guess)
-    for idx, (s_val, h_val, cas_val) in enumerate(zip(s_m, h_m, cas_guess, strict=True)):
-        delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), 0.0)
-        v_tas_mps[idx] = float(aero.cas2tas(float(cas_val), float(h_val), dT=openap_dT(delta_isa_K)))
+    if isinstance(request.weather, ConstantWeather):
+        v_tas_mps = np.asarray(
+            aero.cas2tas(cas_guess, h_m, dT=openap_dT(request.weather.delta_isa_offset_K)),
+            dtype=float,
+        )
+    else:
+        v_tas_mps = np.empty_like(cas_guess)
+        for idx, (s_val, h_val, cas_val) in enumerate(zip(s_m, h_m, cas_guess, strict=True)):
+            delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), 0.0)
+            v_tas_mps[idx] = float(aero.cas2tas(float(cas_val), float(h_val), dT=openap_dT(delta_isa_K)))
 
     t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
 
@@ -413,28 +748,25 @@ def _decision_bounds(
     return cast(Any, Bounds)(lower, upper)
 
 
-def _objective(z: np.ndarray, request: LongitudinalPlanRequest, scale: _PlannerScale) -> float:
-    h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(z, request.optimizer.num_nodes)
-    s_m = np.linspace(0.0, tod_m, request.optimizer.num_nodes, dtype=float)
-    t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
-    ds_m = max(tod_m / max(request.optimizer.num_nodes - 1, 1), 1.0)
-    thrust_delta = np.empty_like(thrust_n)
-    for idx, (s_val, h_val, v_val, t_val) in enumerate(zip(s_m, h_m, v_tas_mps, t_s, strict=True)):
-        mode = mode_for_s(request.cfg, float(s_val))
-        delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), float(t_val))
-        idle = request.perf.idle_thrust_newtons(
-            v_tas_mps=float(v_val),
-            h_m=float(h_val),
-            delta_isa_K=delta_isa_K,
-        )
-        thrust_delta[idx] = (float(thrust_n[idx]) - idle) / max(1.0, scale.thrust_n)
-    gamma_gradient = np.diff(gamma_rad) / max(ds_m, 1.0)
+def _objective(
+    z: np.ndarray,
+    *,
+    request: LongitudinalPlanRequest,
+    scale: _PlannerScale,
+    evaluation_cache: _TrajectoryEvaluationCache,
+) -> float:
+    evaluation = evaluation_cache.evaluate(z)
+    ds_m = max(evaluation.tod_m / max(request.optimizer.num_nodes - 1, 1), 1.0)
+    thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / max(1.0, scale.thrust_n)
+    gamma_gradient = np.diff(evaluation.gamma_rad) / max(ds_m, 1.0)
     objective = (
-        -request.optimizer.tod_reward_weight * (tod_m / 1_000.0)
-        + request.optimizer.thrust_penalty_weight * (tod_m / 1_000.0) * float(np.mean(thrust_delta**2))
+        -request.optimizer.tod_reward_weight * (evaluation.tod_m / 1_000.0)
+        + request.optimizer.thrust_penalty_weight
+        * (evaluation.tod_m / 1_000.0)
+        * float(np.mean(thrust_delta**2))
         + request.optimizer.gamma_smoothness_weight
         * float(np.mean((gamma_gradient / np.deg2rad(1.0) * 1_000.0) ** 2))
-        + request.optimizer.slack_penalty_weight * float(constraint_slack**2)
+        + request.optimizer.slack_penalty_weight * float(evaluation.constraint_slack**2)
     )
     return float(objective)
 
@@ -444,57 +776,30 @@ def _equality_constraints(
     *,
     request: LongitudinalPlanRequest,
     threshold_v_tas: float,
+    evaluation_cache: _TrajectoryEvaluationCache,
 ) -> np.ndarray:
-    h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(z, request.optimizer.num_nodes)
-    del constraint_slack
-    s_m = np.linspace(0.0, tod_m, request.optimizer.num_nodes, dtype=float)
-    t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
-    ds_m = float(tod_m / (request.optimizer.num_nodes - 1))
-    defects: list[float] = []
-    for idx in range(request.optimizer.num_nodes - 1):
-        state_i = distance_state_derivatives(
-            s_m=float(s_m[idx]),
-            h_m=float(h_m[idx]),
-            v_tas_mps=float(v_tas_mps[idx]),
-            t_s=float(t_s[idx]),
-            gamma_rad=float(gamma_rad[idx]),
-            thrust_n=float(thrust_n[idx]),
-            cfg=request.cfg,
-            perf=request.perf,
-            weather=request.weather,
-            reference_track_rad=request.reference_track_rad,
-        )
-        state_j = distance_state_derivatives(
-            s_m=float(s_m[idx + 1]),
-            h_m=float(h_m[idx + 1]),
-            v_tas_mps=float(v_tas_mps[idx + 1]),
-            t_s=float(t_s[idx + 1]),
-            gamma_rad=float(gamma_rad[idx + 1]),
-            thrust_n=float(thrust_n[idx + 1]),
-            cfg=request.cfg,
-            perf=request.perf,
-            weather=request.weather,
-            reference_track_rad=request.reference_track_rad,
-        )
-        trapezoid = 0.5 * ds_m * (state_i + state_j)
-        defects.extend(
-            (
-                np.asarray([h_m[idx + 1], v_tas_mps[idx + 1]])
-                - np.asarray([h_m[idx], v_tas_mps[idx]])
-                - trapezoid[:2]
-            ).tolist()
-        )
-
-    defects.extend(
+    evaluation = evaluation_cache.evaluate(z)
+    ds_m = float(evaluation.tod_m / (request.optimizer.num_nodes - 1))
+    trapezoid = 0.5 * ds_m * (evaluation.state_derivatives[:-1, :2] + evaluation.state_derivatives[1:, :2])
+    state_delta = np.column_stack(
         [
-            float(h_m[0] - request.threshold.h_m),
-            float(v_tas_mps[0] - threshold_v_tas),
-            float(gamma_rad[0] - request.threshold.gamma_rad),
-            float(h_m[-1] - request.upstream.h_m),
-            float(gamma_rad[-1] - request.upstream.gamma_rad),
+            np.diff(evaluation.h_m),
+            np.diff(evaluation.v_tas_mps),
         ]
     )
-    return np.asarray(defects, dtype=float)
+    defects = np.empty(2 * (request.optimizer.num_nodes - 1) + 5, dtype=float)
+    defects[: 2 * (request.optimizer.num_nodes - 1)] = (state_delta - trapezoid).reshape(-1)
+    defects[-5:] = np.asarray(
+        [
+            float(evaluation.h_m[0] - request.threshold.h_m),
+            float(evaluation.v_tas_mps[0] - threshold_v_tas),
+            float(evaluation.gamma_rad[0] - request.threshold.gamma_rad),
+            float(evaluation.h_m[-1] - request.upstream.h_m),
+            float(evaluation.gamma_rad[-1] - request.upstream.gamma_rad),
+        ],
+        dtype=float,
+    )
+    return defects
 
 
 def _inequality_constraints(
@@ -502,82 +807,76 @@ def _inequality_constraints(
     *,
     request: LongitudinalPlanRequest,
     scale: _PlannerScale,
+    evaluation_cache: _TrajectoryEvaluationCache,
 ) -> np.ndarray:
-    h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(z, request.optimizer.num_nodes)
-    s_m = np.linspace(0.0, tod_m, request.optimizer.num_nodes, dtype=float)
-    t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
-    v_cas_mps = _cas_from_tas(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps, t_s=t_s)
-    slack_altitude = constraint_slack * scale.altitude_m
-    slack_speed = constraint_slack * scale.speed_mps
-    slack_gamma = constraint_slack * scale.gamma_rad
-    slack_thrust = constraint_slack * scale.thrust_n
+    evaluation = evaluation_cache.evaluate(z)
+    slack_altitude = evaluation.constraint_slack * scale.altitude_m
+    slack_speed = evaluation.constraint_slack * scale.speed_mps
+    slack_gamma = evaluation.constraint_slack * scale.gamma_rad
+    slack_thrust = evaluation.constraint_slack * scale.thrust_n
 
-    residuals: list[float] = []
-    for idx, (s_val, h_val, v_tas, v_cas, t_val, gamma_val, thrust_val) in enumerate(
-        zip(s_m, h_m, v_tas_mps, v_cas_mps, t_s, gamma_rad, thrust_n, strict=True)
-    ):
-        h_lower, h_upper = request.constraints.h_bounds(float(s_val))
-        residuals.extend(
+    h_lower, h_upper = request.constraints.h_bounds_many(evaluation.s_m)
+    cas_lower_env, cas_upper_env = request.constraints.cas_bounds_many(evaluation.s_m)
+    mode_lower, mode_upper = _planned_cas_bounds_many(request.cfg, evaluation.s_m)
+    cas_lower_eff = np.maximum(cas_lower_env, mode_lower)
+    cas_upper_eff = np.minimum(cas_upper_env, mode_upper)
+
+    thrust_lower_backend, thrust_upper_backend = evaluation.thrust_bounds_backend
+    thrust_lower_env, thrust_upper_env = request.constraints.thrust_bounds_many(evaluation.s_m)
+    thrust_lower = thrust_lower_backend if thrust_lower_env is None else np.maximum(thrust_lower_backend, thrust_lower_env)
+    thrust_upper = thrust_upper_backend if thrust_upper_env is None else np.minimum(thrust_upper_backend, thrust_upper_env)
+
+    residual_parts = [
+        evaluation.h_m - h_lower + slack_altitude,
+        h_upper - evaluation.h_m + slack_altitude,
+        evaluation.v_cas_mps - cas_lower_eff + slack_speed,
+        cas_upper_eff - evaluation.v_cas_mps + slack_speed,
+        evaluation.thrust_n - thrust_lower + slack_thrust,
+        thrust_upper - evaluation.thrust_n + slack_thrust,
+    ]
+
+    gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(evaluation.s_m)
+    if gamma_lower is not None:
+        residual_parts.append(evaluation.gamma_rad - gamma_lower + slack_gamma)
+    if gamma_upper is not None:
+        residual_parts.append(gamma_upper - evaluation.gamma_rad + slack_gamma)
+
+    if request.constraints.cl_max is not None:
+        cl_upper = request.constraints._interp_many_required(request.constraints.cl_max, evaluation.s_m)
+        cl_values = np.asarray(
             [
-                float(h_val - h_lower + slack_altitude),
-                float(h_upper - h_val + slack_altitude),
-            ]
+                float(
+                    quasi_steady_cl(
+                        mass_kg=request.cfg.mass_kg,
+                        wing_area_m2=request.cfg.wing_area_m2,
+                        v_tas_mps=float(v_tas),
+                        h_m=float(h),
+                        gamma_rad=float(gamma),
+                        delta_isa_K=float(delta_isa_K),
+                    )
+                )
+                for v_tas, h, gamma, delta_isa_K in zip(
+                    evaluation.v_tas_mps,
+                    evaluation.h_m,
+                    evaluation.gamma_rad,
+                    evaluation.delta_isa_K,
+                    strict=True,
+                )
+            ],
+            dtype=float,
         )
+        residual_parts.append(cl_upper - cl_values + evaluation.constraint_slack)
 
-        cas_lower, cas_upper = request.constraints.cas_bounds(float(s_val))
-        mode_lower, mode_upper = planned_cas_bounds_mps(request.cfg, float(s_val))
-        cas_lower_eff = max(cas_lower, mode_lower)
-        cas_upper_eff = min(cas_upper, mode_upper)
-        residuals.extend(
+    residual_parts.append(
+        np.asarray(
             [
-                float(v_cas - cas_lower_eff + slack_speed),
-                float(cas_upper_eff - v_cas + slack_speed),
-            ]
+                float(evaluation.v_cas_mps[-1] - request.upstream.cas_lower_mps + slack_speed),
+                float(request.upstream.cas_upper_mps - evaluation.v_cas_mps[-1] + slack_speed),
+            ],
+            dtype=float,
         )
-
-        mode = mode_for_s(request.cfg, float(s_val))
-        delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), float(t_val))
-        thrust_lower_backend, thrust_upper_backend = request.perf.thrust_bounds_newtons(
-            mode=mode,
-            v_tas_mps=float(v_tas),
-            h_m=float(h_val),
-            delta_isa_K=delta_isa_K,
-        )
-        thrust_lower_env, thrust_upper_env = request.constraints.thrust_bounds(float(s_val))
-        thrust_lower = thrust_lower_backend if thrust_lower_env is None else max(thrust_lower_backend, thrust_lower_env)
-        thrust_upper = thrust_upper_backend if thrust_upper_env is None else min(thrust_upper_backend, thrust_upper_env)
-        residuals.extend(
-            [
-                float(thrust_val - thrust_lower + slack_thrust),
-                float(thrust_upper - thrust_val + slack_thrust),
-            ]
-        )
-
-        gamma_lower, gamma_upper = request.constraints.gamma_bounds(float(s_val))
-        if gamma_lower is not None:
-            residuals.append(float(gamma_val - gamma_lower + slack_gamma))
-        if gamma_upper is not None:
-            residuals.append(float(gamma_upper - gamma_val + slack_gamma))
-
-        cl_upper = request.constraints.cl_upper(float(s_val))
-        if cl_upper is not None:
-            cl = quasi_steady_cl(
-                mass_kg=request.cfg.mass_kg,
-                wing_area_m2=request.cfg.wing_area_m2,
-                v_tas_mps=float(v_tas),
-                h_m=float(h_val),
-                gamma_rad=float(gamma_val),
-                delta_isa_K=delta_isa_K,
-            )
-            residuals.append(float(cl_upper - cl + constraint_slack))
-
-    residuals.extend(
-        [
-            float(v_cas_mps[-1] - request.upstream.cas_lower_mps + slack_speed),
-            float(request.upstream.cas_upper_mps - v_cas_mps[-1] + slack_speed),
-        ]
     )
-    return np.asarray(residuals, dtype=float)
+    return np.concatenate(residual_parts)
 
 
 def _cas_from_tas(
@@ -588,6 +887,10 @@ def _cas_from_tas(
     v_tas_mps: np.ndarray,
     t_s: np.ndarray,
 ) -> np.ndarray:
+    weather = request.weather
+    if isinstance(weather, ConstantWeather):
+        return np.asarray(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(weather.delta_isa_offset_K)), dtype=float)
+
     result = np.empty_like(v_tas_mps)
     for idx, (s_val, h_val, v_tas, t_val) in enumerate(zip(s_m, h_m, v_tas_mps, t_s, strict=True)):
         delta_isa_K = request.weather.delta_isa_K(float(s_val), float(h_val), float(t_val))
@@ -686,6 +989,16 @@ def _integrate_time_profile(
     h_m: np.ndarray,
     v_tas_mps: np.ndarray,
 ) -> np.ndarray:
+    weather = request.weather
+    if isinstance(weather, ConstantWeather):
+        segment_ground_speed = 0.5 * (v_tas_mps[:-1] + v_tas_mps[1:]) + (
+            weather.wind_east_mps * np.cos(request.reference_track_rad)
+            + weather.wind_north_mps * np.sin(request.reference_track_rad)
+        )
+        segment_ground_speed = np.maximum(1.0, segment_ground_speed)
+        increments = np.diff(s_m) / segment_ground_speed
+        return np.concatenate([np.zeros(1, dtype=float), np.cumsum(increments, dtype=float)])
+
     time_s = np.zeros_like(s_m, dtype=float)
     for idx in range(1, len(s_m)):
         ground_speed = max(
@@ -701,3 +1014,132 @@ def _integrate_time_profile(
         )
         time_s[idx] = time_s[idx - 1] + (s_m[idx] - s_m[idx - 1]) / ground_speed
     return time_s
+
+
+def _planned_cas_bounds_many(cfg: AircraftConfig, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    points = np.asarray(s_m, dtype=float)
+    lower = np.empty_like(points)
+    upper = np.empty_like(points)
+    final_mask = points <= cfg.final_gate_m
+    approach_mask = (points > cfg.final_gate_m) & (points <= cfg.approach_gate_m)
+    clean_mask = ~(final_mask | approach_mask)
+
+    for mask, mode in ((final_mask, cfg.final), (approach_mask, cfg.approach), (clean_mask, cfg.clean)):
+        if not np.any(mask):
+            continue
+        lower_value, upper_value = planned_cas_bounds_mps(cfg, float(points[np.flatnonzero(mask)[0]]))
+        lower[mask] = lower_value
+        upper[mask] = upper_value
+    return lower, upper
+
+
+def _constraint_jacobian_sparsity(
+    request: LongitudinalPlanRequest,
+) -> tuple[csr_matrix | None, csr_matrix | None]:
+    if not isinstance(request.weather, ConstantWeather):
+        return None, None
+
+    num_nodes = request.optimizer.num_nodes
+    num_variables = 4 * num_nodes + 2
+    tod_index = 4 * num_nodes
+    slack_index = tod_index + 1
+
+    equality_rows = 2 * (num_nodes - 1) + 5
+    equality = lil_matrix((equality_rows, num_variables), dtype=int)
+    for idx in range(num_nodes - 1):
+        row = 2 * idx
+        local_indices = [
+            idx,
+            idx + 1,
+            num_nodes + idx,
+            num_nodes + idx + 1,
+            2 * num_nodes + idx,
+            2 * num_nodes + idx + 1,
+            3 * num_nodes + idx,
+            3 * num_nodes + idx + 1,
+            tod_index,
+        ]
+        for col in local_indices:
+            equality[row, col] = 1
+            equality[row + 1, col] = 1
+    equality[2 * (num_nodes - 1) + 0, 0] = 1
+    equality[2 * (num_nodes - 1) + 1, num_nodes] = 1
+    equality[2 * (num_nodes - 1) + 2, 2 * num_nodes] = 1
+    equality[2 * (num_nodes - 1) + 3, num_nodes - 1] = 1
+    equality[2 * (num_nodes - 1) + 4, 3 * num_nodes - 1] = 1
+
+    inequality_rows = 6 * num_nodes
+    if request.constraints.gamma_lower_rad is not None:
+        inequality_rows += num_nodes
+    if request.constraints.gamma_upper_rad is not None:
+        inequality_rows += num_nodes
+    if request.constraints.cl_max is not None:
+        inequality_rows += num_nodes
+    inequality_rows += 2
+
+    inequality = lil_matrix((inequality_rows, num_variables), dtype=int)
+    row = 0
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, num_nodes + idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, num_nodes + idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, num_nodes + idx] = 1
+        inequality[row, 3 * num_nodes + idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    for idx in range(num_nodes):
+        inequality[row, idx] = 1
+        inequality[row, num_nodes + idx] = 1
+        inequality[row, 3 * num_nodes + idx] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+    if request.constraints.gamma_lower_rad is not None:
+        for idx in range(num_nodes):
+            inequality[row, 2 * num_nodes + idx] = 1
+            inequality[row, tod_index] = 1
+            inequality[row, slack_index] = 1
+            row += 1
+    if request.constraints.gamma_upper_rad is not None:
+        for idx in range(num_nodes):
+            inequality[row, 2 * num_nodes + idx] = 1
+            inequality[row, tod_index] = 1
+            inequality[row, slack_index] = 1
+            row += 1
+    if request.constraints.cl_max is not None:
+        for idx in range(num_nodes):
+            inequality[row, idx] = 1
+            inequality[row, num_nodes + idx] = 1
+            inequality[row, 2 * num_nodes + idx] = 1
+            inequality[row, tod_index] = 1
+            inequality[row, slack_index] = 1
+            row += 1
+    for _ in range(2):
+        inequality[row, num_nodes - 1] = 1
+        inequality[row, 2 * num_nodes - 1] = 1
+        inequality[row, tod_index] = 1
+        inequality[row, slack_index] = 1
+        row += 1
+
+    return equality.tocsr(), inequality.tocsr()

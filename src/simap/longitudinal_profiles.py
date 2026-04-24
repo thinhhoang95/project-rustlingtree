@@ -7,14 +7,6 @@ import numpy as np
 from .units import km_to_m
 
 
-def _piecewise_constant_sample(s_nodes_m: np.ndarray, values: np.ndarray, query_s_m: float | np.ndarray) -> np.ndarray:
-    query = np.asarray(query_s_m, dtype=float)
-    clipped = np.clip(query, s_nodes_m[0], s_nodes_m[-1])
-    indices = np.searchsorted(s_nodes_m, clipped, side="right") - 1
-    indices = np.clip(indices, 0, len(s_nodes_m) - 1)
-    return values[indices]
-
-
 @dataclass(frozen=True)
 class ScalarProfile:
     s_m: np.ndarray
@@ -145,12 +137,13 @@ class ConstraintEnvelope:
     def _interp(self, values: np.ndarray | None, s_m: float, *, fallback: float | None = None) -> float | None:
         if values is None:
             return fallback
-        return float(_piecewise_constant_sample(self.s_m, values, s_m))
+        return float(np.interp(float(s_m), self.s_m, values))
 
     def _interp_many(self, values: np.ndarray | None, s_m: np.ndarray) -> np.ndarray | None:
         if values is None:
             return None
-        return np.asarray(_piecewise_constant_sample(self.s_m, values, s_m), dtype=float)
+        points = np.asarray(s_m, dtype=float)
+        return np.asarray(np.interp(points, self.s_m, values), dtype=float)
 
     def _interp_required(self, values: np.ndarray, s_m: float) -> float:
         result = self._interp(values, s_m)

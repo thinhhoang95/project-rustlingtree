@@ -179,6 +179,19 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertGreaterEqual(plan.collocation_residual_max, 0.0)
         self.assertGreaterEqual(plan.replay_residual_max, 0.0)
 
+    def test_solver_profile_is_reported(self) -> None:
+        profile = self.plan.solve_profile
+
+        self.assertGreater(profile.total_wall_time_s, 0.0)
+        self.assertGreaterEqual(profile.postprocess_wall_time_s, 0.0)
+        self.assertGreater(profile.objective_calls, 0)
+        self.assertGreater(profile.equality_calls, 0)
+        self.assertGreater(profile.inequality_calls, 0)
+        self.assertGreater(profile.objective_time_s, 0.0)
+        self.assertGreater(profile.equality_time_s, 0.0)
+        self.assertGreater(profile.inequality_time_s, 0.0)
+        self.assertGreater(profile.trajectory_evaluations, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

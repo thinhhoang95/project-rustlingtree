@@ -14,6 +14,7 @@ from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
 from .longitudinal_planner import (
     LongitudinalPlanRequest,
     LongitudinalPlanResult,
+    LongitudinalSolveProfile,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
@@ -49,6 +50,7 @@ __all__ = [
     "LateralGuidanceConfig",
     "LongitudinalPlanRequest",
     "LongitudinalPlanResult",
+    "LongitudinalSolveProfile",
     "ModeConfig",
     "ModeName",
     "OpenAPAircraftData",
