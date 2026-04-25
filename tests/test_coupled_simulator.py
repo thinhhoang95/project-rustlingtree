@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.longitudinal_planner import plan_longitudinal_descent
+from simap.longitudinal_planner import LateralBoundary, OptimizerConfig, plan_longitudinal_descent
 from simap.path_geometry import ReferencePath
 from simap.simulator import SimulationRequest, State, simulate_plan
 from tests.test_simulator import build_test_request
@@ -76,6 +77,20 @@ class CoupledSimulatorTests(unittest.TestCase):
         self.assertGreater(abs(result.cross_track_m[0]), 100.0)
         self.assertLess(abs(result.cross_track_m[-1]), 5.0)
         self.assertLess(result.final_threshold_error_m, 5.0)
+
+    def test_joint_planner_recovers_from_upstream_cross_track_offset(self) -> None:
+        request = replace(
+            self.plan_request,
+            upstream_lateral=LateralBoundary(cross_track_m=150.0),
+            optimizer=OptimizerConfig(num_nodes=9, maxiter=120, verbose=0),
+        )
+        plan = plan_longitudinal_descent(request)
+
+        self.assertAlmostEqual(plan.cross_track_m[-1], 150.0, delta=1e-2)
+        self.assertAlmostEqual(plan.cross_track_m[0], 0.0, delta=1e-2)
+        self.assertGreater(np.max(np.abs(plan.phi_rad)), 1e-5)
+        self.assertTrue(np.all(np.abs(plan.phi_rad) <= plan.phi_max_rad + 1e-6))
+        self.assertGreater(np.min(plan.alongtrack_speed_mps), 0.0)
 
     def test_simulator_rejects_reference_path_shorter_than_tod(self) -> None:
         short_path = ReferencePath.from_geographic(

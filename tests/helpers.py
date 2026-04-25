@@ -99,6 +99,7 @@ def a320_fixture() -> A320Fixture:
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         weather=ConstantWeather(),
         optimizer=OptimizerConfig(num_nodes=31, maxiter=250),
     )

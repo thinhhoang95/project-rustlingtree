@@ -16,6 +16,7 @@ from simap import (
     EffectivePolarBackend,
     LongitudinalPlanRequest,
     OptimizerConfig,
+    ReferencePath,
     ScalarProfile,
     ThresholdBoundary,
     UpstreamBoundary,
@@ -57,7 +58,11 @@ def main() -> None:
     # s_m = array([0, 8km, 30km, 60km]) y = array([135 knots (touchdown), 140 knots (final), 280 knots (descent), 280 knots (descent)])
     speed_schedule = build_speed_schedule_from_wrap(openap.wrap)
 
-    max_s_m = 60_000.0
+    reference_path = ReferencePath.from_geographic(
+        lat_deg=np.asarray([0.0, 0.0], dtype=float),
+        lon_deg=np.asarray([0.55, 0.0], dtype=float),
+    )
+    max_s_m = max(60_000.0, reference_path.total_length_m)
     envelope = ConstraintEnvelope.from_profiles(
         altitude_lower=ScalarProfile(
             s_m=np.asarray([0.0, max_s_m], dtype=float),
@@ -90,6 +95,7 @@ def main() -> None:
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
     )
 

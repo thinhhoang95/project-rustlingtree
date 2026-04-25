@@ -16,6 +16,7 @@ from simap.longitudinal_planner import (
     plan_longitudinal_descent,
 )
 from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile
+from simap.path_geometry import ReferencePath
 from simap.weather import ConstantWeather
 
 
@@ -119,12 +120,17 @@ def build_test_request() -> LongitudinalPlanRequest:
             y=np.asarray([1.6, 1.6], dtype=float),
         ),
     )
+    reference_path = ReferencePath.from_geographic(
+        lat_deg=np.asarray([0.0, 0.0], dtype=float),
+        lon_deg=np.asarray([0.70, 0.0], dtype=float),
+    )
     return LongitudinalPlanRequest(
         cfg=cfg,
         perf=SmoothBackend(),
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         weather=ConstantWeather(),
         optimizer=OptimizerConfig(num_nodes=9, maxiter=80, verbose=0),
         initial_tod_guess_m=48_000.0,
@@ -148,16 +154,27 @@ class LongitudinalPlannerTests(unittest.TestCase):
 
         self.assertAlmostEqual(plan.h_m[0], request.threshold.h_m, delta=1e-2)
         self.assertAlmostEqual(plan.gamma_rad[0], request.threshold.gamma_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.cross_track_m[0], request.threshold_lateral.cross_track_m, delta=1e-2)
+        self.assertAlmostEqual(plan.heading_error_rad[0], request.threshold_lateral.heading_error_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.phi_rad[0], request.threshold_lateral.bank_rad, delta=1e-4)
         self.assertAlmostEqual(plan.h_m[-1], request.upstream.h_m, delta=1e-2)
         self.assertAlmostEqual(plan.gamma_rad[-1], request.upstream.gamma_rad, delta=1e-3)
+        self.assertAlmostEqual(plan.cross_track_m[-1], request.upstream_lateral.cross_track_m, delta=1e-2)
+        self.assertAlmostEqual(plan.heading_error_rad[-1], request.upstream_lateral.heading_error_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.phi_rad[-1], request.upstream_lateral.bank_rad, delta=1e-4)
         self.assertEqual(len(plan.s_m), self.request.optimizer.num_nodes)
         self.assertTrue(np.all(np.isfinite(plan.h_m)))
         self.assertTrue(np.all(np.isfinite(plan.v_tas_mps)))
         self.assertTrue(np.all(np.isfinite(plan.v_cas_mps)))
         self.assertTrue(np.all(np.isfinite(plan.gamma_rad)))
         self.assertTrue(np.all(np.isfinite(plan.thrust_n)))
+        self.assertTrue(np.all(np.isfinite(plan.cross_track_m)))
+        self.assertTrue(np.all(np.isfinite(plan.heading_error_rad)))
+        self.assertTrue(np.all(np.isfinite(plan.phi_rad)))
+        self.assertTrue(np.all(np.isfinite(plan.roll_rate_rps)))
         self.assertTrue(np.all(plan.v_tas_mps > 0.0))
         self.assertTrue(np.all(plan.v_cas_mps > 0.0))
+        self.assertGreater(np.min(plan.alongtrack_speed_mps), 0.0)
         self.assertLess(plan.constraint_slack, 5.0)
 
     def test_solver_is_deterministic_for_fixed_boundaries(self) -> None:
@@ -167,6 +184,7 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertAlmostEqual(plan_a.tod_m, plan_b.tod_m, delta=1e-6)
         self.assertTrue(np.allclose(plan_a.h_m, plan_b.h_m))
         self.assertTrue(np.allclose(plan_a.v_tas_mps, plan_b.v_tas_mps))
+        self.assertTrue(np.allclose(plan_a.cross_track_m, plan_b.cross_track_m))
 
     def test_replay_and_collocation_diagnostics_are_reported(self) -> None:
         plan = self.plan

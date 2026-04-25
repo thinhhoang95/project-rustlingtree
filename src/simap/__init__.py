@@ -12,6 +12,7 @@ from .config import (
 from .lateral_dynamics import LateralGuidanceConfig
 from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
 from .longitudinal_planner import (
+    LateralBoundary,
     LongitudinalPlanRequest,
     LongitudinalPlanResult,
     LongitudinalSolveProfile,
@@ -55,6 +56,7 @@ __all__ = [
     "ConstraintEnvelope",
     "EffectivePolarBackend",
     "LateralGuidanceConfig",
+    "LateralBoundary",
     "LongitudinalPlanRequest",
     "LongitudinalPlanResult",
     "LongitudinalSolveProfile",

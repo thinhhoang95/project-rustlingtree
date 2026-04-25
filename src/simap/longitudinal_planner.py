@@ -9,13 +9,13 @@ import pandas as pd
 from openap import aero
 from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, NonlinearConstraint, minimize
-from scipy.sparse import csr_array, csr_matrix, lil_matrix
+from scipy.sparse import csr_matrix
 
 from .backends import PerformanceBackend
-from .config import AircraftConfig, mode_for_s, planned_cas_bounds_mps
-from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
+from .config import AircraftConfig, bank_limit_rad, mode_for_s, planned_cas_bounds_mps
 from .longitudinal_profiles import ConstraintEnvelope
 from .openap_adapter import openap_dT
+from .path_geometry import ReferencePath
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 
@@ -49,6 +49,13 @@ class UpstreamBoundary:
 
 
 @dataclass(frozen=True)
+class LateralBoundary:
+    cross_track_m: float = 0.0
+    heading_error_rad: float = 0.0
+    bank_rad: float = 0.0
+
+
+@dataclass(frozen=True)
 class OptimizerConfig:
     num_nodes: int = 41
     maxiter: int = 400
@@ -60,12 +67,19 @@ class OptimizerConfig:
     initial_slack: float = 0.0
     verbose: int = 0
     constraint_tolerance: float = 1e-6
+    cross_track_penalty_weight: float = 0.1
+    heading_error_penalty_weight: float = 0.05
+    bank_penalty_weight: float = 0.02
+    roll_rate_penalty_weight: float = 0.02
+    min_alongtrack_speed_mps: float = 1.0
 
     def __post_init__(self) -> None:
         if self.num_nodes < 4:
             raise ValueError("num_nodes must be at least 4")
         if self.maxiter <= 0:
             raise ValueError("maxiter must be positive")
+        if self.min_alongtrack_speed_mps <= 0.0:
+            raise ValueError("min_alongtrack_speed_mps must be positive")
 
 
 @dataclass(frozen=True)
@@ -75,9 +89,11 @@ class LongitudinalPlanRequest:
     threshold: ThresholdBoundary
     upstream: UpstreamBoundary
     constraints: ConstraintEnvelope
+    reference_path: ReferencePath
     weather: WeatherProvider = field(default_factory=ConstantWeather)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
-    reference_track_rad: float = 0.0
+    threshold_lateral: LateralBoundary = field(default_factory=LateralBoundary)
+    upstream_lateral: LateralBoundary = field(default_factory=LateralBoundary)
     initial_tod_guess_m: float | None = None
 
     def __post_init__(self) -> None:
@@ -85,6 +101,8 @@ class LongitudinalPlanRequest:
             raise ValueError("constraint envelope must start at or before s=0")
         if self.constraints.s_m[-1] <= 0.0:
             raise ValueError("constraint envelope must extend upstream of the threshold")
+        if self.reference_path.total_length_m <= 0.0:
+            raise ValueError("reference path must have positive length")
 
 
 @dataclass(frozen=True)
@@ -94,6 +112,20 @@ class LongitudinalPlanResult:
     v_tas_mps: np.ndarray
     v_cas_mps: np.ndarray
     t_s: np.ndarray
+    east_m: np.ndarray
+    north_m: np.ndarray
+    lat_deg: np.ndarray
+    lon_deg: np.ndarray
+    cross_track_m: np.ndarray
+    heading_error_rad: np.ndarray
+    psi_rad: np.ndarray
+    phi_rad: np.ndarray
+    roll_rate_rps: np.ndarray
+    ground_speed_mps: np.ndarray
+    alongtrack_speed_mps: np.ndarray
+    crosstrack_speed_mps: np.ndarray
+    track_error_rad: np.ndarray
+    phi_max_rad: np.ndarray
     gamma_rad: np.ndarray
     thrust_n: np.ndarray
     mode: tuple[str, ...]
@@ -121,6 +153,20 @@ class LongitudinalPlanResult:
                 "v_tas_mps": self.v_tas_mps,
                 "v_cas_mps": self.v_cas_mps,
                 "t_s": self.t_s,
+                "east_m": self.east_m,
+                "north_m": self.north_m,
+                "lat_deg": self.lat_deg,
+                "lon_deg": self.lon_deg,
+                "cross_track_m": self.cross_track_m,
+                "heading_error_rad": self.heading_error_rad,
+                "psi_rad": self.psi_rad,
+                "phi_rad": self.phi_rad,
+                "roll_rate_rps": self.roll_rate_rps,
+                "ground_speed_mps": self.ground_speed_mps,
+                "alongtrack_speed_mps": self.alongtrack_speed_mps,
+                "crosstrack_speed_mps": self.crosstrack_speed_mps,
+                "track_error_rad": self.track_error_rad,
+                "phi_max_rad": self.phi_max_rad,
                 "gamma_rad": self.gamma_rad,
                 "thrust_n": self.thrust_n,
                 "mode": np.asarray(self.mode, dtype=object),
@@ -176,12 +222,16 @@ class _TrajectoryEvaluation:
     request: LongitudinalPlanRequest
     h_m: np.ndarray
     v_tas_mps: np.ndarray
+    t_s: np.ndarray
+    cross_track_m: np.ndarray
+    heading_error_rad: np.ndarray
+    phi_rad: np.ndarray
     gamma_rad: np.ndarray
     thrust_n: np.ndarray
+    roll_rate_rps: np.ndarray
     tod_m: float
     constraint_slack: float
     _s_m: np.ndarray | None = None
-    _t_s: np.ndarray | None = None
     _delta_isa_K: np.ndarray | None = None
     _mode_by_node: tuple[Any, ...] | None = None
     _state_derivatives: np.ndarray | None = None
@@ -203,17 +253,6 @@ class _TrajectoryEvaluation:
         if self._s_m is None:
             self._s_m = np.linspace(0.0, self.tod_m, self.num_nodes, dtype=float)
         return self._s_m
-
-    @property
-    def t_s(self) -> np.ndarray:
-        if self._t_s is None:
-            self._t_s = _integrate_time_profile(
-                self.request,
-                s_m=self.s_m,
-                h_m=self.h_m,
-                v_tas_mps=self.v_tas_mps,
-            )
-        return self._t_s
 
     @property
     def delta_isa_K(self) -> np.ndarray:
@@ -249,22 +288,19 @@ class _TrajectoryEvaluation:
     def state_derivatives(self) -> np.ndarray:
         if self._state_derivatives is None:
             cfg = self.request.cfg
-            derivatives = np.empty((self.num_nodes, 3), dtype=float)
-            weather = self.constant_weather
-            constant_wind = None
-            if weather is not None:
-                constant_wind = float(
-                    weather.wind_east_mps * np.cos(self.request.reference_track_rad)
-                    + weather.wind_north_mps * np.sin(self.request.reference_track_rad)
-                )
-            for idx, (s_val, h_val, v_val, t_val, gamma_val, thrust_val, mode, delta_isa_K) in enumerate(
+            derivatives = np.empty((self.num_nodes, 6), dtype=float)
+            for idx, (s_val, h_val, v_val, t_val, _y_val, chi_val, phi_val, gamma_val, thrust_val, roll_rate, mode, delta_isa_K) in enumerate(
                 zip(
                     self.s_m,
                     self.h_m,
                     self.v_tas_mps,
                     self.t_s,
+                    self.cross_track_m,
+                    self.heading_error_rad,
+                    self.phi_rad,
                     self.gamma_rad,
                     self.thrust_n,
+                    self.roll_rate_rps,
                     self.mode_by_node,
                     self.delta_isa_K,
                     strict=True,
@@ -277,29 +313,107 @@ class _TrajectoryEvaluation:
                     v_tas_mps=float(v_val),
                     h_m=float(h_val),
                     gamma_rad=float(gamma_val),
+                    bank_rad=float(phi_val),
                     delta_isa_K=float(delta_isa_K),
                 )
                 cos_gamma = float(np.clip(np.cos(gamma_val), 0.05, None))
                 v_tas = max(1.0, float(v_val))
-                alongtrack_wind = (
-                    float(constant_wind)
-                    if constant_wind is not None
-                    else alongtrack_wind_mps(
-                        self.request.weather,
-                        self.request.reference_track_rad,
-                        float(s_val),
-                        float(h_val),
-                        float(t_val),
-                    )
-                )
-                ground_speed = max(1.0, v_tas + alongtrack_wind)
+                theta = self.request.reference_path.track_angle_rad(float(s_val))
+                psi = theta + float(chi_val)
+                wind_east, wind_north = self.request.weather.wind_ne_mps(float(s_val), float(h_val), float(t_val))
+                east_dot = v_tas * float(np.cos(psi)) + float(wind_east)
+                north_dot = v_tas * float(np.sin(psi)) + float(wind_north)
+                tangent = self.request.reference_path.tangent_hat(float(s_val))
+                normal = self.request.reference_path.normal_hat(float(s_val))
+                alongtrack_speed = max(float(self.request.optimizer.min_alongtrack_speed_mps), float(east_dot * tangent[0] + north_dot * tangent[1]))
+                crosstrack_speed = float(east_dot * normal[0] + north_dot * normal[1])
                 derivatives[idx, 0] = -float(np.tan(gamma_val))
                 derivatives[idx, 1] = -(((float(thrust_val) - drag_n) / cfg.mass_kg) - aero.g0 * float(np.sin(gamma_val))) / (
                     v_tas * cos_gamma
                 )
-                derivatives[idx, 2] = 1.0 / ground_speed
+                derivatives[idx, 2] = 1.0 / alongtrack_speed
+                derivatives[idx, 3] = -crosstrack_speed / alongtrack_speed
+                derivatives[idx, 4] = -aero.g0 * float(np.tan(phi_val)) / (v_tas * alongtrack_speed) + self.request.reference_path.curvature(float(s_val))
+                derivatives[idx, 5] = -float(roll_rate) / alongtrack_speed
             self._state_derivatives = derivatives
         return self._state_derivatives
+
+    @property
+    def psi_rad(self) -> np.ndarray:
+        return np.asarray(
+            [
+                self.request.reference_path.track_angle_rad(float(s_val)) + float(heading_error)
+                for s_val, heading_error in zip(self.s_m, self.heading_error_rad, strict=True)
+            ],
+            dtype=float,
+        )
+
+    @property
+    def ground_velocity_ne_mps(self) -> np.ndarray:
+        velocities = np.empty((self.num_nodes, 2), dtype=float)
+        for idx, (s_val, h_val, t_val, v_tas, psi) in enumerate(
+            zip(self.s_m, self.h_m, self.t_s, self.v_tas_mps, self.psi_rad, strict=True)
+        ):
+            wind_east, wind_north = self.request.weather.wind_ne_mps(float(s_val), float(h_val), float(t_val))
+            velocities[idx, 0] = float(v_tas) * float(np.cos(psi)) + float(wind_east)
+            velocities[idx, 1] = float(v_tas) * float(np.sin(psi)) + float(wind_north)
+        return velocities
+
+    @property
+    def ground_speed_mps(self) -> np.ndarray:
+        velocities = self.ground_velocity_ne_mps
+        return np.hypot(velocities[:, 0], velocities[:, 1])
+
+    @property
+    def ground_track_rad(self) -> np.ndarray:
+        velocities = self.ground_velocity_ne_mps
+        return np.arctan2(velocities[:, 1], velocities[:, 0])
+
+    @property
+    def alongtrack_speed_mps(self) -> np.ndarray:
+        values = np.empty(self.num_nodes, dtype=float)
+        for idx, (s_val, velocity) in enumerate(zip(self.s_m, self.ground_velocity_ne_mps, strict=True)):
+            tangent = self.request.reference_path.tangent_hat(float(s_val))
+            values[idx] = float(np.dot(velocity, tangent))
+        return values
+
+    @property
+    def crosstrack_speed_mps(self) -> np.ndarray:
+        values = np.empty(self.num_nodes, dtype=float)
+        for idx, (s_val, velocity) in enumerate(zip(self.s_m, self.ground_velocity_ne_mps, strict=True)):
+            normal = self.request.reference_path.normal_hat(float(s_val))
+            values[idx] = float(np.dot(velocity, normal))
+        return values
+
+    @property
+    def track_error_rad(self) -> np.ndarray:
+        return np.asarray(
+            [
+                float(np.arctan2(np.sin(track - self.request.reference_path.track_angle_rad(float(s_val))), np.cos(track - self.request.reference_path.track_angle_rad(float(s_val)))))
+                for s_val, track in zip(self.s_m, self.ground_track_rad, strict=True)
+            ],
+            dtype=float,
+        )
+
+    @property
+    def phi_max_rad(self) -> np.ndarray:
+        return np.asarray(
+            [
+                bank_limit_rad(self.request.cfg, mode, float(v_cas))
+                for mode, v_cas in zip(self.mode_by_node, self.v_cas_mps, strict=True)
+            ],
+            dtype=float,
+        )
+
+    @property
+    def position_ne_m(self) -> np.ndarray:
+        positions = np.empty((self.num_nodes, 2), dtype=float)
+        for idx, (s_val, y_val) in enumerate(zip(self.s_m, self.cross_track_m, strict=True)):
+            ref_east, ref_north = self.request.reference_path.position_ne(float(s_val))
+            normal = self.request.reference_path.normal_hat(float(s_val))
+            positions[idx, 0] = float(ref_east) + float(y_val) * float(normal[0])
+            positions[idx, 1] = float(ref_north) + float(y_val) * float(normal[1])
+        return positions
 
     @property
     def v_cas_mps(self) -> np.ndarray:
@@ -371,13 +485,30 @@ class _TrajectoryEvaluationCache:
             return self._last_eval
 
         started_at = perf_counter()
-        h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(z_arr, self.request.optimizer.num_nodes)
+        (
+            h_m,
+            v_tas_mps,
+            t_s,
+            cross_track_m,
+            heading_error_rad,
+            phi_rad,
+            gamma_rad,
+            thrust_n,
+            roll_rate_rps,
+            tod_m,
+            constraint_slack,
+        ) = _unpack(z_arr, self.request.optimizer.num_nodes)
         evaluation = _TrajectoryEvaluation(
             request=self.request,
             h_m=np.array(h_m, dtype=float, copy=True),
             v_tas_mps=np.array(v_tas_mps, dtype=float, copy=True),
+            t_s=np.array(t_s, dtype=float, copy=True),
+            cross_track_m=np.array(cross_track_m, dtype=float, copy=True),
+            heading_error_rad=np.array(heading_error_rad, dtype=float, copy=True),
+            phi_rad=np.array(phi_rad, dtype=float, copy=True),
             gamma_rad=np.array(gamma_rad, dtype=float, copy=True),
             thrust_n=np.array(thrust_n, dtype=float, copy=True),
+            roll_rate_rps=np.array(roll_rate_rps, dtype=float, copy=True),
             tod_m=float(tod_m),
             constraint_slack=float(constraint_slack),
         )
@@ -392,7 +523,7 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
     solve_started_at = perf_counter()
     optimizer = request.optimizer
     num_nodes = optimizer.num_nodes
-    max_tod_m = float(request.constraints.s_m[-1])
+    max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
     threshold_delta_isa = request.weather.delta_isa_K(0.0, request.threshold.h_m, 0.0)
     threshold_v_tas = float(aero.cas2tas(request.threshold.cas_mps, request.threshold.h_m, dT=openap_dT(threshold_delta_isa)))
     initial_tod_guess_m = _initial_tod_guess(request, threshold_v_tas=threshold_v_tas, max_tod_m=max_tod_m)
@@ -477,28 +608,64 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
     )
 
     postprocess_started_at = perf_counter()
-    h_m, v_tas_mps, gamma_rad, thrust_n, tod_m, constraint_slack = _unpack(result.x, optimizer.num_nodes)
+    (
+        h_m,
+        v_tas_mps,
+        t_s,
+        cross_track_m,
+        heading_error_rad,
+        phi_rad,
+        gamma_rad,
+        thrust_n,
+        roll_rate_rps,
+        tod_m,
+        constraint_slack,
+    ) = _unpack(result.x, optimizer.num_nodes)
     h_m = np.array(h_m, dtype=float, copy=True)
     v_tas_mps = np.array(v_tas_mps, dtype=float, copy=True)
+    t_s = np.array(t_s, dtype=float, copy=True)
+    cross_track_m = np.array(cross_track_m, dtype=float, copy=True)
+    heading_error_rad = np.array(heading_error_rad, dtype=float, copy=True)
+    phi_rad = np.array(phi_rad, dtype=float, copy=True)
     gamma_rad = np.array(gamma_rad, dtype=float, copy=True)
     thrust_n = np.array(thrust_n, dtype=float, copy=True)
+    roll_rate_rps = np.array(roll_rate_rps, dtype=float, copy=True)
     h_m[0] = request.threshold.h_m
     v_tas_mps[0] = threshold_v_tas
+    t_s[0] = 0.0
+    cross_track_m[0] = request.threshold_lateral.cross_track_m
+    heading_error_rad[0] = request.threshold_lateral.heading_error_rad
+    phi_rad[0] = request.threshold_lateral.bank_rad
     gamma_rad[0] = request.threshold.gamma_rad
     h_m[-1] = request.upstream.h_m
+    cross_track_m[-1] = request.upstream_lateral.cross_track_m
+    heading_error_rad[-1] = request.upstream_lateral.heading_error_rad
+    phi_rad[-1] = request.upstream_lateral.bank_rad
     gamma_rad[-1] = request.upstream.gamma_rad
     final_evaluation = _TrajectoryEvaluation(
         request=request,
         h_m=h_m,
         v_tas_mps=v_tas_mps,
+        t_s=t_s,
+        cross_track_m=cross_track_m,
+        heading_error_rad=heading_error_rad,
+        phi_rad=phi_rad,
         gamma_rad=gamma_rad,
         thrust_n=thrust_n,
+        roll_rate_rps=roll_rate_rps,
         tod_m=float(tod_m),
         constraint_slack=float(constraint_slack),
     )
     s_m = np.array(final_evaluation.s_m, dtype=float, copy=True)
-    t_s = np.array(final_evaluation.t_s, dtype=float, copy=True)
     v_cas_mps = np.array(final_evaluation.v_cas_mps, dtype=float, copy=True)
+    position_ne = final_evaluation.position_ne_m
+    latlon_arr = np.asarray(
+        [
+            request.reference_path.latlon_from_ne(float(east), float(north))
+            for east, north in position_ne
+        ],
+        dtype=float,
+    )
     collocation_residual_max = float(
         np.max(
             np.abs(
@@ -517,8 +684,12 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
         h_m=h_m,
         v_tas_mps=v_tas_mps,
         t_s=t_s,
+        cross_track_m=cross_track_m,
+        heading_error_rad=heading_error_rad,
+        phi_rad=phi_rad,
         gamma_rad=gamma_rad,
         thrust_n=thrust_n,
+        roll_rate_rps=roll_rate_rps,
     )
     mode = tuple(mode_for_s(request.cfg, float(s)).name for s in s_m)
     solve_profile = profiling.snapshot(
@@ -531,6 +702,20 @@ def plan_longitudinal_descent(request: LongitudinalPlanRequest) -> LongitudinalP
         v_tas_mps=v_tas_mps,
         v_cas_mps=v_cas_mps,
         t_s=t_s,
+        east_m=position_ne[:, 0],
+        north_m=position_ne[:, 1],
+        lat_deg=latlon_arr[:, 0],
+        lon_deg=latlon_arr[:, 1],
+        cross_track_m=cross_track_m,
+        heading_error_rad=heading_error_rad,
+        psi_rad=np.array(final_evaluation.psi_rad, dtype=float, copy=True),
+        phi_rad=phi_rad,
+        roll_rate_rps=roll_rate_rps,
+        ground_speed_mps=np.array(final_evaluation.ground_speed_mps, dtype=float, copy=True),
+        alongtrack_speed_mps=np.array(final_evaluation.alongtrack_speed_mps, dtype=float, copy=True),
+        crosstrack_speed_mps=np.array(final_evaluation.crosstrack_speed_mps, dtype=float, copy=True),
+        track_error_rad=np.array(final_evaluation.track_error_rad, dtype=float, copy=True),
+        phi_max_rad=np.array(final_evaluation.phi_max_rad, dtype=float, copy=True),
         gamma_rad=gamma_rad,
         thrust_n=thrust_n,
         mode=mode,
@@ -637,6 +822,29 @@ def _initial_guess(
             v_tas_mps[idx] = float(aero.cas2tas(float(cas_val), float(h_val), dT=openap_dT(delta_isa_K)))
 
     t_s = _integrate_time_profile(request, s_m=s_m, h_m=h_m, v_tas_mps=v_tas_mps)
+    cross_track_m = np.linspace(
+        request.threshold_lateral.cross_track_m,
+        request.upstream_lateral.cross_track_m,
+        num_nodes,
+        dtype=float,
+    )
+    heading_error_rad = np.linspace(
+        request.threshold_lateral.heading_error_rad,
+        request.upstream_lateral.heading_error_rad,
+        num_nodes,
+        dtype=float,
+    )
+    phi_rad = np.linspace(
+        request.threshold_lateral.bank_rad,
+        request.upstream_lateral.bank_rad,
+        num_nodes,
+        dtype=float,
+    )
+    q_guess = np.maximum(request.optimizer.min_alongtrack_speed_mps, np.gradient(s_m, t_s, edge_order=1))
+    roll_rate_rps = -np.gradient(phi_rad, s_m, edge_order=1) * q_guess
+    for idx, s_val in enumerate(s_m):
+        mode = mode_for_s(request.cfg, float(s_val))
+        roll_rate_rps[idx] = float(np.clip(roll_rate_rps[idx], -mode.p_max_rps, mode.p_max_rps))
 
     thrust_n = np.empty_like(s_m)
     v_slope = np.gradient(v_tas_mps, s_m, edge_order=1)
@@ -668,8 +876,13 @@ def _initial_guess(
     return _pack(
         h_m=h_m,
         v_tas_mps=v_tas_mps,
+        t_s=t_s,
+        cross_track_m=cross_track_m,
+        heading_error_rad=heading_error_rad,
+        phi_rad=phi_rad,
         gamma_rad=gamma_rad,
         thrust_n=thrust_n,
+        roll_rate_rps=roll_rate_rps,
         tod_m=initial_tod_guess_m,
         constraint_slack=request.optimizer.initial_slack,
     )
@@ -727,12 +940,23 @@ def _decision_bounds(
 
     thrust_upper = 1.25 * scale.thrust_n
     gamma_limit = np.deg2rad(20.0)
+    max_time_s = max_tod_m / max(1.0, request.optimizer.min_alongtrack_speed_mps)
+    lateral_span = max(
+        10_000.0,
+        2.0 * abs(request.threshold_lateral.cross_track_m),
+        2.0 * abs(request.upstream_lateral.cross_track_m),
+    )
     lower = np.concatenate(
         [
             np.full(num_nodes, lower_altitude, dtype=float),
             np.full(num_nodes, 1.0, dtype=float),
+            np.zeros(num_nodes, dtype=float),
+            np.full(num_nodes, -lateral_span, dtype=float),
+            np.full(num_nodes, -np.deg2rad(60.0), dtype=float),
+            np.full(num_nodes, -np.deg2rad(45.0), dtype=float),
             np.full(num_nodes, -gamma_limit, dtype=float),
             np.zeros(num_nodes, dtype=float),
+            np.full(num_nodes, -max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)), dtype=float),
             np.asarray([1_000.0, 0.0], dtype=float),
         ]
     )
@@ -740,8 +964,13 @@ def _decision_bounds(
         [
             np.full(num_nodes, upper_altitude, dtype=float),
             np.full(num_nodes, upper_tas, dtype=float),
+            np.full(num_nodes, max_time_s, dtype=float),
+            np.full(num_nodes, lateral_span, dtype=float),
+            np.full(num_nodes, np.deg2rad(60.0), dtype=float),
+            np.full(num_nodes, np.deg2rad(45.0), dtype=float),
             np.full(num_nodes, np.deg2rad(5.0), dtype=float),
             np.full(num_nodes, thrust_upper, dtype=float),
+            np.full(num_nodes, max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)), dtype=float),
             np.asarray([max_tod_m, 5.0], dtype=float),
         ]
     )
@@ -759,6 +988,10 @@ def _objective(
     ds_m = max(evaluation.tod_m / max(request.optimizer.num_nodes - 1, 1), 1.0)
     thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / max(1.0, scale.thrust_n)
     gamma_gradient = np.diff(evaluation.gamma_rad) / max(ds_m, 1.0)
+    lateral_scale = max(100.0, float(np.max(np.abs(evaluation.cross_track_m))), 1.0)
+    heading_scale = np.deg2rad(5.0)
+    bank_scale = np.deg2rad(20.0)
+    roll_scale = max(1e-3, max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)))
     objective = (
         -request.optimizer.tod_reward_weight * (evaluation.tod_m / 1_000.0)
         + request.optimizer.thrust_penalty_weight
@@ -766,6 +999,10 @@ def _objective(
         * float(np.mean(thrust_delta**2))
         + request.optimizer.gamma_smoothness_weight
         * float(np.mean((gamma_gradient / np.deg2rad(1.0) * 1_000.0) ** 2))
+        + request.optimizer.cross_track_penalty_weight * float(np.mean((evaluation.cross_track_m / lateral_scale) ** 2))
+        + request.optimizer.heading_error_penalty_weight * float(np.mean((evaluation.heading_error_rad / heading_scale) ** 2))
+        + request.optimizer.bank_penalty_weight * float(np.mean((evaluation.phi_rad / bank_scale) ** 2))
+        + request.optimizer.roll_rate_penalty_weight * float(np.mean((evaluation.roll_rate_rps / roll_scale) ** 2))
         + request.optimizer.slack_penalty_weight * float(evaluation.constraint_slack**2)
     )
     return float(objective)
@@ -780,22 +1017,34 @@ def _equality_constraints(
 ) -> np.ndarray:
     evaluation = evaluation_cache.evaluate(z)
     ds_m = float(evaluation.tod_m / (request.optimizer.num_nodes - 1))
-    trapezoid = 0.5 * ds_m * (evaluation.state_derivatives[:-1, :2] + evaluation.state_derivatives[1:, :2])
+    trapezoid = 0.5 * ds_m * (evaluation.state_derivatives[:-1, :] + evaluation.state_derivatives[1:, :])
     state_delta = np.column_stack(
         [
             np.diff(evaluation.h_m),
             np.diff(evaluation.v_tas_mps),
+            np.diff(evaluation.t_s),
+            np.diff(evaluation.cross_track_m),
+            np.diff(evaluation.heading_error_rad),
+            np.diff(evaluation.phi_rad),
         ]
     )
-    defects = np.empty(2 * (request.optimizer.num_nodes - 1) + 5, dtype=float)
-    defects[: 2 * (request.optimizer.num_nodes - 1)] = (state_delta - trapezoid).reshape(-1)
-    defects[-5:] = np.asarray(
+    dynamic_rows = 6 * (request.optimizer.num_nodes - 1)
+    defects = np.empty(dynamic_rows + 12, dtype=float)
+    defects[:dynamic_rows] = (state_delta - trapezoid).reshape(-1)
+    defects[-12:] = np.asarray(
         [
             float(evaluation.h_m[0] - request.threshold.h_m),
             float(evaluation.v_tas_mps[0] - threshold_v_tas),
+            float(evaluation.t_s[0]),
+            float(evaluation.cross_track_m[0] - request.threshold_lateral.cross_track_m),
+            float(evaluation.heading_error_rad[0] - request.threshold_lateral.heading_error_rad),
+            float(evaluation.phi_rad[0] - request.threshold_lateral.bank_rad),
             float(evaluation.gamma_rad[0] - request.threshold.gamma_rad),
             float(evaluation.h_m[-1] - request.upstream.h_m),
             float(evaluation.gamma_rad[-1] - request.upstream.gamma_rad),
+            float(evaluation.cross_track_m[-1] - request.upstream_lateral.cross_track_m),
+            float(evaluation.heading_error_rad[-1] - request.upstream_lateral.heading_error_rad),
+            float(evaluation.phi_rad[-1] - request.upstream_lateral.bank_rad),
         ],
         dtype=float,
     )
@@ -814,6 +1063,8 @@ def _inequality_constraints(
     slack_speed = evaluation.constraint_slack * scale.speed_mps
     slack_gamma = evaluation.constraint_slack * scale.gamma_rad
     slack_thrust = evaluation.constraint_slack * scale.thrust_n
+    slack_bank = evaluation.constraint_slack * np.deg2rad(10.0)
+    slack_roll = evaluation.constraint_slack * max(1e-3, max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)))
 
     h_lower, h_upper = request.constraints.h_bounds_many(evaluation.s_m)
     cas_lower_env, cas_upper_env = request.constraints.cas_bounds_many(evaluation.s_m)
@@ -833,6 +1084,11 @@ def _inequality_constraints(
         cas_upper_eff - evaluation.v_cas_mps + slack_speed,
         evaluation.thrust_n - thrust_lower + slack_thrust,
         thrust_upper - evaluation.thrust_n + slack_thrust,
+        evaluation.phi_rad + evaluation.phi_max_rad + slack_bank,
+        evaluation.phi_max_rad - evaluation.phi_rad + slack_bank,
+        evaluation.roll_rate_rps + np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) + slack_roll,
+        np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) - evaluation.roll_rate_rps + slack_roll,
+        evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_speed,
     ]
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(evaluation.s_m)
@@ -845,20 +1101,20 @@ def _inequality_constraints(
         cl_upper = request.constraints._interp_many_required(request.constraints.cl_max, evaluation.s_m)
         cl_values = np.asarray(
             [
-                float(
-                    quasi_steady_cl(
-                        mass_kg=request.cfg.mass_kg,
-                        wing_area_m2=request.cfg.wing_area_m2,
-                        v_tas_mps=float(v_tas),
-                        h_m=float(h),
-                        gamma_rad=float(gamma),
-                        delta_isa_K=float(delta_isa_K),
-                    )
+                _banked_quasi_steady_cl(
+                    mass_kg=request.cfg.mass_kg,
+                    wing_area_m2=request.cfg.wing_area_m2,
+                    v_tas_mps=float(v_tas),
+                    h_m=float(h),
+                    gamma_rad=float(gamma),
+                    phi_rad=float(phi),
+                    delta_isa_K=float(delta_isa_K),
                 )
-                for v_tas, h, gamma, delta_isa_K in zip(
+                for v_tas, h, gamma, phi, delta_isa_K in zip(
                     evaluation.v_tas_mps,
                     evaluation.h_m,
                     evaluation.gamma_rad,
+                    evaluation.phi_rad,
                     evaluation.delta_isa_K,
                     strict=True,
                 )
@@ -877,6 +1133,24 @@ def _inequality_constraints(
         )
     )
     return np.concatenate(residual_parts)
+
+
+def _banked_quasi_steady_cl(
+    *,
+    mass_kg: float,
+    wing_area_m2: float,
+    v_tas_mps: float,
+    h_m: float,
+    gamma_rad: float,
+    phi_rad: float,
+    delta_isa_K: float = 0.0,
+) -> float:
+    v_tas = max(1.0, float(v_tas_mps))
+    _, rho, _ = aero.atmos(h_m, dT=openap_dT(delta_isa_K))
+    dynamic_pressure = 0.5 * float(rho) * v_tas**2
+    bank_cos = max(0.2, float(np.cos(phi_rad)))
+    lift_newtons = mass_kg * aero.g0 * float(np.cos(gamma_rad)) / bank_cos
+    return float(lift_newtons / max(dynamic_pressure * wing_area_m2, 1e-6))
 
 
 def _cas_from_tas(
@@ -905,44 +1179,54 @@ def _replay_solution(
     h_m: np.ndarray,
     v_tas_mps: np.ndarray,
     t_s: np.ndarray,
+    cross_track_m: np.ndarray,
+    heading_error_rad: np.ndarray,
+    phi_rad: np.ndarray,
     gamma_rad: np.ndarray,
     thrust_n: np.ndarray,
+    roll_rate_rps: np.ndarray,
 ) -> dict[str, float]:
     def rhs(s_val: float, state: np.ndarray) -> np.ndarray:
         gamma_val = float(np.interp(s_val, s_m, gamma_rad))
         thrust_val = float(np.interp(s_val, s_m, thrust_n))
-        derivatives = distance_state_derivatives(
-            s_m=float(s_val),
-            h_m=float(state[0]),
-            v_tas_mps=float(state[1]),
-            t_s=float(np.interp(s_val, s_m, t_s)),
-            gamma_rad=gamma_val,
-            thrust_n=thrust_val,
-            cfg=request.cfg,
-            perf=request.perf,
-            weather=request.weather,
-            reference_track_rad=request.reference_track_rad,
+        roll_rate_val = float(np.interp(s_val, s_m, roll_rate_rps))
+        temp_eval = _TrajectoryEvaluation(
+            request=request,
+            h_m=np.asarray([state[0]], dtype=float),
+            v_tas_mps=np.asarray([state[1]], dtype=float),
+            t_s=np.asarray([state[2]], dtype=float),
+            cross_track_m=np.asarray([state[3]], dtype=float),
+            heading_error_rad=np.asarray([state[4]], dtype=float),
+            phi_rad=np.asarray([state[5]], dtype=float),
+            gamma_rad=np.asarray([gamma_val], dtype=float),
+            thrust_n=np.asarray([thrust_val], dtype=float),
+            roll_rate_rps=np.asarray([roll_rate_val], dtype=float),
+            tod_m=max(float(s_val), 1.0),
+            constraint_slack=0.0,
+            _s_m=np.asarray([s_val], dtype=float),
         )
-        return derivatives[:2]
+        return temp_eval.state_derivatives[0]
 
     replay = solve_ivp(
         rhs,
         (float(s_m[0]), float(s_m[-1])),
-        y0=np.asarray([h_m[0], v_tas_mps[0]], dtype=float),
+        y0=np.asarray([h_m[0], v_tas_mps[0], t_s[0], cross_track_m[0], heading_error_rad[0], phi_rad[0]], dtype=float),
         t_eval=s_m,
         method="RK45",
         rtol=1e-6,
         atol=1e-8,
     )
-    replay_t_s = _integrate_time_profile(request, s_m=s_m, h_m=replay.y[0], v_tas_mps=replay.y[1])
     h_error = float(np.max(np.abs(replay.y[0] - h_m)))
     v_error = float(np.max(np.abs(replay.y[1] - v_tas_mps)))
-    t_error = float(np.max(np.abs(replay_t_s - t_s)))
+    t_error = float(np.max(np.abs(replay.y[2] - t_s)))
+    y_error = float(np.max(np.abs(replay.y[3] - cross_track_m)))
+    chi_error = float(np.max(np.abs(replay.y[4] - heading_error_rad)))
+    phi_error = float(np.max(np.abs(replay.y[5] - phi_rad)))
     return {
         "h_error_m": h_error,
         "v_error_mps": v_error,
         "t_error_s": t_error,
-        "max_error": max(h_error, v_error, t_error),
+        "max_error": max(h_error, v_error, t_error, y_error, chi_error, phi_error),
     }
 
 
@@ -950,8 +1234,13 @@ def _pack(
     *,
     h_m: np.ndarray,
     v_tas_mps: np.ndarray,
+    t_s: np.ndarray,
+    cross_track_m: np.ndarray,
+    heading_error_rad: np.ndarray,
+    phi_rad: np.ndarray,
     gamma_rad: np.ndarray,
     thrust_n: np.ndarray,
+    roll_rate_rps: np.ndarray,
     tod_m: float,
     constraint_slack: float,
 ) -> np.ndarray:
@@ -959,8 +1248,13 @@ def _pack(
         [
             np.asarray(h_m, dtype=float),
             np.asarray(v_tas_mps, dtype=float),
+            np.asarray(t_s, dtype=float),
+            np.asarray(cross_track_m, dtype=float),
+            np.asarray(heading_error_rad, dtype=float),
+            np.asarray(phi_rad, dtype=float),
             np.asarray(gamma_rad, dtype=float),
             np.asarray(thrust_n, dtype=float),
+            np.asarray(roll_rate_rps, dtype=float),
             np.asarray([float(tod_m), float(constraint_slack)], dtype=float),
         ]
     )
@@ -969,17 +1263,39 @@ def _pack(
 def _unpack(
     z: np.ndarray,
     num_nodes: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
     h_end = num_nodes
     v_end = h_end + num_nodes
-    gamma_end = v_end + num_nodes
+    t_end = v_end + num_nodes
+    y_end = t_end + num_nodes
+    chi_end = y_end + num_nodes
+    phi_end = chi_end + num_nodes
+    gamma_end = phi_end + num_nodes
     thrust_end = gamma_end + num_nodes
+    roll_end = thrust_end + num_nodes
     h_m = np.asarray(z[:h_end], dtype=float)
     v_tas_mps = np.asarray(z[h_end:v_end], dtype=float)
-    gamma_rad = np.asarray(z[v_end:gamma_end], dtype=float)
+    t_s = np.asarray(z[v_end:t_end], dtype=float)
+    cross_track_m = np.asarray(z[t_end:y_end], dtype=float)
+    heading_error_rad = np.asarray(z[y_end:chi_end], dtype=float)
+    phi_rad = np.asarray(z[chi_end:phi_end], dtype=float)
+    gamma_rad = np.asarray(z[phi_end:gamma_end], dtype=float)
     thrust_n = np.asarray(z[gamma_end:thrust_end], dtype=float)
-    tod_m, constraint_slack = np.asarray(z[thrust_end : thrust_end + 2], dtype=float)
-    return h_m, v_tas_mps, gamma_rad, thrust_n, float(tod_m), float(constraint_slack)
+    roll_rate_rps = np.asarray(z[thrust_end:roll_end], dtype=float)
+    tod_m, constraint_slack = np.asarray(z[roll_end : roll_end + 2], dtype=float)
+    return (
+        h_m,
+        v_tas_mps,
+        t_s,
+        cross_track_m,
+        heading_error_rad,
+        phi_rad,
+        gamma_rad,
+        thrust_n,
+        roll_rate_rps,
+        float(tod_m),
+        float(constraint_slack),
+    )
 
 
 def _integrate_time_profile(
@@ -991,10 +1307,14 @@ def _integrate_time_profile(
 ) -> np.ndarray:
     weather = request.weather
     if isinstance(weather, ConstantWeather):
-        segment_ground_speed = 0.5 * (v_tas_mps[:-1] + v_tas_mps[1:]) + (
-            weather.wind_east_mps * np.cos(request.reference_track_rad)
-            + weather.wind_north_mps * np.sin(request.reference_track_rad)
-        )
+        segment_mid_s = 0.5 * (s_m[:-1] + s_m[1:])
+        segment_ground_speed = np.empty_like(segment_mid_s)
+        for idx, s_val in enumerate(segment_mid_s):
+            track = request.reference_path.track_angle_rad(float(s_val))
+            segment_ground_speed[idx] = 0.5 * (v_tas_mps[idx] + v_tas_mps[idx + 1]) + (
+                weather.wind_east_mps * np.cos(track)
+                + weather.wind_north_mps * np.sin(track)
+            )
         segment_ground_speed = np.maximum(1.0, segment_ground_speed)
         increments = np.diff(s_m) / segment_ground_speed
         return np.concatenate([np.zeros(1, dtype=float), np.cumsum(increments, dtype=float)])
@@ -1006,7 +1326,7 @@ def _integrate_time_profile(
             0.5 * (v_tas_mps[idx - 1] + v_tas_mps[idx])
             + alongtrack_wind_mps(
                 request.weather,
-                request.reference_track_rad,
+                request.reference_path.track_angle_rad(float(0.5 * (s_m[idx - 1] + s_m[idx]))),
                 float(0.5 * (s_m[idx - 1] + s_m[idx])),
                 float(0.5 * (h_m[idx - 1] + h_m[idx])),
                 float(time_s[idx - 1]),
@@ -1036,110 +1356,5 @@ def _planned_cas_bounds_many(cfg: AircraftConfig, s_m: np.ndarray) -> tuple[np.n
 def _constraint_jacobian_sparsity(
     request: LongitudinalPlanRequest,
 ) -> tuple[csr_matrix | None, csr_matrix | None]:
-    if not isinstance(request.weather, ConstantWeather):
-        return None, None
-
-    num_nodes = request.optimizer.num_nodes
-    num_variables = 4 * num_nodes + 2
-    tod_index = 4 * num_nodes
-    slack_index = tod_index + 1
-
-    equality_rows = 2 * (num_nodes - 1) + 5
-    equality = lil_matrix((equality_rows, num_variables), dtype=int)
-    for idx in range(num_nodes - 1):
-        row = 2 * idx
-        local_indices = [
-            idx,
-            idx + 1,
-            num_nodes + idx,
-            num_nodes + idx + 1,
-            2 * num_nodes + idx,
-            2 * num_nodes + idx + 1,
-            3 * num_nodes + idx,
-            3 * num_nodes + idx + 1,
-            tod_index,
-        ]
-        for col in local_indices:
-            equality[row, col] = 1
-            equality[row + 1, col] = 1
-    equality[2 * (num_nodes - 1) + 0, 0] = 1
-    equality[2 * (num_nodes - 1) + 1, num_nodes] = 1
-    equality[2 * (num_nodes - 1) + 2, 2 * num_nodes] = 1
-    equality[2 * (num_nodes - 1) + 3, num_nodes - 1] = 1
-    equality[2 * (num_nodes - 1) + 4, 3 * num_nodes - 1] = 1
-
-    inequality_rows = 6 * num_nodes
-    if request.constraints.gamma_lower_rad is not None:
-        inequality_rows += num_nodes
-    if request.constraints.gamma_upper_rad is not None:
-        inequality_rows += num_nodes
-    if request.constraints.cl_max is not None:
-        inequality_rows += num_nodes
-    inequality_rows += 2
-
-    inequality = lil_matrix((inequality_rows, num_variables), dtype=int)
-    row = 0
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, num_nodes + idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, num_nodes + idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, num_nodes + idx] = 1
-        inequality[row, 3 * num_nodes + idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    for idx in range(num_nodes):
-        inequality[row, idx] = 1
-        inequality[row, num_nodes + idx] = 1
-        inequality[row, 3 * num_nodes + idx] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-    if request.constraints.gamma_lower_rad is not None:
-        for idx in range(num_nodes):
-            inequality[row, 2 * num_nodes + idx] = 1
-            inequality[row, tod_index] = 1
-            inequality[row, slack_index] = 1
-            row += 1
-    if request.constraints.gamma_upper_rad is not None:
-        for idx in range(num_nodes):
-            inequality[row, 2 * num_nodes + idx] = 1
-            inequality[row, tod_index] = 1
-            inequality[row, slack_index] = 1
-            row += 1
-    if request.constraints.cl_max is not None:
-        for idx in range(num_nodes):
-            inequality[row, idx] = 1
-            inequality[row, num_nodes + idx] = 1
-            inequality[row, 2 * num_nodes + idx] = 1
-            inequality[row, tod_index] = 1
-            inequality[row, slack_index] = 1
-            row += 1
-    for _ in range(2):
-        inequality[row, num_nodes - 1] = 1
-        inequality[row, 2 * num_nodes - 1] = 1
-        inequality[row, tod_index] = 1
-        inequality[row, slack_index] = 1
-        row += 1
-
-    return cast(Any, equality.tocsr()), cast(Any, inequality.tocsr())
+    del request
+    return None, None

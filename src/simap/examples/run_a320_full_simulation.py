@@ -96,9 +96,9 @@ def build_demo_inputs() -> tuple[LongitudinalPlanRequest, ReferencePath]:
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         weather=weather,
         optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
-        reference_track_rad=reference_path.track_angle_rad(reference_path.total_length_m),
     )
     return request, reference_path
 

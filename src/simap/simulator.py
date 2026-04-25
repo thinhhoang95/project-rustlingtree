@@ -212,6 +212,17 @@ def _cas_from_tas(
 def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile) -> State:
     if request.initial_state is None:
         sample = profile.sample(profile.start_s_m)
+        if all(hasattr(profile.plan, field_name) for field_name in ("east_m", "north_m", "psi_rad", "phi_rad")):
+            return State(
+                t_s=0.0,
+                s_m=sample.s_m,
+                h_m=sample.h_m,
+                v_tas_mps=sample.v_tas_mps,
+                east_m=float(profile.plan.east_m[-1]),
+                north_m=float(profile.plan.north_m[-1]),
+                psi_rad=float(profile.plan.psi_rad[-1]),
+                phi_rad=float(profile.plan.phi_rad[-1]),
+            )
         return State.on_reference_path(
             t_s=0.0,
             s_m=sample.s_m,
@@ -236,10 +247,10 @@ def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile)
 def simulate_plan(request: SimulationRequest) -> SimulationResult:
     """Replay a longitudinal plan through the lateral simulation model.
 
-    The longitudinal plan is treated as authoritative over the path coordinate
-    ``s_m``. The simulator therefore advances the lateral states and elapsed
-    time while resampling altitude, speed, gamma, and thrust from the planned
-    profile at the current along-track position.
+    The coupled planner is authoritative over the optimized node profile. This
+    replay helper advances a time-stepped lateral model while resampling
+    altitude, speed, gamma, and thrust from the planned profile at the current
+    along-track position.
     """
 
     profile = LongitudinalPlanProfile(request.plan)
