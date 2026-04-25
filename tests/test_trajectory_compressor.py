@@ -9,6 +9,7 @@ from scenario.trajectory_compressor.algorithms import (
     douglas_peucker_spatial_indices,
 )
 from scenario.trajectory_compressor.io import filter_tracks_to_flights, load_arrival_departure_flight_ids
+from scenario.trajectory_compressor.io import split_tracks_by_gap
 
 
 def test_spatial_douglas_peucker_keeps_turning_point() -> None:
@@ -75,3 +76,23 @@ def test_filter_tracks_to_flights_keeps_only_catalog_flights() -> None:
     filtered = filter_tracks_to_flights(tracks, {"ARR1", "DEP1"})
 
     assert filtered["flight_id"].tolist() == ["ARR1", "DEP1"]
+
+
+def test_split_tracks_by_gap_suffixes_segments() -> None:
+    tracks = pd.DataFrame(
+        {
+            "flight_id": ["AAL1061abc123"] * 4,
+            "callsign": ["AAL1061"] * 4,
+            "icao24": ["abc123"] * 4,
+            "time": [0, 60, 2000, 2060],
+            "lat": [32.0, 32.1, 33.0, 33.1],
+            "lon": [-97.0, -97.1, -97.2, -97.3],
+            "heading": [0.0] * 4,
+            "geoaltitude": [100.0, 200.0, 300.0, 400.0],
+        }
+    )
+
+    split = split_tracks_by_gap(tracks, split_gap_seconds=1500)
+
+    assert split["flight_id"].tolist() == ["AAL1061M1abc123", "AAL1061M1abc123", "AAL1061M2abc123", "AAL1061M2abc123"]
+    assert split["callsign"].tolist() == ["AAL1061M1", "AAL1061M1", "AAL1061M2", "AAL1061M2"]

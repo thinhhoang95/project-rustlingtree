@@ -207,6 +207,34 @@ def extract_fix_sequence(
     }
 
 
+def split_flight_track(flight: pd.DataFrame, split_gap_seconds: int) -> list[pd.DataFrame]:
+    if flight.empty:
+        return [flight]
+
+    times = flight["time"].to_numpy(dtype=float)
+    split_points = [0]
+    for index in range(1, len(flight)):
+        previous_time = times[index - 1]
+        current_time = times[index]
+        if np.isnan(previous_time) or np.isnan(current_time):
+            continue
+        if current_time - previous_time > split_gap_seconds:
+            split_points.append(index)
+    split_points.append(len(flight))
+
+    segments: list[pd.DataFrame] = []
+    first_row = flight.iloc[0]
+    base_callsign = str(first_row["callsign"])
+    icao24 = str(first_row["icao24"])
+    for segment_number, (start, stop) in enumerate(zip(split_points, split_points[1:], strict=False), start=1):
+        segment = flight.iloc[start:stop].copy().reset_index(drop=True)
+        segment_callsign = f"{base_callsign}M{segment_number}"
+        segment["callsign"] = segment_callsign
+        segment["flight_id"] = f"{segment_callsign}{icao24}"
+        segments.append(segment)
+    return segments
+
+
 def process_tracks(
     tracks: pd.DataFrame,
     thresholds: pd.DataFrame,
@@ -215,6 +243,7 @@ def process_tracks(
     fix_radius_m: float,
     lookaround_seconds: int,
     min_altitude_change_m: float,
+    split_gap_seconds: int,
     date_label: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Counter[str]]:
     event_records: list[dict[str, object]] = []
@@ -222,26 +251,27 @@ def process_tracks(
     classification_counts: Counter[str] = Counter()
 
     for _, flight in tracks.groupby("flight_id", sort=False):
-        classification, event_record = classify_flight_track(
-            flight=flight,
-            thresholds=thresholds,
-            runway_radius_m=runway_radius_m,
-            lookaround_seconds=lookaround_seconds,
-            min_altitude_change_m=min_altitude_change_m,
-            date_label=date_label,
-        )
-        classification_counts[classification] += 1
-        if event_record is not None:
-            event_records.append(event_record)
-
-        fix_records.append(
-            extract_fix_sequence(
-                flight=flight,
-                fixes=fixes,
-                fix_radius_m=fix_radius_m,
+        for segment in split_flight_track(flight, split_gap_seconds):
+            classification, event_record = classify_flight_track(
+                flight=segment,
+                thresholds=thresholds,
+                runway_radius_m=runway_radius_m,
+                lookaround_seconds=lookaround_seconds,
+                min_altitude_change_m=min_altitude_change_m,
                 date_label=date_label,
             )
-        )
+            classification_counts[classification] += 1
+            if event_record is not None:
+                event_records.append(event_record)
+
+            fix_records.append(
+                extract_fix_sequence(
+                    flight=segment,
+                    fixes=fixes,
+                    fix_radius_m=fix_radius_m,
+                    date_label=date_label,
+                )
+            )
 
     event_frame = (
         pd.DataFrame(event_records).sort_values(["event_time", "flight_id"], kind="stable")

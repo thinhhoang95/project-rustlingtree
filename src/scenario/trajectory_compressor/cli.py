@@ -14,6 +14,7 @@ DEFAULT_INPUT_DIR = Path("data/adsb/raw")
 DEFAULT_OUTPUT_DIR = Path("data/adsb/compressed")
 DEFAULT_LATERAL_TOLERANCE_M = 100.0
 DEFAULT_ALTITUDE_TOLERANCE_M = 50.0
+DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -25,6 +26,7 @@ from scenario.trajectory_compressor.io import (
     list_raw_csv_files,
     load_arrival_departure_flight_ids,
     load_raw_adsb,
+    split_tracks_by_gap,
     write_jsonl,
     write_manifest,
 )
@@ -44,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--lateral-tolerance-m", type=float, default=DEFAULT_LATERAL_TOLERANCE_M)
     parser.add_argument("--altitude-tolerance-m", type=float, default=DEFAULT_ALTITUDE_TOLERANCE_M)
+    parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
     parser.add_argument("--processes", type=int, default=max(cpu_count() - 1, 1))
     return parser
 
@@ -134,6 +137,7 @@ def main() -> None:
 
     with console.status("[bold]Loading raw ADS-B rows...[/bold]"):
         tracks = load_raw_adsb(args.input_dir, args.processes)
+        tracks = split_tracks_by_gap(tracks, args.split_gap_seconds)
         catalog_flight_ids = None
         if args.landings_departures_catalog is not None:
             catalog_flight_ids = load_arrival_departure_flight_ids(args.landings_departures_catalog)

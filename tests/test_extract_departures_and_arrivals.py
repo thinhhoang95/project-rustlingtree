@@ -15,6 +15,8 @@ from scenario.demand_opensky.adsb_catalog_io import (
 from scenario.demand_opensky.adsb_catalog_processing import (
     classify_flight_track,
     extract_fix_sequence,
+    process_tracks,
+    split_flight_track,
 )
 
 
@@ -172,6 +174,60 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(result["flight_id"], "AAL400jkl012")
         self.assertEqual(result["fix_sequence"], "SPERA>JGIRL>CORTS")
         self.assertEqual(result["fix_count"], 3)
+
+    def test_split_flight_track_splits_large_time_gaps_and_suffixes_callsigns(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "abc123", "lat": 32.9157, "lon": -97.0260, "heading": 0.0, "callsign": "AAL1061", "geoaltitude": 110.0},
+                {"time": 60, "icao24": "abc123", "lat": 32.94, "lon": -97.03, "heading": 0.0, "callsign": "AAL1061", "geoaltitude": 410.0},
+                {"time": 2000, "icao24": "abc123", "lat": 33.10, "lon": -97.02, "heading": 180.0, "callsign": "AAL1061", "geoaltitude": 1200.0},
+                {"time": 2060, "icao24": "abc123", "lat": 32.9157, "lon": -97.0260, "heading": 180.0, "callsign": "AAL1061", "geoaltitude": 150.0},
+            ]
+        )
+
+        segments = split_flight_track(flight, split_gap_seconds=1500)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["callsign"].tolist(), ["AAL1061M1", "AAL1061M1"])
+        self.assertEqual(segments[1]["callsign"].tolist(), ["AAL1061M2", "AAL1061M2"])
+        self.assertEqual(segments[0]["flight_id"].iloc[0], "AAL1061M1abc123")
+        self.assertEqual(segments[1]["flight_id"].iloc[0], "AAL1061M2abc123")
+
+    def test_process_tracks_classifies_split_segments_independently(self) -> None:
+        tracks = make_flight(
+            [
+                {"time": 0, "icao24": "abc123", "lat": 32.9157, "lon": -97.0260, "heading": 0.0, "callsign": "AAL1061", "geoaltitude": 110.0},
+                {"time": 60, "icao24": "abc123", "lat": 32.94, "lon": -97.03, "heading": 0.0, "callsign": "AAL1061", "geoaltitude": 410.0},
+                {"time": 120, "icao24": "abc123", "lat": 33.02, "lon": -97.08, "heading": 0.0, "callsign": "AAL1061", "geoaltitude": 820.0},
+                {"time": 2000, "icao24": "abc123", "lat": 33.10, "lon": -97.20, "heading": 180.0, "callsign": "AAL1061", "geoaltitude": 900.0},
+                {"time": 2060, "icao24": "abc123", "lat": 32.98, "lon": -97.10, "heading": 180.0, "callsign": "AAL1061", "geoaltitude": 700.0},
+                {"time": 2120, "icao24": "abc123", "lat": 32.9157, "lon": -97.0260, "heading": 180.0, "callsign": "AAL1061", "geoaltitude": 120.0},
+            ]
+        )
+        fixes = pd.DataFrame(
+            [
+                {"identifier": "DEPFX", "fix_type": "waypoint", "latitude_deg": 33.02, "longitude_deg": -97.08},
+                {"identifier": "ARRFX", "fix_type": "waypoint", "latitude_deg": 32.98, "longitude_deg": -97.10},
+            ]
+        )
+
+        events, fix_sequences, classification_counts = process_tracks(
+            tracks=tracks,
+            thresholds=THRESHOLDS,
+            fixes=fixes,
+            runway_radius_m=1_000.0,
+            fix_radius_m=2_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            split_gap_seconds=1500,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification_counts["departure"], 1)
+        self.assertEqual(classification_counts["arrival"], 1)
+        self.assertEqual(events["flight_id"].tolist(), ["AAL1061M1abc123", "AAL1061M2abc123"])
+        self.assertEqual(events["operation"].tolist(), ["departure", "arrival"])
+        self.assertEqual(fix_sequences["flight_id"].tolist(), ["AAL1061M1abc123", "AAL1061M2abc123"])
 
 
 if __name__ == "__main__":

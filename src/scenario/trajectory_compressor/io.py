@@ -110,6 +110,42 @@ def filter_tracks_to_flights(tracks: pd.DataFrame, flight_ids: set[str]) -> pd.D
     return filtered
 
 
+def split_tracks_by_gap(tracks: pd.DataFrame, split_gap_seconds: int) -> pd.DataFrame:
+    if tracks.empty:
+        return tracks.copy()
+
+    split_frames: list[pd.DataFrame] = []
+    for _, flight in tracks.groupby("flight_id", sort=False):
+        if flight.empty:
+            continue
+
+        times = flight["time"].to_numpy(dtype=float)
+        split_points = [0]
+        for index in range(1, len(flight)):
+            previous_time = times[index - 1]
+            current_time = times[index]
+            if pd.isna(previous_time) or pd.isna(current_time):
+                continue
+            if current_time - previous_time > split_gap_seconds:
+                split_points.append(index)
+        split_points.append(len(flight))
+
+        first = flight.iloc[0]
+        base_callsign = str(first["callsign"])
+        icao24 = str(first["icao24"])
+        for segment_number, (start, stop) in enumerate(zip(split_points, split_points[1:], strict=False), start=1):
+            segment = flight.iloc[start:stop].copy().reset_index(drop=True)
+            segment_callsign = f"{base_callsign}M{segment_number}"
+            segment["callsign"] = segment_callsign
+            segment["flight_id"] = f"{segment_callsign}{icao24}"
+            split_frames.append(segment)
+
+    split_tracks = pd.concat(split_frames, ignore_index=True)
+    split_tracks.sort_values(["flight_id", "time"], inplace=True, kind="stable")
+    split_tracks.reset_index(drop=True, inplace=True)
+    return split_tracks
+
+
 def build_flight_tasks(tracks: pd.DataFrame) -> list[FlightCompressionTask]:
     tasks: list[FlightCompressionTask] = []
     columns = ["time", "lat", "lon", "geoaltitude"]

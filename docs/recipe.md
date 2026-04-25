@@ -16,5 +16,7 @@ If you want to know what the fields mean, check out `docs/cifp/arinc424_route_an
 The script to realize this is `src/scenario/demand_opensky/1_1download_ostrino.py`. Make sure you have ostrino CLI ready in the project root. This will give `data/adsb/raw` CSV files.
 
 ### ADS-B Data Processing
-`python src/scenario/demand_opensky/extract_departures_and_arrivals.py` Run this to get `data/adsb/catalogs` CSV files.
+Generate the arrival, departure catalogs, and compress data for the rustlingleaves client.
 
+python src/scenario/demand_opensky/extract_departures_and_arrivals.py --split-gap-seconds 1500
+python src/scenario/trajectory_compressor/cli.py --landings-departures-catalog 
