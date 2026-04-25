@@ -9,7 +9,7 @@ import pandas as pd
 from openap import aero
 from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, NonlinearConstraint, minimize
-from scipy.sparse import csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix
 
 from .backends import PerformanceBackend
 from .config import AircraftConfig, bank_limit_rad, mode_for_s, planned_cas_bounds_mps
@@ -1216,17 +1216,37 @@ def _replay_solution(
         rtol=1e-6,
         atol=1e-8,
     )
-    h_error = float(np.max(np.abs(replay.y[0] - h_m)))
-    v_error = float(np.max(np.abs(replay.y[1] - v_tas_mps)))
-    t_error = float(np.max(np.abs(replay.y[2] - t_s)))
-    y_error = float(np.max(np.abs(replay.y[3] - cross_track_m)))
-    chi_error = float(np.max(np.abs(replay.y[4] - heading_error_rad)))
-    phi_error = float(np.max(np.abs(replay.y[5] - phi_rad)))
+    if replay.y.shape[1] == len(s_m):
+        expected_h_m = h_m
+        expected_v_tas_mps = v_tas_mps
+        expected_t_s = t_s
+        expected_cross_track_m = cross_track_m
+        expected_heading_error_rad = heading_error_rad
+        expected_phi_rad = phi_rad
+    else:
+        replay_s_m = np.asarray(replay.t, dtype=float)
+        expected_h_m = np.interp(replay_s_m, s_m, h_m)
+        expected_v_tas_mps = np.interp(replay_s_m, s_m, v_tas_mps)
+        expected_t_s = np.interp(replay_s_m, s_m, t_s)
+        expected_cross_track_m = np.interp(replay_s_m, s_m, cross_track_m)
+        expected_heading_error_rad = np.interp(replay_s_m, s_m, heading_error_rad)
+        expected_phi_rad = np.interp(replay_s_m, s_m, phi_rad)
+
+    h_error = float(np.max(np.abs(replay.y[0] - expected_h_m)))
+    v_error = float(np.max(np.abs(replay.y[1] - expected_v_tas_mps)))
+    t_error = float(np.max(np.abs(replay.y[2] - expected_t_s)))
+    y_error = float(np.max(np.abs(replay.y[3] - expected_cross_track_m)))
+    chi_error = float(np.max(np.abs(replay.y[4] - expected_heading_error_rad)))
+    phi_error = float(np.max(np.abs(replay.y[5] - expected_phi_rad)))
+    if not replay.success or replay.y.shape[1] != len(s_m):
+        integration_error = float(np.finfo(float).max)
+    else:
+        integration_error = 0.0
     return {
         "h_error_m": h_error,
         "v_error_mps": v_error,
         "t_error_s": t_error,
-        "max_error": max(h_error, v_error, t_error, y_error, chi_error, phi_error),
+        "max_error": max(h_error, v_error, t_error, y_error, chi_error, phi_error, integration_error),
     }
 
 
@@ -1356,5 +1376,109 @@ def _planned_cas_bounds_many(cfg: AircraftConfig, s_m: np.ndarray) -> tuple[np.n
 def _constraint_jacobian_sparsity(
     request: LongitudinalPlanRequest,
 ) -> tuple[csr_matrix | None, csr_matrix | None]:
-    del request
-    return None, None
+    num_nodes = request.optimizer.num_nodes
+    num_vars = 9 * num_nodes + 2
+    tod_col = 9 * num_nodes
+    slack_col = 9 * num_nodes + 1
+
+    h_start = 0
+    v_start = h_start + num_nodes
+    t_start = v_start + num_nodes
+    y_start = t_start + num_nodes
+    chi_start = y_start + num_nodes
+    phi_start = chi_start + num_nodes
+    gamma_start = phi_start + num_nodes
+    thrust_start = gamma_start + num_nodes
+    roll_start = thrust_start + num_nodes
+    state_starts = (h_start, v_start, t_start, y_start, chi_start, phi_start)
+    node_starts = (
+        h_start,
+        v_start,
+        t_start,
+        y_start,
+        chi_start,
+        phi_start,
+        gamma_start,
+        thrust_start,
+        roll_start,
+    )
+
+    equality_rows: list[int] = []
+    equality_cols: list[int] = []
+
+    def add_eq(row: int, cols: list[int]) -> None:
+        equality_rows.extend([row] * len(cols))
+        equality_cols.extend(cols)
+
+    row = 0
+    for idx in range(num_nodes - 1):
+        for state_dim, state_start in enumerate(state_starts):
+            cols = [state_start + idx, state_start + idx + 1, tod_col]
+            for node_idx in (idx, idx + 1):
+                cols.extend(start + node_idx for start in node_starts)
+            add_eq(row + state_dim, sorted(set(cols)))
+        row += 6
+
+    endpoint_cols = [
+        h_start,
+        v_start,
+        t_start,
+        y_start,
+        chi_start,
+        phi_start,
+        gamma_start,
+        h_start + num_nodes - 1,
+        gamma_start + num_nodes - 1,
+        y_start + num_nodes - 1,
+        chi_start + num_nodes - 1,
+        phi_start + num_nodes - 1,
+    ]
+    for offset, col in enumerate(endpoint_cols):
+        add_eq(row + offset, [col])
+
+    equality = coo_matrix(
+        (np.ones(len(equality_rows), dtype=bool), (equality_rows, equality_cols)),
+        shape=(6 * (num_nodes - 1) + 12, num_vars),
+        dtype=bool,
+    ).tocsr()
+
+    inequality_rows: list[int] = []
+    inequality_cols: list[int] = []
+
+    def add_ineq(row: int, cols: list[int]) -> None:
+        inequality_rows.extend([row] * len(cols))
+        inequality_cols.extend(cols)
+
+    node_cols = [[start + idx for start in node_starts] + [tod_col, slack_col] for idx in range(num_nodes)]
+    row = 0
+    for _block in range(11):
+        for idx in range(num_nodes):
+            add_ineq(row, node_cols[idx])
+            row += 1
+
+    gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(np.asarray([0.0], dtype=float))
+    if gamma_lower is not None:
+        for idx in range(num_nodes):
+            add_ineq(row, [gamma_start + idx, tod_col, slack_col])
+            row += 1
+    if gamma_upper is not None:
+        for idx in range(num_nodes):
+            add_ineq(row, [gamma_start + idx, tod_col, slack_col])
+            row += 1
+
+    if request.constraints.cl_max is not None:
+        for idx in range(num_nodes):
+            add_ineq(row, node_cols[idx])
+            row += 1
+
+    add_ineq(row, [h_start + num_nodes - 1, v_start + num_nodes - 1, t_start + num_nodes - 1, tod_col, slack_col])
+    row += 1
+    add_ineq(row, [h_start + num_nodes - 1, v_start + num_nodes - 1, t_start + num_nodes - 1, tod_col, slack_col])
+    row += 1
+
+    inequality = coo_matrix(
+        (np.ones(len(inequality_rows), dtype=bool), (inequality_rows, inequality_cols)),
+        shape=(row, num_vars),
+        dtype=bool,
+    ).tocsr()
+    return equality, inequality
