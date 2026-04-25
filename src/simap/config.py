@@ -65,11 +65,25 @@ def clamp_cas_for_s(cfg: AircraftConfig, s_m: float, v_cas_mps: float) -> float:
     return clamp_cas_to_mode_limits(mode_for_s(cfg, s_m), v_cas_mps)
 
 
+def stall_margin_cas_mps(cfg: AircraftConfig, mode: ModeConfig) -> float:
+    return float(mode.vs_1g_ref_cas_mps * np.sqrt(cfg.mass_kg / cfg.reference_mass_kg))
+
+
+def planned_cas_bounds_mps(cfg: AircraftConfig, s_m: float) -> tuple[float, float]:
+    mode = mode_for_s(cfg, s_m)
+    lower = max(
+        0.0 if mode.cas_min_mps is None else mode.cas_min_mps,
+        stall_margin_cas_mps(cfg, mode),
+    )
+    upper = np.inf if mode.cas_max_mps is None else mode.cas_max_mps
+    return float(lower), float(upper)
+
+
 def bank_limit_stall_rad(cfg: AircraftConfig, mode: ModeConfig, v_cas_mps: float) -> float:
     if v_cas_mps <= 0.0:
         return 0.0
 
-    stall_cas_mps = mode.vs_1g_ref_cas_mps * np.sqrt(cfg.mass_kg / cfg.reference_mass_kg)
+    stall_cas_mps = stall_margin_cas_mps(cfg, mode)
     margin_ratio = cfg.bank_stall_margin_factor * stall_cas_mps / v_cas_mps
     cos_phi = float(np.clip(margin_ratio**2, 0.0, 1.0))
     return float(np.arccos(cos_phi))

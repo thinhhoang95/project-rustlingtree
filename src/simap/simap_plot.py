@@ -7,192 +7,233 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-
-def _series(trajectory: Any, field: str) -> np.ndarray:
-    if not hasattr(trajectory, field):
-        raise AttributeError(f"trajectory does not provide required field '{field}'")
-    values = np.asarray(getattr(trajectory, field), dtype=float)
-    if values.ndim != 1:
-        raise ValueError(f"trajectory field '{field}' must be one-dimensional")
-    return values
+from .longitudinal_profiles import ConstraintEnvelope
 
 
-def _match_time_and_values(t_s: np.ndarray, values: np.ndarray, label: str) -> None:
-    if len(t_s) != len(values):
-        raise ValueError(f"time series and {label} must have the same length")
+def _series(values: Any, field: str) -> np.ndarray:
+    if not hasattr(values, field):
+        raise AttributeError(f"object does not provide required field '{field}'")
+    data = np.asarray(getattr(values, field), dtype=float)
+    if data.ndim != 1:
+        raise ValueError(f"{field} must be one-dimensional")
+    return data
 
 
 def _plot(
     ax: Axes,
-    t_s: np.ndarray,
-    values: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
     *,
     title: str,
+    xlabel: str,
     ylabel: str,
     color: str,
-    reference: np.ndarray | None = None,
-    reference_label: str | None = None,
+    lower: np.ndarray | None = None,
+    upper: np.ndarray | None = None,
 ) -> Axes:
-    ax.plot(t_s, values, color=color, linewidth=1.8, label=None)
-    if reference is not None:
-        ax.plot(
-            t_s,
-            reference,
-            color="#4d4d4d",
-            linewidth=1.4,
-            linestyle="--",
-            label=reference_label,
-        )
-        if reference_label is not None:
-            ax.legend(loc="best")
+    ax.plot(x, y, color=color, linewidth=1.8)
+    if lower is not None and upper is not None:
+        ax.fill_between(x, lower, upper, color=color, alpha=0.15)
     ax.set_title(title)
-    ax.set_xlabel("Time [s]")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.grid(True, alpha=0.3)
     return ax
 
 
-def plot_s_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    s_m = _series(trajectory, "s_m")
-    _match_time_and_values(t_s, s_m, "s_m")
+def _band(envelope: ConstraintEnvelope | None, s_m: np.ndarray, lower_field: str, upper_field: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if envelope is None:
+        return None, None
+    if lower_field == "h_lower_m" and upper_field == "h_upper_m":
+        return envelope.h_bounds_many(s_m)
+    if lower_field == "cas_lower_mps" and upper_field == "cas_upper_mps":
+        return envelope.cas_bounds_many(s_m)
+    if lower_field == "gamma_lower_rad" and upper_field == "gamma_upper_rad":
+        return envelope.gamma_bounds_many(s_m)
+    if lower_field == "thrust_lower_n" and upper_field == "thrust_upper_n":
+        return envelope.thrust_bounds_many(s_m)
+    raise ValueError(f"unsupported envelope band fields: {lower_field}, {upper_field}")
+
+
+def plot_altitude_response(
+    plan: Any,
+    *,
+    envelope: ConstraintEnvelope | None = None,
+    ax: Axes | None = None,
+) -> Axes:
+    s_m = _series(plan, "s_m")
+    h_m = _series(plan, "h_m")
     axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
-    return _plot(axis, t_s, s_m, title="Along-track Distance", ylabel="s [m]", color="#1f77b4")
-
-
-def plot_lat_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    lat_deg = _series(trajectory, "lat_deg")
-    _match_time_and_values(t_s, lat_deg, "lat_deg")
-    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
-    return _plot(axis, t_s, lat_deg, title="Latitude", ylabel="lat [deg]", color="#d62728")
-
-
-def plot_lon_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    lon_deg = _series(trajectory, "lon_deg")
-    _match_time_and_values(t_s, lon_deg, "lon_deg")
-    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
-    return _plot(axis, t_s, lon_deg, title="Longitude", ylabel="lon [deg]", color="#9467bd")
-
-
-def plot_altitude_response(trajectory: Any, *, ax: Axes | None = None) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    h_m = _series(trajectory, "h_m")
-    _match_time_and_values(t_s, h_m, "h_m")
-    h_ref_m = _series(trajectory, "h_ref_m") if hasattr(trajectory, "h_ref_m") else None
-    if h_ref_m is not None:
-        _match_time_and_values(t_s, h_ref_m, "h_ref_m")
-    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
+    lower, upper = _band(envelope, s_m, "h_lower_m", "h_upper_m")
     return _plot(
         axis,
-        t_s,
+        s_m,
         h_m,
         title="Altitude",
+        xlabel="Distance From Threshold [m]",
         ylabel="h [m]",
         color="#2ca02c",
-        reference=h_ref_m,
-        reference_label="h_ref",
+        lower=lower,
+        upper=upper,
     )
 
 
-def plot_psi_response(
-    trajectory: Any,
-    *,
-    ax: Axes | None = None,
-    in_degrees: bool = True,
-) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    psi_rad = (
-        _series(trajectory, "heading_rad")
-        if hasattr(trajectory, "heading_rad")
-        else _series(trajectory, "psi_rad")
-    )
-    _match_time_and_values(t_s, psi_rad, "heading/psi")
-    values = np.rad2deg(psi_rad) if in_degrees else psi_rad
+def plot_tas_response(plan: Any, *, ax: Axes | None = None) -> Axes:
+    s_m = _series(plan, "s_m")
+    v_tas_mps = _series(plan, "v_tas_mps")
     axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
     return _plot(
         axis,
-        t_s,
-        values,
-        title="Heading (psi)",
-        ylabel="psi [deg]" if in_degrees else "psi [rad]",
+        s_m,
+        v_tas_mps,
+        title="TAS",
+        xlabel="Distance From Threshold [m]",
+        ylabel="v_tas [m/s]",
+        color="#1f77b4",
+    )
+
+
+def plot_cas_response(
+    plan: Any,
+    *,
+    envelope: ConstraintEnvelope | None = None,
+    ax: Axes | None = None,
+) -> Axes:
+    s_m = _series(plan, "s_m")
+    v_cas_mps = _series(plan, "v_cas_mps")
+    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
+    lower, upper = _band(envelope, s_m, "cas_lower_mps", "cas_upper_mps")
+    return _plot(
+        axis,
+        s_m,
+        v_cas_mps,
+        title="CAS",
+        xlabel="Distance From Threshold [m]",
+        ylabel="v_cas [m/s]",
         color="#ff7f0e",
+        lower=lower,
+        upper=upper,
     )
 
 
-def plot_phi_response(
-    trajectory: Any,
+def plot_gamma_response(
+    plan: Any,
     *,
+    envelope: ConstraintEnvelope | None = None,
     ax: Axes | None = None,
     in_degrees: bool = True,
 ) -> Axes:
-    t_s = _series(trajectory, "t_s")
-    phi_rad = (
-        _series(trajectory, "bank_rad") if hasattr(trajectory, "bank_rad") else _series(trajectory, "phi_rad")
-    )
-    _match_time_and_values(t_s, phi_rad, "bank/phi")
-    values = np.rad2deg(phi_rad) if in_degrees else phi_rad
+    s_m = _series(plan, "s_m")
+    gamma_rad = _series(plan, "gamma_rad")
+    values = np.rad2deg(gamma_rad) if in_degrees else gamma_rad
+    lower = None
+    upper = None
+    if envelope is not None and envelope.gamma_lower_rad is not None and envelope.gamma_upper_rad is not None:
+        lower_band, upper_band = _band(envelope, s_m, "gamma_lower_rad", "gamma_upper_rad")
+        if lower_band is not None and upper_band is not None:
+            lower = np.rad2deg(lower_band) if in_degrees else lower_band
+            upper = np.rad2deg(upper_band) if in_degrees else upper_band
     axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
     return _plot(
         axis,
-        t_s,
+        s_m,
         values,
-        title="Bank Angle (phi)",
-        ylabel="phi [deg]" if in_degrees else "phi [rad]",
-        color="#8c564b",
+        title="Flight-Path Angle",
+        xlabel="Distance From Threshold [m]",
+        ylabel="gamma [deg]" if in_degrees else "gamma [rad]",
+        color="#9467bd",
+        lower=lower,
+        upper=upper,
     )
 
 
-def plot_state_overview(
-    trajectory: Any,
+def plot_thrust_response(
+    plan: Any,
     *,
-    figsize: tuple[float, float] = (14.0, 10.0),
-    in_degrees: bool = True,
+    envelope: ConstraintEnvelope | None = None,
+    ax: Axes | None = None,
+) -> Axes:
+    s_m = _series(plan, "s_m")
+    thrust_n = _series(plan, "thrust_n")
+    axis = ax if ax is not None else plt.subplots(1, 1, figsize=(6, 4))[1]
+    lower = None
+    upper = None
+    if envelope is not None and envelope.thrust_lower_n is not None and envelope.thrust_upper_n is not None:
+        lower, upper = _band(envelope, s_m, "thrust_lower_n", "thrust_upper_n")
+    return _plot(
+        axis,
+        s_m,
+        thrust_n,
+        title="Thrust",
+        xlabel="Distance From Threshold [m]",
+        ylabel="T [N]",
+        color="#8c564b",
+        lower=lower,
+        upper=upper,
+    )
+
+
+def plot_constraint_envelope(
+    envelope: ConstraintEnvelope,
+    *,
+    figsize: tuple[float, float] = (12.0, 4.5),
     show: bool = True,
 ) -> tuple[Figure, np.ndarray]:
-    """
-    Draw the core state responses in one figure window.
-
-    The six standard panels are: s, lat, lon, altitude, psi, phi.
-    """
-    fig, axes = plt.subplots(3, 2, figsize=figsize, sharex=True)
-    plot_s_response(trajectory, ax=axes[0, 0])
-    plot_lat_response(trajectory, ax=axes[0, 1])
-    plot_lon_response(trajectory, ax=axes[1, 0])
-    plot_altitude_response(trajectory, ax=axes[1, 1])
-    plot_psi_response(trajectory, ax=axes[2, 0], in_degrees=in_degrees)
-    plot_phi_response(trajectory, ax=axes[2, 1], in_degrees=in_degrees)
-    fig.suptitle("SIMAP State Response")
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    _plot(
+        axes[0],
+        envelope.s_m,
+        0.5 * (envelope.h_lower_m + envelope.h_upper_m),
+        title="Altitude Envelope",
+        xlabel="Distance From Threshold [m]",
+        ylabel="h [m]",
+        color="#2ca02c",
+        lower=envelope.h_lower_m,
+        upper=envelope.h_upper_m,
+    )
+    _plot(
+        axes[1],
+        envelope.s_m,
+        0.5 * (envelope.cas_lower_mps + envelope.cas_upper_mps),
+        title="CAS Envelope",
+        xlabel="Distance From Threshold [m]",
+        ylabel="v_cas [m/s]",
+        color="#ff7f0e",
+        lower=envelope.cas_lower_mps,
+        upper=envelope.cas_upper_mps,
+    )
+    fig.suptitle("RNAV Constraint Envelope")
     fig.tight_layout()
     if show:
         plt.show()
     return fig, axes
 
 
-def plot_all_state_responses(
-    trajectory: Any,
+def plot_longitudinal_plan(
+    plan: Any,
     *,
-    figsize: tuple[float, float] = (14.0, 10.0),
-    in_degrees: bool = True,
+    envelope: ConstraintEnvelope | None = None,
+    figsize: tuple[float, float] = (12.0, 10.0),
     show: bool = True,
 ) -> tuple[Figure, np.ndarray]:
-    """Alias for plot_state_overview for clearer intent in analysis scripts."""
-    return plot_state_overview(
-        trajectory,
-        figsize=figsize,
-        in_degrees=in_degrees,
-        show=show,
-    )
+    fig, axes = plt.subplots(2, 2, figsize=figsize, sharex=True)
+    plot_altitude_response(plan, envelope=envelope, ax=axes[0, 0])
+    plot_cas_response(plan, envelope=envelope, ax=axes[0, 1])
+    plot_gamma_response(plan, envelope=envelope, ax=axes[1, 0])
+    plot_thrust_response(plan, envelope=envelope, ax=axes[1, 1])
+    fig.suptitle("Authoritative RNAV Longitudinal Plan")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
 
 
 __all__ = [
-    "plot_all_state_responses",
     "plot_altitude_response",
-    "plot_lat_response",
-    "plot_lon_response",
-    "plot_phi_response",
-    "plot_psi_response",
-    "plot_s_response",
-    "plot_state_overview",
+    "plot_cas_response",
+    "plot_constraint_envelope",
+    "plot_gamma_response",
+    "plot_longitudinal_plan",
+    "plot_tas_response",
+    "plot_thrust_response",
 ]

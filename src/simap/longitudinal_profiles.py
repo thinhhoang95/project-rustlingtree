@@ -3,18 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from openap import aero
 
-from .config import AircraftConfig, clamp_cas_for_s, mode_for_s
-from .openap_adapter import wrap_default
 from .units import km_to_m
-
-
-@dataclass(frozen=True)
-class FeasibilityConfig:
-    planning_tailwind_mps: float = 0.0
-    planning_delta_isa_K: float = 0.0
-    distance_step_m: float = 250.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +30,11 @@ class ScalarProfile:
         s = float(np.clip(s_m, self.s_m[0], self.s_m[-1]))
         return float(np.interp(s, self.s_m, self.y))
 
+    def values(self, s_m: np.ndarray) -> np.ndarray:
+        points = np.asarray(s_m, dtype=float)
+        clipped = np.clip(points, self.s_m[0], self.s_m[-1])
+        return np.interp(clipped, self.s_m, self.y)
+
     def slope(self, s_m: float) -> float:
         s = float(np.clip(s_m, self.s_m[0], self.s_m[-1]))
         index = int(np.searchsorted(self.s_m, s))
@@ -49,28 +44,151 @@ class ScalarProfile:
         return float(dy / ds)
 
 
-def path_angle_rad(altitude_profile: ScalarProfile, s_m: float) -> float:
-    return float(np.arctan(altitude_profile.slope(s_m)))
+@dataclass(frozen=True)
+class ConstraintEnvelope:
+    s_m: np.ndarray
+    h_lower_m: np.ndarray
+    h_upper_m: np.ndarray
+    cas_lower_mps: np.ndarray
+    cas_upper_mps: np.ndarray
+    gamma_lower_rad: np.ndarray | None = None
+    gamma_upper_rad: np.ndarray | None = None
+    thrust_lower_n: np.ndarray | None = None
+    thrust_upper_n: np.ndarray | None = None
+    cl_max: np.ndarray | None = None
 
+    def __post_init__(self) -> None:
+        s = np.asarray(self.s_m, dtype=float)
+        if s.ndim != 1 or len(s) < 2:
+            raise ValueError("ConstraintEnvelope requires a one-dimensional distance grid")
+        if np.any(np.diff(s) <= 0.0):
+            raise ValueError("ConstraintEnvelope distances must be strictly increasing")
+        object.__setattr__(self, "s_m", s)
+        required = (
+            "h_lower_m",
+            "h_upper_m",
+            "cas_lower_mps",
+            "cas_upper_mps",
+        )
+        optional = (
+            "gamma_lower_rad",
+            "gamma_upper_rad",
+            "thrust_lower_n",
+            "thrust_upper_n",
+            "cl_max",
+        )
+        for name in required:
+            object.__setattr__(self, name, self._coerce(name, getattr(self, name), required=True))
+        for name in optional:
+            object.__setattr__(self, name, self._coerce(name, getattr(self, name), required=False))
+        if np.any(self.h_lower_m > self.h_upper_m):
+            raise ValueError("altitude lower bounds must not exceed upper bounds")
+        if np.any(self.cas_lower_mps > self.cas_upper_mps):
+            raise ValueError("CAS lower bounds must not exceed upper bounds")
+        if self.gamma_lower_rad is not None and self.gamma_upper_rad is not None:
+            if np.any(self.gamma_lower_rad > self.gamma_upper_rad):
+                raise ValueError("gamma lower bounds must not exceed upper bounds")
+        if self.thrust_lower_n is not None and self.thrust_upper_n is not None:
+            if np.any(self.thrust_lower_n > self.thrust_upper_n):
+                raise ValueError("thrust lower bounds must not exceed upper bounds")
 
-def build_simple_glidepath(
-    threshold_elevation_m: float,
-    intercept_distance_m: float,
-    intercept_altitude_m: float,
-    *,
-    glide_deg: float = 3.0,
-    n: int = 400,
-) -> ScalarProfile:
-    s = np.linspace(0.0, intercept_distance_m, n, dtype=float)
-    h = threshold_elevation_m + np.tan(np.deg2rad(glide_deg)) * s
-    h = np.minimum(h, intercept_altitude_m)
-    return ScalarProfile(s_m=s, y=h)
+    def _coerce(self, name: str, values: np.ndarray | None, *, required: bool) -> np.ndarray | None:
+        if values is None:
+            if required:
+                raise ValueError(f"{name} is required")
+            return None
+        arr = np.asarray(values, dtype=float)
+        if arr.shape != self.s_m.shape:
+            raise ValueError(f"{name} must have the same shape as s_m")
+        return arr
+
+    @classmethod
+    def from_profiles(
+        cls,
+        *,
+        altitude_lower: ScalarProfile,
+        altitude_upper: ScalarProfile,
+        cas_lower: ScalarProfile,
+        cas_upper: ScalarProfile,
+        gamma_lower: ScalarProfile | None = None,
+        gamma_upper: ScalarProfile | None = None,
+        thrust_lower: ScalarProfile | None = None,
+        thrust_upper: ScalarProfile | None = None,
+        cl_max: ScalarProfile | None = None,
+    ) -> "ConstraintEnvelope":
+        profiles = [altitude_lower, altitude_upper, cas_lower, cas_upper]
+        for optional in (gamma_lower, gamma_upper, thrust_lower, thrust_upper, cl_max):
+            if optional is not None:
+                profiles.append(optional)
+        s_m = np.unique(np.concatenate([profile.s_m for profile in profiles]))
+        return cls(
+            s_m=s_m,
+            h_lower_m=altitude_lower.values(s_m),
+            h_upper_m=altitude_upper.values(s_m),
+            cas_lower_mps=cas_lower.values(s_m),
+            cas_upper_mps=cas_upper.values(s_m),
+            gamma_lower_rad=None if gamma_lower is None else gamma_lower.values(s_m),
+            gamma_upper_rad=None if gamma_upper is None else gamma_upper.values(s_m),
+            thrust_lower_n=None if thrust_lower is None else thrust_lower.values(s_m),
+            thrust_upper_n=None if thrust_upper is None else thrust_upper.values(s_m),
+            cl_max=None if cl_max is None else cl_max.values(s_m),
+        )
+
+    def _interp(self, values: np.ndarray | None, s_m: float, *, fallback: float | None = None) -> float | None:
+        if values is None:
+            return fallback
+        return float(np.interp(float(s_m), self.s_m, values))
+
+    def _interp_many(self, values: np.ndarray | None, s_m: np.ndarray) -> np.ndarray | None:
+        if values is None:
+            return None
+        points = np.asarray(s_m, dtype=float)
+        return np.asarray(np.interp(points, self.s_m, values), dtype=float)
+
+    def _interp_required(self, values: np.ndarray, s_m: float) -> float:
+        result = self._interp(values, s_m)
+        assert result is not None
+        return float(result)
+
+    def _interp_many_required(self, values: np.ndarray, s_m: np.ndarray) -> np.ndarray:
+        result = self._interp_many(values, s_m)
+        assert result is not None
+        return result
+
+    def h_bounds(self, s_m: float) -> tuple[float, float]:
+        return self._interp_required(self.h_lower_m, s_m), self._interp_required(self.h_upper_m, s_m)
+
+    def cas_bounds(self, s_m: float) -> tuple[float, float]:
+        return self._interp_required(self.cas_lower_mps, s_m), self._interp_required(self.cas_upper_mps, s_m)
+
+    def gamma_bounds(self, s_m: float) -> tuple[float | None, float | None]:
+        return self._interp(self.gamma_lower_rad, s_m), self._interp(self.gamma_upper_rad, s_m)
+
+    def thrust_bounds(self, s_m: float) -> tuple[float | None, float | None]:
+        return self._interp(self.thrust_lower_n, s_m), self._interp(self.thrust_upper_n, s_m)
+
+    def cl_upper(self, s_m: float) -> float | None:
+        return self._interp(self.cl_max, s_m)
+
+    def h_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self._interp_many_required(self.h_lower_m, s_m), self._interp_many_required(self.h_upper_m, s_m)
+
+    def cas_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self._interp_many_required(self.cas_lower_mps, s_m), self._interp_many_required(self.cas_upper_mps, s_m)
+
+    def gamma_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+        return self._interp_many(self.gamma_lower_rad, s_m), self._interp_many(self.gamma_upper_rad, s_m)
+
+    def thrust_bounds_many(self, s_m: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+        return self._interp_many(self.thrust_lower_n, s_m), self._interp_many(self.thrust_upper_n, s_m)
 
 
 def build_speed_schedule_from_wrap(
     wrap,
     s_nodes_km: tuple[float, ...] = (0.0, 8.0, 30.0, 60.0),
 ) -> ScalarProfile:
+    from .openap_adapter import wrap_default
+
     v_des_mps = wrap_default(wrap, "descent_const_vcas")
     v_final_mps = wrap_default(wrap, "finalapp_vcas")
     v_land_mps = wrap_default(wrap, "landing_speed")
@@ -79,79 +197,4 @@ def build_speed_schedule_from_wrap(
     v_mps = np.asarray([v_land_mps, v_final_mps, v_des_mps, v_des_mps], dtype=float)
     if len(s_km) != len(v_mps):
         raise ValueError("s_nodes_km must provide four schedule anchors")
-    return ScalarProfile(s_m=km_to_m(s_km), y=v_mps)
-
-
-def _build_distance_grid(max_s_m: float, step_m: float, *extra_nodes: np.ndarray) -> np.ndarray:
-    if step_m <= 0.0:
-        raise ValueError("distance_step_m must be positive")
-    uniform = np.arange(0.0, max_s_m + step_m, step_m, dtype=float)
-    nodes = [uniform, np.asarray([0.0, max_s_m], dtype=float)]
-    nodes.extend(np.asarray(extra, dtype=float) for extra in extra_nodes)
-    merged = np.unique(np.concatenate(nodes))
-    return merged[(merged >= 0.0) & (merged <= max_s_m)]
-
-
-def build_feasible_cas_schedule(
-    raw_speed_schedule_cas: ScalarProfile,
-    altitude_profile: ScalarProfile,
-    cfg: AircraftConfig,
-    perf,
-    feasibility: FeasibilityConfig,
-) -> ScalarProfile:
-    max_s_m = float(max(raw_speed_schedule_cas.s_m[-1], altitude_profile.s_m[-1]))
-    s_grid = _build_distance_grid(
-        max_s_m,
-        feasibility.distance_step_m,
-        raw_speed_schedule_cas.s_m,
-        altitude_profile.s_m,
-    )
-    altitudes = np.asarray([altitude_profile.value(s) for s in s_grid], dtype=float)
-    feasible_tas = np.empty_like(s_grid)
-    feasible_cas = np.empty_like(s_grid)
-
-    initial_cas = clamp_cas_for_s(cfg, 0.0, raw_speed_schedule_cas.value(0.0))
-    feasible_tas[0] = float(aero.cas2tas(initial_cas, altitudes[0], dT=feasibility.planning_delta_isa_K))
-    feasible_cas[0] = initial_cas
-
-    for index in range(1, len(s_grid)):
-        s_upstream = float(s_grid[index])
-        ds_m = float(s_grid[index] - s_grid[index - 1])
-        h_m = float(altitudes[index])
-        raw_cas = clamp_cas_for_s(cfg, s_upstream, raw_speed_schedule_cas.value(s_upstream))
-        raw_tas = float(aero.cas2tas(raw_cas, h_m, dT=feasibility.planning_delta_isa_K))
-        mode = mode_for_s(cfg, s_upstream)
-        gamma_rad = path_angle_rad(altitude_profile, s_upstream)
-        downstream_tas = float(feasible_tas[index - 1])
-        gs_plan = max(1.0, downstream_tas + feasibility.planning_tailwind_mps)
-        vs_plan = -gs_plan * np.tan(gamma_rad)
-        drag_newtons = perf.drag_newtons(
-            mode=mode,
-            mass_kg=cfg.mass_kg,
-            wing_area_m2=cfg.wing_area_m2,
-            v_tas_mps=downstream_tas,
-            h_m=h_m,
-            vs_mps=vs_plan,
-            delta_isa_K=feasibility.planning_delta_isa_K,
-        )
-        idle_thrust_newtons = perf.idle_thrust_newtons(
-            downstream_tas,
-            h_m,
-            delta_isa_K=feasibility.planning_delta_isa_K,
-        )
-        a_dec_max = max(
-            0.0,
-            (drag_newtons - idle_thrust_newtons) / cfg.mass_kg - aero.g0 * abs(np.sin(gamma_rad)),
-        )
-        feasible_upstream_tas = downstream_tas + a_dec_max * ds_m / gs_plan
-        feasible_tas[index] = min(raw_tas, feasible_upstream_tas)
-        feasible_cas[index] = clamp_cas_for_s(
-            cfg,
-            s_upstream,
-            float(aero.tas2cas(feasible_tas[index], h_m, dT=feasibility.planning_delta_isa_K)),
-        )
-        feasible_tas[index] = float(
-            aero.cas2tas(feasible_cas[index], h_m, dT=feasibility.planning_delta_isa_K)
-        )
-
-    return ScalarProfile(s_m=s_grid, y=feasible_cas)
+    return ScalarProfile(s_m=s_km * 1_000.0, y=v_mps)

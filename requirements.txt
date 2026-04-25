@@ -13,3 +13,6 @@ notebook
 tqdm
 python-dotenv
 rich
+cartopy
+pdf2image
+arinc424

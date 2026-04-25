@@ -16,6 +16,8 @@ def _wrap_angle_rad(angle_rad: float) -> float:
 class ReferencePath:
     origin_lat_deg: float
     origin_lon_deg: float
+    waypoint_lat_deg: np.ndarray
+    waypoint_lon_deg: np.ndarray
     s_from_start_m: np.ndarray
     s_m: np.ndarray
     east_m: np.ndarray
@@ -27,6 +29,13 @@ class ReferencePath:
     total_length_m: float
 
     def __post_init__(self) -> None:
+        waypoint_arrays = (self.waypoint_lat_deg, self.waypoint_lon_deg)
+        waypoint_lengths = {len(np.asarray(array)) for array in waypoint_arrays}
+        if len(waypoint_lengths) != 1:
+            raise ValueError("waypoint arrays must have the same length")
+        if not waypoint_lengths or min(waypoint_lengths) < 2:
+            raise ValueError("ReferencePath requires at least two waypoints")
+
         arrays = (
             self.s_from_start_m,
             self.s_m,
@@ -123,6 +132,8 @@ class ReferencePath:
         return cls(
             origin_lat_deg=origin_lat_deg,
             origin_lon_deg=origin_lon_deg,
+            waypoint_lat_deg=lat,
+            waypoint_lon_deg=lon,
             s_from_start_m=s_from_start_m,
             s_m=s_m,
             east_m=east_sample,

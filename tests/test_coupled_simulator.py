@@ -4,97 +4,91 @@ import os
 import unittest
 
 import numpy as np
-from openap import aero
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap import (
-    ApproachSimulator,
-    ConstantWeather,
-    Scenario,
-    State,
-    build_simple_glidepath,
-    build_speed_schedule_from_wrap,
-)
-from tests.helpers import a320_fixture
+from simap.longitudinal_planner import plan_longitudinal_descent
+from simap.path_geometry import ReferencePath
+from simap.simulator import SimulationRequest, State, simulate_plan
+from tests.test_simulator import build_test_request
+
+
+def _straight_reference_path() -> ReferencePath:
+    return ReferencePath.from_geographic(
+        lat_deg=np.asarray([0.0, 0.0], dtype=float),
+        lon_deg=np.asarray([0.70, 0.0], dtype=float),
+    )
 
 
 class CoupledSimulatorTests(unittest.TestCase):
-    def test_turning_path_produces_banked_flight_while_progress_stays_monotone(self) -> None:
-        fixture = a320_fixture()
-        cfg = fixture["cfg"]
-        perf = fixture["perf"]
-        openap = fixture["openap"]
-        reference_path = fixture["reference_path"]
-        intercept_distance_m = fixture["intercept_distance_m"]
-        intercept_altitude_m = fixture["intercept_altitude_m"]
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.plan_request = build_test_request()
+        cls.plan = plan_longitudinal_descent(cls.plan_request)
+        cls.reference_path = _straight_reference_path()
 
-        scenario = Scenario(
-            altitude_profile=build_simple_glidepath(
-                threshold_elevation_m=450.0,
-                intercept_distance_m=intercept_distance_m,
-                intercept_altitude_m=intercept_altitude_m,
-                glide_deg=3.0,
-            ),
-            raw_speed_schedule_cas=build_speed_schedule_from_wrap(openap.wrap),
-            reference_path=reference_path,
-            weather=ConstantWeather(),
+    def test_simulator_replays_plan_on_straight_path(self) -> None:
+        result = simulate_plan(
+            SimulationRequest(
+                cfg=self.plan_request.cfg,
+                plan=self.plan,
+                reference_path=self.reference_path,
+                weather=self.plan_request.weather,
+                dt_s=1.0,
+                threshold_tolerance_m=0.0,
+            )
         )
-        simulator = ApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
-        v0_cas_mps = simulator.feasible_speed_schedule_cas.value(intercept_distance_m)
-        initial = State.on_reference_path(
+
+        self.assertTrue(result.success, msg=result.message)
+        self.assertLessEqual(abs(result.s_m[-1]), 1e-9)
+        self.assertLess(result.final_threshold_error_m, 1.0)
+        self.assertLess(result.max_abs_cross_track_m, 1e-6)
+        self.assertTrue(np.all(np.diff(result.s_m) <= 1e-9))
+        self.assertTrue(np.all(np.diff(result.t_s) > 0.0))
+        self.assertTrue(np.all(np.isfinite(result.h_m)))
+        self.assertTrue(np.all(np.isfinite(result.v_tas_mps)))
+        self.assertTrue(np.all(np.isfinite(result.cross_track_m)))
+        self.assertGreater(result.min_alongtrack_speed_mps, 0.0)
+
+    def test_simulator_recovers_from_cross_track_offset(self) -> None:
+        start_sample = self.plan.s_m[-1]
+        initial_state = State.on_reference_path(
             t_s=0.0,
-            s_m=intercept_distance_m,
-            h_m=intercept_altitude_m,
-            v_tas_mps=float(aero.cas2tas(v0_cas_mps, intercept_altitude_m, dT=0.0)),
-            reference_path=reference_path,
+            s_m=float(start_sample),
+            h_m=float(self.plan.h_m[-1]),
+            v_tas_mps=float(self.plan.v_tas_mps[-1]),
+            reference_path=self.reference_path,
+            cross_track_m=150.0,
         )
-        trajectory = simulator.run(initial, dt_s=1.0, t_max_s=3_000.0)
-
-        self.assertGreater(len(trajectory), 100)
-        self.assertTrue((trajectory.s_m[1:] <= trajectory.s_m[:-1]).all())
-        self.assertGreater(np.max(np.abs(trajectory.bank_rad)), np.deg2rad(1.0))
-        self.assertLess(np.max(np.abs(trajectory.bank_rad)), cfg.clean.phi_comfort_max_rad + 1e-6)
-
-    def test_crosswind_tracking_crabs_heading_into_the_wind(self) -> None:
-        fixture = a320_fixture()
-        cfg = fixture["cfg"]
-        perf = fixture["perf"]
-        openap = fixture["openap"]
-        intercept_altitude_m = fixture["intercept_altitude_m"]
-        reference_path = fixture["reference_path"]
-        intercept_distance_m = reference_path.total_length_m
-
-        straight_path = type(reference_path).from_geographic(
-            lat_deg=np.asarray([48.7600, 48.3538], dtype=float),
-            lon_deg=np.asarray([11.7861, 11.7861], dtype=float),
+        result = simulate_plan(
+            SimulationRequest(
+                cfg=self.plan_request.cfg,
+                plan=self.plan,
+                reference_path=self.reference_path,
+                weather=self.plan_request.weather,
+                dt_s=1.0,
+                threshold_tolerance_m=0.0,
+                initial_state=initial_state,
+            )
         )
-        scenario = Scenario(
-            altitude_profile=build_simple_glidepath(
-                threshold_elevation_m=450.0,
-                intercept_distance_m=intercept_distance_m,
-                intercept_altitude_m=intercept_altitude_m,
-                glide_deg=3.0,
-            ),
-            raw_speed_schedule_cas=build_speed_schedule_from_wrap(openap.wrap),
-            reference_path=straight_path,
-            weather=ConstantWeather(wind_east_mps=20.0),
-        )
-        simulator = ApproachSimulator(cfg=cfg, perf=perf, scenario=scenario)
-        v0_cas_mps = simulator.feasible_speed_schedule_cas.value(intercept_distance_m)
-        initial = State.on_reference_path(
-            t_s=0.0,
-            s_m=intercept_distance_m,
-            h_m=intercept_altitude_m,
-            v_tas_mps=float(aero.cas2tas(v0_cas_mps, intercept_altitude_m, dT=0.0)),
-            reference_path=straight_path,
-        )
-        trajectory = simulator.run(initial, dt_s=1.0, t_max_s=1_500.0)
 
-        final_heading_rad = float(trajectory.heading_rad[-1])
-        final_track_rad = straight_path.track_angle_rad(float(trajectory.s_m[-1]))
-        self.assertGreater(abs(final_heading_rad - final_track_rad), np.deg2rad(2.0))
-        self.assertLess(abs(trajectory.cross_track_m[-1]), 200.0)
+        self.assertTrue(result.success, msg=result.message)
+        self.assertGreater(abs(result.cross_track_m[0]), 100.0)
+        self.assertLess(abs(result.cross_track_m[-1]), 5.0)
+        self.assertLess(result.final_threshold_error_m, 5.0)
+
+    def test_simulator_rejects_reference_path_shorter_than_tod(self) -> None:
+        short_path = ReferencePath.from_geographic(
+            lat_deg=np.asarray([0.0, 0.0], dtype=float),
+            lon_deg=np.asarray([0.20, 0.0], dtype=float),
+        )
+
+        with self.assertRaisesRegex(ValueError, "top of descent"):
+            SimulationRequest(
+                cfg=self.plan_request.cfg,
+                plan=self.plan,
+                reference_path=short_path,
+            )
 
 
 if __name__ == "__main__":

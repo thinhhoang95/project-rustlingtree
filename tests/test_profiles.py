@@ -2,21 +2,13 @@ from __future__ import annotations
 
 import os
 import unittest
+from math import isclose
 
 import numpy as np
-from openap import aero
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.longitudinal_dynamics import LongitudinalState, longitudinal_rhs
-from simap.longitudinal_profiles import (
-    FeasibilityConfig,
-    ScalarProfile,
-    build_feasible_cas_schedule,
-    build_simple_glidepath,
-)
-from simap.weather import ConstantWeather
-from tests.helpers import a320_fixture
+from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile
 
 
 class ScalarProfileTests(unittest.TestCase):
@@ -25,75 +17,76 @@ class ScalarProfileTests(unittest.TestCase):
             s_m=np.asarray([0.0, 10.0, 20.0], dtype=float),
             y=np.asarray([0.0, 10.0, 30.0], dtype=float),
         )
-        self.assertAlmostEqual(profile.value(5.0), 5.0)
-        self.assertAlmostEqual(profile.value(15.0), 20.0)
-        self.assertAlmostEqual(profile.slope(5.0), 1.0)
-        self.assertAlmostEqual(profile.slope(15.0), 2.0)
+        self.assertTrue(isclose(profile.value(5.0), 5.0))
+        self.assertTrue(isclose(profile.value(15.0), 20.0))
+        self.assertTrue(isclose(profile.slope(5.0), 1.0))
+        self.assertTrue(isclose(profile.slope(15.0), 2.0))
 
-    def test_simple_glidepath_hits_threshold_and_caps_at_intercept_altitude(self) -> None:
-        profile = build_simple_glidepath(
-            threshold_elevation_m=450.0,
-            intercept_distance_m=55_000.0,
-            intercept_altitude_m=3_500.0,
-            glide_deg=3.0,
-            n=20,
-        )
-        self.assertAlmostEqual(profile.value(0.0), 450.0)
-        self.assertLessEqual(profile.value(55_000.0), 3_500.0)
-        self.assertGreater(profile.slope(20_000.0), 0.0)
-
-    def test_feasible_schedule_respects_mode_cas_limits(self) -> None:
-        fixture = a320_fixture()
-        cfg = fixture["cfg"]
-        perf = fixture["perf"]
-        altitude_profile = build_simple_glidepath(
-            threshold_elevation_m=450.0,
-            intercept_distance_m=60_000.0,
-            intercept_altitude_m=3_500.0,
-        )
-        raw_schedule = ScalarProfile(
-            s_m=np.asarray([0.0, 20_000.0, 60_000.0], dtype=float),
-            y=np.asarray([10.0, 200.0, 220.0], dtype=float),
+    def test_constraint_envelope_is_piecewise_constant_between_nodes(self) -> None:
+        envelope = ConstraintEnvelope(
+            s_m=np.asarray([0.0, 20_000.0, 40_000.0], dtype=float),
+            h_lower_m=np.asarray([450.0, 1_500.0, 3_000.0], dtype=float),
+            h_upper_m=np.asarray([500.0, 1_700.0, 3_250.0], dtype=float),
+            cas_lower_mps=np.asarray([68.0, 72.0, 78.0], dtype=float),
+            cas_upper_mps=np.asarray([72.0, 82.0, 92.0], dtype=float),
+            gamma_lower_rad=np.asarray([-0.08, -0.07, -0.04], dtype=float),
+            gamma_upper_rad=np.asarray([-0.04, -0.03, 0.0], dtype=float),
         )
 
-        feasible = build_feasible_cas_schedule(
-            raw_speed_schedule_cas=raw_schedule,
-            altitude_profile=altitude_profile,
-            cfg=cfg,
-            perf=perf,
-            feasibility=FeasibilityConfig(distance_step_m=250.0),
+        h_lower, h_upper = envelope.h_bounds(10_000.0)
+        cas_lower, cas_upper = envelope.cas_bounds(10_000.0)
+        gamma_lower, gamma_upper = envelope.gamma_bounds(10_000.0)
+        assert gamma_lower is not None
+        assert gamma_upper is not None
+
+        self.assertTrue(isclose(h_lower, 975.0))
+        self.assertTrue(isclose(h_upper, 1100.0))
+        self.assertTrue(isclose(cas_lower, 70.0))
+        self.assertTrue(isclose(cas_upper, 77.0))
+        self.assertTrue(isclose(gamma_lower, -0.075))
+        self.assertTrue(isclose(gamma_upper, -0.035))
+
+        h_lower_after, h_upper_after = envelope.h_bounds(20_001.0)
+        self.assertTrue(isclose(h_lower_after, 1500.075))
+        self.assertTrue(isclose(h_upper_after, 1700.0775))
+
+    def test_constraint_envelope_from_profiles_unifies_node_grid(self) -> None:
+        altitude_lower = ScalarProfile(
+            s_m=np.asarray([0.0, 15_000.0, 40_000.0], dtype=float),
+            y=np.asarray([450.0, 1_400.0, 3_000.0], dtype=float),
+        )
+        altitude_upper = ScalarProfile(
+            s_m=np.asarray([0.0, 10_000.0, 40_000.0], dtype=float),
+            y=np.asarray([500.0, 1_300.0, 3_150.0], dtype=float),
+        )
+        cas_lower = ScalarProfile(
+            s_m=np.asarray([0.0, 8_000.0, 40_000.0], dtype=float),
+            y=np.asarray([68.0, 70.0, 82.0], dtype=float),
+        )
+        cas_upper = ScalarProfile(
+            s_m=np.asarray([0.0, 20_000.0, 40_000.0], dtype=float),
+            y=np.asarray([72.0, 84.0, 92.0], dtype=float),
         )
 
-        self.assertAlmostEqual(feasible.value(0.0), cfg.final.cas_min_mps)
-        self.assertLessEqual(feasible.value(cfg.final_gate_m + 1_000.0), cfg.approach.cas_max_mps)
-        self.assertLessEqual(feasible.value(50_000.0), cfg.clean.cas_max_mps)
-
-    def test_longitudinal_rhs_clamps_schedule_to_mode_limits(self) -> None:
-        fixture = a320_fixture()
-        cfg = fixture["cfg"]
-        perf = fixture["perf"]
-        altitude_profile = ScalarProfile(
-            s_m=np.asarray([0.0, 20_000.0], dtype=float),
-            y=np.asarray([450.0, 450.0], dtype=float),
-        )
-        raw_schedule = ScalarProfile(
-            s_m=np.asarray([0.0, 20_000.0], dtype=float),
-            y=np.asarray([10.0, 10.0], dtype=float),
-        )
-        h_m = 450.0
-        v_tas_mps = float(aero.cas2tas(cfg.final.cas_min_mps, h_m, dT=0.0))
-        state = LongitudinalState(t_s=0.0, s_m=1_000.0, h_m=h_m, v_tas_mps=v_tas_mps)
-
-        rates = longitudinal_rhs(
-            state=state,
-            cfg=cfg,
-            perf=perf,
-            altitude_profile=altitude_profile,
-            speed_schedule_cas=raw_schedule,
-            weather=ConstantWeather(),
+        envelope = ConstraintEnvelope.from_profiles(
+            altitude_lower=altitude_lower,
+            altitude_upper=altitude_upper,
+            cas_lower=cas_lower,
+            cas_upper=cas_upper,
         )
 
-        self.assertGreaterEqual(float(rates[2]), -1e-9)
+        self.assertGreater(len(envelope.s_m), 3)
+        self.assertEqual(float(envelope.s_m[0]), 0.0)
+        self.assertEqual(float(envelope.s_m[-1]), 40_000.0)
+        self.assertLessEqual(envelope.h_lower_m[0], envelope.h_upper_m[0])
+        self.assertLessEqual(envelope.cas_lower_mps[-1], envelope.cas_upper_mps[-1])
+        self.assertTrue(isclose(envelope.h_lower_m[1], 956.6666666666666))
+        self.assertTrue(isclose(envelope.h_upper_m[1], 1140.0))
+        self.assertTrue(isclose(envelope.cas_upper_mps[1], 76.8))
+
+        h_lower, h_upper = envelope.h_bounds(9_000.0)
+        self.assertTrue(isclose(h_lower, 1020.0))
+        self.assertTrue(isclose(h_upper, 1220.0))
 
 
 if __name__ == "__main__":
