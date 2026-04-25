@@ -25,3 +25,12 @@ dependencies = [
     "statsmodels>=0.14.0",
     "tqdm>=4.67.3",
 ]
+
+[project.scripts]
+adsb-trajectory-compress = "scenario.trajectory_compressor.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
