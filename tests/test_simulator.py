@@ -8,12 +8,12 @@ import numpy as np
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from simap.config import AircraftConfig, ModeConfig, planned_cas_bounds_mps
-from simap.longitudinal_planner import (
-    LongitudinalPlanRequest,
+from simap.coupled_descent_planner import (
+    CoupledDescentPlanRequest,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
-    plan_longitudinal_descent,
+    plan_coupled_descent,
 )
 from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile
 from simap.path_geometry import ReferencePath
@@ -59,7 +59,7 @@ class SmoothBackend:
         return idle, float(25_000.0 * phase_scale)
 
 
-def build_test_request() -> LongitudinalPlanRequest:
+def build_test_request() -> CoupledDescentPlanRequest:
     mode = ModeConfig(
         name="clean",
         tau_v_s=20.0,
@@ -124,7 +124,7 @@ def build_test_request() -> LongitudinalPlanRequest:
         lat_deg=np.asarray([0.0, 0.0], dtype=float),
         lon_deg=np.asarray([0.70, 0.0], dtype=float),
     )
-    return LongitudinalPlanRequest(
+    return CoupledDescentPlanRequest(
         cfg=cfg,
         perf=SmoothBackend(),
         threshold=threshold,
@@ -141,7 +141,7 @@ class LongitudinalPlannerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.request = build_test_request()
-        cls.plan = plan_longitudinal_descent(cls.request)
+        cls.plan = plan_coupled_descent(cls.request)
 
     def test_mode_gate_selection_is_deterministic(self) -> None:
         cfg = self.request.cfg
@@ -179,7 +179,7 @@ class LongitudinalPlannerTests(unittest.TestCase):
 
     def test_solver_is_deterministic_for_fixed_boundaries(self) -> None:
         plan_a = self.plan
-        plan_b = plan_longitudinal_descent(self.request)
+        plan_b = plan_coupled_descent(self.request)
 
         self.assertAlmostEqual(plan_a.tod_m, plan_b.tod_m, delta=1e-6)
         self.assertTrue(np.allclose(plan_a.h_m, plan_b.h_m))

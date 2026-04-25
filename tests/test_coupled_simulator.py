@@ -8,7 +8,7 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.longitudinal_planner import LateralBoundary, OptimizerConfig, plan_longitudinal_descent
+from simap.coupled_descent_planner import LateralBoundary, OptimizerConfig, plan_coupled_descent
 from simap.path_geometry import ReferencePath
 from simap.simulator import SimulationRequest, State, simulate_plan
 from tests.test_simulator import build_test_request
@@ -25,7 +25,7 @@ class CoupledSimulatorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.plan_request = build_test_request()
-        cls.plan = plan_longitudinal_descent(cls.plan_request)
+        cls.plan = plan_coupled_descent(cls.plan_request)
         cls.reference_path = _straight_reference_path()
 
     def test_simulator_replays_plan_on_straight_path(self) -> None:
@@ -84,7 +84,7 @@ class CoupledSimulatorTests(unittest.TestCase):
             upstream_lateral=LateralBoundary(cross_track_m=150.0),
             optimizer=OptimizerConfig(num_nodes=9, maxiter=120, verbose=0),
         )
-        plan = plan_longitudinal_descent(request)
+        plan = plan_coupled_descent(request)
 
         self.assertAlmostEqual(plan.cross_track_m[-1], 150.0, delta=1e-2)
         self.assertAlmostEqual(plan.cross_track_m[0], 0.0, delta=1e-2)

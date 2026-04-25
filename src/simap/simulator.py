@@ -13,7 +13,7 @@ from .lateral_dynamics import (
     lateral_rates,
     wrap_angle_rad,
 )
-from .longitudinal_planner import LongitudinalPlanResult
+from .coupled_descent_planner import CoupledDescentPlanResult
 from .openap_adapter import openap_dT
 from .path_geometry import ReferencePath
 from .weather import ConstantWeather, WeatherProvider
@@ -59,7 +59,7 @@ class State:
 
 
 @dataclass(frozen=True)
-class LongitudinalPlanSample:
+class CoupledDescentPlanSample:
     s_m: float
     h_m: float
     v_tas_mps: float
@@ -71,16 +71,16 @@ class LongitudinalPlanSample:
 
 
 @dataclass(frozen=True)
-class LongitudinalPlanProfile:
-    plan: LongitudinalPlanResult
+class CoupledDescentPlanProfile:
+    plan: CoupledDescentPlanResult
 
     def __post_init__(self) -> None:
         if len(self.plan) < 2:
-            raise ValueError("longitudinal plan requires at least two samples")
+            raise ValueError("descent plan requires at least two samples")
         if np.any(np.diff(self.plan.s_m) <= 0.0):
-            raise ValueError("longitudinal plan s_m must be strictly increasing")
+            raise ValueError("descent plan s_m must be strictly increasing")
         if np.any(np.diff(self.plan.t_s) < 0.0):
-            raise ValueError("longitudinal plan t_s must be nondecreasing")
+            raise ValueError("descent plan t_s must be nondecreasing")
 
     @property
     def start_s_m(self) -> float:
@@ -90,10 +90,10 @@ class LongitudinalPlanProfile:
     def duration_s(self) -> float:
         return float(self.plan.t_s[-1])
 
-    def sample(self, s_m: float) -> LongitudinalPlanSample:
+    def sample(self, s_m: float) -> CoupledDescentPlanSample:
         s_val = float(np.clip(s_m, float(self.plan.s_m[0]), float(self.plan.s_m[-1])))
         time_from_threshold_s = float(np.interp(s_val, self.plan.s_m, self.plan.t_s))
-        return LongitudinalPlanSample(
+        return CoupledDescentPlanSample(
             s_m=s_val,
             h_m=float(np.interp(s_val, self.plan.s_m, self.plan.h_m)),
             v_tas_mps=float(np.interp(s_val, self.plan.s_m, self.plan.v_tas_mps)),
@@ -108,7 +108,7 @@ class LongitudinalPlanProfile:
 @dataclass(frozen=True)
 class SimulationRequest:
     cfg: AircraftConfig
-    plan: LongitudinalPlanResult
+    plan: CoupledDescentPlanResult
     reference_path: ReferencePath
     weather: WeatherProvider = field(default_factory=ConstantWeather)
     guidance: LateralGuidanceConfig = field(default_factory=LateralGuidanceConfig)
@@ -209,7 +209,7 @@ def _cas_from_tas(
     return float(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(delta_isa_K)))
 
 
-def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile) -> State:
+def _initial_state(request: SimulationRequest, profile: CoupledDescentPlanProfile) -> State:
     if request.initial_state is None:
         sample = profile.sample(profile.start_s_m)
         if all(hasattr(profile.plan, field_name) for field_name in ("east_m", "north_m", "psi_rad", "phi_rad")):
@@ -245,7 +245,7 @@ def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile)
 
 
 def simulate_plan(request: SimulationRequest) -> SimulationResult:
-    """Replay a longitudinal plan through the lateral simulation model.
+    """Replay a descent plan through the lateral simulation model.
 
     The coupled planner is authoritative over the optimized node profile. This
     replay helper advances a time-stepped lateral model while resampling
@@ -253,7 +253,7 @@ def simulate_plan(request: SimulationRequest) -> SimulationResult:
     along-track position.
     """
 
-    profile = LongitudinalPlanProfile(request.plan)
+    profile = CoupledDescentPlanProfile(request.plan)
     state = _initial_state(request, profile)
     max_time_s = max(float(request.dt_s), profile.duration_s * float(request.max_time_factor))
 
@@ -413,10 +413,14 @@ def simulate_plan(request: SimulationRequest) -> SimulationResult:
 
 
 __all__ = [
-    "LongitudinalPlanProfile",
-    "LongitudinalPlanSample",
+    "CoupledDescentPlanProfile",
+    "CoupledDescentPlanSample",
     "SimulationRequest",
     "SimulationResult",
     "State",
     "simulate_plan",
 ]
+
+
+LongitudinalPlanSample = CoupledDescentPlanSample
+LongitudinalPlanProfile = CoupledDescentPlanProfile

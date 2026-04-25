@@ -11,15 +11,15 @@ from .config import (
 )
 from .lateral_dynamics import LateralGuidanceConfig
 from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
-from .longitudinal_planner import (
+from .coupled_descent_planner import (
     LateralBoundary,
-    LongitudinalPlanRequest,
-    LongitudinalPlanResult,
-    LongitudinalSolveProfile,
+    CoupledDescentPlanRequest,
+    CoupledDescentPlanResult,
+    CoupledDescentSolveProfile,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
-    plan_longitudinal_descent,
+    plan_coupled_descent,
 )
 from .longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
 from .openap_adapter import (
@@ -41,14 +41,21 @@ from .simap_plot import (
     plot_thrust_response,
 )
 from .simulator import (
-    LongitudinalPlanProfile,
-    LongitudinalPlanSample,
+    CoupledDescentPlanProfile,
+    CoupledDescentPlanSample,
     SimulationRequest,
     SimulationResult,
     State,
     simulate_plan,
 )
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
+
+LongitudinalPlanRequest = CoupledDescentPlanRequest
+LongitudinalPlanResult = CoupledDescentPlanResult
+LongitudinalSolveProfile = CoupledDescentSolveProfile
+LongitudinalPlanProfile = CoupledDescentPlanProfile
+LongitudinalPlanSample = CoupledDescentPlanSample
+plan_longitudinal_descent = plan_coupled_descent
 
 __all__ = [
     "AircraftConfig",
@@ -57,9 +64,9 @@ __all__ = [
     "EffectivePolarBackend",
     "LateralGuidanceConfig",
     "LateralBoundary",
-    "LongitudinalPlanRequest",
-    "LongitudinalPlanResult",
-    "LongitudinalSolveProfile",
+    "CoupledDescentPlanRequest",
+    "CoupledDescentPlanResult",
+    "CoupledDescentSolveProfile",
     "ModeConfig",
     "ModeName",
     "OpenAPAircraftData",
@@ -74,8 +81,8 @@ __all__ = [
     "ThresholdBoundary",
     "UpstreamBoundary",
     "WeatherProvider",
-    "LongitudinalPlanProfile",
-    "LongitudinalPlanSample",
+    "CoupledDescentPlanProfile",
+    "CoupledDescentPlanSample",
     "alongtrack_wind_mps",
     "bank_limit_rad",
     "build_default_aircraft_config",
@@ -84,7 +91,7 @@ __all__ = [
     "extract_aircraft_data",
     "load_openap",
     "mode_for_s",
-    "plan_longitudinal_descent",
+    "plan_coupled_descent",
     "planned_cas_bounds_mps",
     "plot_altitude_response",
     "plot_cas_response",

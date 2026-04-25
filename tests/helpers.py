@@ -12,8 +12,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 from simap.backends import EffectivePolarBackend
 from simap.config import AircraftConfig
 from simap.calibration import build_default_aircraft_config, suggest_approach_mass_kg
-from simap.longitudinal_planner import (
-    LongitudinalPlanRequest,
+from simap.coupled_descent_planner import (
+    CoupledDescentPlanRequest,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
@@ -35,7 +35,7 @@ class A320Fixture(TypedDict):
     threshold: ThresholdBoundary
     upstream: UpstreamBoundary
     constraint_envelope: ConstraintEnvelope
-    planner_request: LongitudinalPlanRequest
+    planner_request: CoupledDescentPlanRequest
 
 
 @lru_cache(maxsize=1)
@@ -93,7 +93,7 @@ def a320_fixture() -> A320Fixture:
             y=np.asarray([-np.deg2rad(2.0), np.deg2rad(0.5)], dtype=float),
         ),
     )
-    request = LongitudinalPlanRequest(
+    request = CoupledDescentPlanRequest(
         cfg=cfg,
         perf=perf,
         threshold=threshold,

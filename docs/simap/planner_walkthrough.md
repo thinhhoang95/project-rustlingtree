@@ -15,10 +15,10 @@ The main flow is:
 1. Build `AircraftConfig`, `PerformanceBackend`, `WeatherProvider`, and
    `ReferencePath`.
 2. Build the longitudinal `ConstraintEnvelope`.
-3. Build `LongitudinalPlanRequest`, including the reference path and optional
+3. Build `CoupledDescentPlanRequest`, including the reference path and optional
    lateral boundary conditions.
-4. Call `plan_longitudinal_descent()`.
-5. Inspect `LongitudinalPlanResult`, which now contains altitude, speed,
+4. Call `plan_coupled_descent()`.
+5. Inspect `CoupledDescentPlanResult`, which now contains altitude, speed,
    thrust, cross-track, heading, bank, ground speed, and map position.
 6. Optionally call `simulate_plan()` as a validation replay.
 
@@ -184,7 +184,7 @@ longer `TOD`, different timing, or slack.
 Set:
 
 ```python
-LongitudinalPlanRequest(
+CoupledDescentPlanRequest(
     ...,
     upstream_lateral=LateralBoundary(cross_track_m=150.0),
 )
@@ -205,8 +205,8 @@ That behavior is now planned before replay, not discovered afterward by
 
 Start with:
 
-1. `LongitudinalPlanRequest` and `LongitudinalPlanResult` in
-   `src/simap/longitudinal_planner.py`
+1. `CoupledDescentPlanRequest` and `CoupledDescentPlanResult` in
+   `src/simap/coupled_descent_planner.py`
 2. `_TrajectoryEvaluation.state_derivatives`
 3. `_equality_constraints`
 4. `_inequality_constraints`

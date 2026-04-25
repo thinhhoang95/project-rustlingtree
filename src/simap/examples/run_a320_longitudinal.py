@@ -14,7 +14,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 from simap import (
     ConstraintEnvelope,
     EffectivePolarBackend,
-    LongitudinalPlanRequest,
+    CoupledDescentPlanRequest,
     OptimizerConfig,
     ReferencePath,
     ScalarProfile,
@@ -24,7 +24,7 @@ from simap import (
     build_speed_schedule_from_wrap,
     extract_aircraft_data,
     load_openap,
-    plan_longitudinal_descent,
+    plan_coupled_descent,
     plot_constraint_envelope,
     plot_longitudinal_plan,
     suggest_approach_mass_kg,
@@ -89,7 +89,7 @@ def main() -> None:
             y=np.asarray([-np.deg2rad(2.0), np.deg2rad(0.5)], dtype=float),
         ),
     )
-    request = LongitudinalPlanRequest(
+    request = CoupledDescentPlanRequest(
         cfg=cfg,
         perf=perf,
         threshold=threshold,
@@ -101,7 +101,7 @@ def main() -> None:
 
     plot_constraint_envelope(envelope)
 
-    plan = plan_longitudinal_descent(request)
+    plan = plan_coupled_descent(request)
     plot_longitudinal_plan(plan, envelope=envelope)
     print(plan.to_pandas().head())
     print(plan.to_pandas().tail())
