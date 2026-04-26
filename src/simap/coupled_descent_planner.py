@@ -1075,8 +1075,7 @@ def _inequality_constraints(
 ) -> np.ndarray:
     evaluation = evaluation_cache.evaluate(z)
     slack_altitude = evaluation.constraint_slack * scale.altitude_m
-    speed_tolerance_mps = max(0.05, request.optimizer.constraint_tolerance * scale.speed_mps)
-    slack_alongtrack = evaluation.constraint_slack * scale.speed_mps
+    slack_speed = evaluation.constraint_slack * scale.speed_mps
     slack_gamma = evaluation.constraint_slack * scale.gamma_rad
     slack_thrust = evaluation.constraint_slack * scale.thrust_n
     slack_bank = evaluation.constraint_slack * np.deg2rad(10.0)
@@ -1096,15 +1095,15 @@ def _inequality_constraints(
     residual_parts = [
         evaluation.h_m - h_lower + slack_altitude,
         h_upper - evaluation.h_m + slack_altitude,
-        evaluation.v_cas_mps - cas_lower_eff + speed_tolerance_mps,
-        cas_upper_eff - evaluation.v_cas_mps + speed_tolerance_mps,
+        evaluation.v_cas_mps - cas_lower_eff + slack_speed,
+        cas_upper_eff - evaluation.v_cas_mps + slack_speed,
         evaluation.thrust_n - thrust_lower + slack_thrust,
         thrust_upper - evaluation.thrust_n + slack_thrust,
         evaluation.phi_rad + evaluation.phi_max_rad + slack_bank,
         evaluation.phi_max_rad - evaluation.phi_rad + slack_bank,
         evaluation.roll_rate_rps + np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) + slack_roll,
         np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) - evaluation.roll_rate_rps + slack_roll,
-        evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_alongtrack,
+        evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_speed,
     ]
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(evaluation.s_m)
@@ -1142,8 +1141,8 @@ def _inequality_constraints(
     residual_parts.append(
         np.asarray(
             [
-                float(evaluation.v_cas_mps[-1] - request.upstream.cas_lower_mps + speed_tolerance_mps),
-                float(request.upstream.cas_upper_mps - evaluation.v_cas_mps[-1] + speed_tolerance_mps),
+                float(evaluation.v_cas_mps[-1] - request.upstream.cas_lower_mps + slack_speed),
+                float(request.upstream.cas_upper_mps - evaluation.v_cas_mps[-1] + slack_speed),
             ],
             dtype=float,
         )

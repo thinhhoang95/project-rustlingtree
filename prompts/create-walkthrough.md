@@ -4,3 +4,5 @@ Based on the referenced script {{REFERENCE}} could you help me write a walkthrou
 3. Give examples to illustrate the difficult to grasp concepts.
 
 Write the docs in {{DOCS_DIR}}
+
+Please give me the full context so that I could understand the response is self-encapsulated, easy to understand, and follow. Please don't guess the answers. 

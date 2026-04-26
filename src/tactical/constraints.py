@@ -64,7 +64,6 @@ def build_tactical_constraint_envelope(
     constraint_s_m: dict[str, float] | None = None,
 ) -> ConstraintEnvelope:
     max_s_m = float(max(total_path_length_m, 60_000.0))
-    cas_margin_kts = 5.0
     altitude_capture_s_m = min(5_000.0, max_s_m)
     s_alt = [0.0, altitude_capture_s_m, max_s_m]
     altitude_lower = [threshold_altitude_m, threshold_altitude_m, threshold_altitude_m]
@@ -90,7 +89,7 @@ def build_tactical_constraint_envelope(
     upstream_cas_mps = kts_to_mps(upstream_cas_kts)
     cas_s = np.unique(np.concatenate([speed_schedule.s_m, np.asarray([max_s_m], dtype=float)]))
     scheduled_cas = speed_schedule.values(cas_s)
-    cas_lower = np.maximum(scheduled_cas - kts_to_mps(cas_margin_kts), threshold_cas_mps)
+    cas_lower = np.maximum(scheduled_cas - kts_to_mps(12.0), threshold_cas_mps)
     cas_upper = np.maximum(scheduled_cas, upstream_cas_mps)
 
     return ConstraintEnvelope.from_profiles(
