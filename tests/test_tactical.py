@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from simap.units import ft_to_m
+from simap.units import kts_to_mps
+
 from tactical import (
     AltitudeConstraint,
     TacticalCommand,
@@ -59,6 +62,9 @@ class TacticalBuilderTests(unittest.TestCase):
         self.assertEqual(bundle.path.identifiers, ("JUSST", "SWTCH", "THEMM", "RW17C"))
         self.assertGreater(bundle.request.reference_path.total_length_m, 0.0)
         self.assertGreaterEqual(bundle.request.constraints.s_m[-1], bundle.request.reference_path.total_length_m)
+        _, alt_upper_m = bundle.request.constraints.h_bounds(0.75 * bundle.request.reference_path.total_length_m)
+        self.assertGreaterEqual(alt_upper_m, ft_to_m(26_000.0))
+        self.assertEqual(bundle.request.upstream.cas_window_mps, (kts_to_mps(290.0), kts_to_mps(290.0)))
 
 
 if __name__ == "__main__":

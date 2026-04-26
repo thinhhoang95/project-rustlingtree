@@ -7,7 +7,7 @@ from openap import aero
 
 from simap import CoupledDescentPlanResult, CoupledDescentPlanRequest, mode_for_s
 from simap.openap_adapter import openap_dT
-from simap.units import kts_to_mps
+from simap.units import kts_to_mps, mps_to_kts
 
 from .models import TacticalCondition
 
@@ -19,18 +19,24 @@ def extend_plan_to_tactical_start(
     start_condition: TacticalCondition,
     start_s_m: float,
     num_extension_nodes: int = 12,
+    max_cas_jump_kts: float = 5.0,
 ) -> CoupledDescentPlanResult:
     if start_s_m <= float(plan.s_m[-1]) + 1e-6:
         return plan
 
+    start_cas_mps = kts_to_mps(start_condition.cas_kts)
+    cas_jump_kts = abs(mps_to_kts(float(plan.v_cas_mps[-1]) - start_cas_mps))
+    if cas_jump_kts > max_cas_jump_kts:
+        raise ValueError(
+            "cannot extend tactical plan with a discontinuous CAS splice: "
+            f"raw TOD CAS is {mps_to_kts(float(plan.v_cas_mps[-1])):.1f} kt, "
+            f"tactical start CAS is {start_condition.cas_kts:.1f} kt "
+            f"(jump {cas_jump_kts:.1f} kt > {max_cas_jump_kts:.1f} kt)"
+        )
+
     extension_s = np.linspace(float(plan.s_m[-1]), float(start_s_m), num_extension_nodes + 1, dtype=float)[1:]
-    h_extension = np.full_like(extension_s, float(plan.h_m[-1]))
-    cas_extension = np.linspace(
-        float(plan.v_cas_mps[-1]),
-        kts_to_mps(start_condition.cas_kts),
-        len(extension_s),
-        dtype=float,
-    )
+    h_extension = np.full_like(extension_s, float(request.upstream.h_m))
+    cas_extension = np.full_like(extension_s, start_cas_mps)
     v_tas_extension = np.asarray(
         [
             aero.cas2tas(
@@ -76,5 +82,4 @@ def extend_plan_to_tactical_start(
         gamma_rad=np.concatenate([plan.gamma_rad, zeros]),
         thrust_n=np.concatenate([plan.thrust_n, np.full_like(extension_s, float(plan.thrust_n[-1]))]),
         mode=tuple(plan.mode) + mode,
-        tod_m=float(start_s_m),
     )

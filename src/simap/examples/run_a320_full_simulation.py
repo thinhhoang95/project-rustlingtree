@@ -145,6 +145,7 @@ def main() -> None:
     simulation = simulate_plan(
         SimulationRequest(
             cfg=request.cfg,
+            perf=request.perf,
             plan=plan,
             reference_path=reference_path,
             weather=request.weather,

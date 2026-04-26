@@ -47,6 +47,13 @@ class UpstreamBoundary:
     def cas_upper_mps(self) -> float:
         return float(self.cas_window_mps[1])
 
+    @property
+    def cas_target_mps(self) -> float | None:
+        lower, upper = self.cas_window_mps
+        if np.isclose(lower, upper, rtol=0.0, atol=1e-9):
+            return float(0.5 * (lower + upper))
+        return None
+
 
 @dataclass(frozen=True)
 class LateralBoundary:
@@ -642,6 +649,12 @@ def plan_coupled_descent(request: CoupledDescentPlanRequest) -> CoupledDescentPl
     heading_error_rad[-1] = request.upstream_lateral.heading_error_rad
     phi_rad[-1] = request.upstream_lateral.bank_rad
     gamma_rad[-1] = request.upstream.gamma_rad
+    upstream_cas_target_mps = request.upstream.cas_target_mps
+    if upstream_cas_target_mps is not None:
+        upstream_delta_isa_K = request.weather.delta_isa_K(float(tod_m), request.upstream.h_m, float(t_s[-1]))
+        v_tas_mps[-1] = float(
+            aero.cas2tas(upstream_cas_target_mps, request.upstream.h_m, dT=openap_dT(upstream_delta_isa_K))
+        )
     final_evaluation = _TrajectoryEvaluation(
         request=request,
         h_m=h_m,
@@ -1029,25 +1042,27 @@ def _equality_constraints(
         ]
     )
     dynamic_rows = 6 * (request.optimizer.num_nodes - 1)
-    defects = np.empty(dynamic_rows + 12, dtype=float)
+    endpoint_defects = [
+        float(evaluation.h_m[0] - request.threshold.h_m),
+        float(evaluation.v_tas_mps[0] - threshold_v_tas),
+        float(evaluation.t_s[0]),
+        float(evaluation.cross_track_m[0] - request.threshold_lateral.cross_track_m),
+        float(evaluation.heading_error_rad[0] - request.threshold_lateral.heading_error_rad),
+        float(evaluation.phi_rad[0] - request.threshold_lateral.bank_rad),
+        float(evaluation.gamma_rad[0] - request.threshold.gamma_rad),
+        float(evaluation.h_m[-1] - request.upstream.h_m),
+        float(evaluation.gamma_rad[-1] - request.upstream.gamma_rad),
+        float(evaluation.cross_track_m[-1] - request.upstream_lateral.cross_track_m),
+        float(evaluation.heading_error_rad[-1] - request.upstream_lateral.heading_error_rad),
+        float(evaluation.phi_rad[-1] - request.upstream_lateral.bank_rad),
+    ]
+    upstream_cas_target_mps = request.upstream.cas_target_mps
+    if upstream_cas_target_mps is not None:
+        endpoint_defects.append(float(evaluation.v_cas_mps[-1] - upstream_cas_target_mps))
+
+    defects = np.empty(dynamic_rows + len(endpoint_defects), dtype=float)
     defects[:dynamic_rows] = (state_delta - trapezoid).reshape(-1)
-    defects[-12:] = np.asarray(
-        [
-            float(evaluation.h_m[0] - request.threshold.h_m),
-            float(evaluation.v_tas_mps[0] - threshold_v_tas),
-            float(evaluation.t_s[0]),
-            float(evaluation.cross_track_m[0] - request.threshold_lateral.cross_track_m),
-            float(evaluation.heading_error_rad[0] - request.threshold_lateral.heading_error_rad),
-            float(evaluation.phi_rad[0] - request.threshold_lateral.bank_rad),
-            float(evaluation.gamma_rad[0] - request.threshold.gamma_rad),
-            float(evaluation.h_m[-1] - request.upstream.h_m),
-            float(evaluation.gamma_rad[-1] - request.upstream.gamma_rad),
-            float(evaluation.cross_track_m[-1] - request.upstream_lateral.cross_track_m),
-            float(evaluation.heading_error_rad[-1] - request.upstream_lateral.heading_error_rad),
-            float(evaluation.phi_rad[-1] - request.upstream_lateral.bank_rad),
-        ],
-        dtype=float,
-    )
+    defects[dynamic_rows:] = np.asarray(endpoint_defects, dtype=float)
     return defects
 
 
@@ -1060,7 +1075,8 @@ def _inequality_constraints(
 ) -> np.ndarray:
     evaluation = evaluation_cache.evaluate(z)
     slack_altitude = evaluation.constraint_slack * scale.altitude_m
-    slack_speed = evaluation.constraint_slack * scale.speed_mps
+    speed_tolerance_mps = max(0.05, request.optimizer.constraint_tolerance * scale.speed_mps)
+    slack_alongtrack = evaluation.constraint_slack * scale.speed_mps
     slack_gamma = evaluation.constraint_slack * scale.gamma_rad
     slack_thrust = evaluation.constraint_slack * scale.thrust_n
     slack_bank = evaluation.constraint_slack * np.deg2rad(10.0)
@@ -1080,15 +1096,15 @@ def _inequality_constraints(
     residual_parts = [
         evaluation.h_m - h_lower + slack_altitude,
         h_upper - evaluation.h_m + slack_altitude,
-        evaluation.v_cas_mps - cas_lower_eff + slack_speed,
-        cas_upper_eff - evaluation.v_cas_mps + slack_speed,
+        evaluation.v_cas_mps - cas_lower_eff + speed_tolerance_mps,
+        cas_upper_eff - evaluation.v_cas_mps + speed_tolerance_mps,
         evaluation.thrust_n - thrust_lower + slack_thrust,
         thrust_upper - evaluation.thrust_n + slack_thrust,
         evaluation.phi_rad + evaluation.phi_max_rad + slack_bank,
         evaluation.phi_max_rad - evaluation.phi_rad + slack_bank,
         evaluation.roll_rate_rps + np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) + slack_roll,
         np.asarray([mode.p_max_rps for mode in evaluation.mode_by_node], dtype=float) - evaluation.roll_rate_rps + slack_roll,
-        evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_speed,
+        evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_alongtrack,
     ]
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(evaluation.s_m)
@@ -1126,8 +1142,8 @@ def _inequality_constraints(
     residual_parts.append(
         np.asarray(
             [
-                float(evaluation.v_cas_mps[-1] - request.upstream.cas_lower_mps + slack_speed),
-                float(request.upstream.cas_upper_mps - evaluation.v_cas_mps[-1] + slack_speed),
+                float(evaluation.v_cas_mps[-1] - request.upstream.cas_lower_mps + speed_tolerance_mps),
+                float(request.upstream.cas_upper_mps - evaluation.v_cas_mps[-1] + speed_tolerance_mps),
             ],
             dtype=float,
         )
@@ -1435,10 +1451,23 @@ def _constraint_jacobian_sparsity(
     ]
     for offset, col in enumerate(endpoint_cols):
         add_eq(row + offset, [col])
+    row += len(endpoint_cols)
+
+    if request.upstream.cas_target_mps is not None:
+        add_eq(
+            row,
+            [
+                h_start + num_nodes - 1,
+                v_start + num_nodes - 1,
+                t_start + num_nodes - 1,
+                tod_col,
+            ],
+        )
+        row += 1
 
     equality = coo_matrix(
         (np.ones(len(equality_rows), dtype=bool), (equality_rows, equality_cols)),
-        shape=(6 * (num_nodes - 1) + 12, num_vars),
+        shape=(row, num_vars),
         dtype=bool,
     ).tocsr()
 

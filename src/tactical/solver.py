@@ -40,6 +40,7 @@ def solve_tactical_command(
         simulation = simulate_plan(
             SimulationRequest(
                 cfg=request.cfg,
+                perf=request.perf,
                 plan=plan,
                 reference_path=request.reference_path,
                 weather=request.weather,
@@ -52,6 +53,7 @@ def solve_tactical_command(
         command=bundle.command,
         path=bundle.path,
         request=request,
+        raw_plan=raw_plan,
         plan=plan,
         simulation=simulation,
     )

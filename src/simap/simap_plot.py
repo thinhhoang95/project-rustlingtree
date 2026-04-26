@@ -69,7 +69,7 @@ def plot_altitude_response(
         axis,
         s_m,
         h_m,
-        title="Altitude",
+        title="Planned Altitude",
         xlabel="Distance From Threshold [m]",
         ylabel="h [m]",
         color="#2ca02c",
@@ -86,7 +86,7 @@ def plot_tas_response(plan: Any, *, ax: Axes | None = None) -> Axes:
         axis,
         s_m,
         v_tas_mps,
-        title="TAS",
+        title="Planned TAS",
         xlabel="Distance From Threshold [m]",
         ylabel="v_tas [m/s]",
         color="#1f77b4",
@@ -107,7 +107,7 @@ def plot_cas_response(
         axis,
         s_m,
         v_cas_mps,
-        title="CAS",
+        title="Planned CAS",
         xlabel="Distance From Threshold [m]",
         ylabel="v_cas [m/s]",
         color="#ff7f0e",
@@ -138,7 +138,7 @@ def plot_gamma_response(
         axis,
         s_m,
         values,
-        title="Flight-Path Angle",
+        title="Planned Flight-Path Angle",
         xlabel="Distance From Threshold [m]",
         ylabel="gamma [deg]" if in_degrees else "gamma [rad]",
         color="#9467bd",
@@ -164,7 +164,7 @@ def plot_thrust_response(
         axis,
         s_m,
         thrust_n,
-        title="Thrust",
+        title="Planned Thrust",
         xlabel="Distance From Threshold [m]",
         ylabel="T [N]",
         color="#8c564b",
@@ -221,7 +221,7 @@ def plot_longitudinal_plan(
     plot_cas_response(plan, envelope=envelope, ax=axes[0, 1])
     plot_gamma_response(plan, envelope=envelope, ax=axes[1, 0])
     plot_thrust_response(plan, envelope=envelope, ax=axes[1, 1])
-    fig.suptitle("Authoritative RNAV Longitudinal Plan")
+    fig.suptitle("Authoritative RNAV Longitudinal Profile")
     fig.tight_layout()
     if show:
         plt.show()

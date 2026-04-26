@@ -60,10 +60,7 @@ def build_tactical_plan_request(
     )
     upstream = UpstreamBoundary(
         h_m=ft_to_m(command.upstream.altitude_ft),
-        cas_window_mps=(
-            float(openap.wrap.finalapp_vcas()["default"]),
-            kts_to_mps(command.upstream.cas_kts),
-        ),
+        cas_window_mps=(kts_to_mps(command.upstream.cas_kts), kts_to_mps(command.upstream.cas_kts)),
         gamma_rad=np.deg2rad(command.upstream.gamma_deg),
     )
     envelope = build_tactical_constraint_envelope(

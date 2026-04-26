@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 
 import numpy as np
+from openap import aero
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
@@ -32,6 +33,7 @@ class CoupledSimulatorTests(unittest.TestCase):
         result = simulate_plan(
             SimulationRequest(
                 cfg=self.plan_request.cfg,
+                perf=self.plan_request.perf,
                 plan=self.plan,
                 reference_path=self.reference_path,
                 weather=self.plan_request.weather,
@@ -50,6 +52,42 @@ class CoupledSimulatorTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(result.v_tas_mps)))
         self.assertTrue(np.all(np.isfinite(result.cross_track_m)))
         self.assertGreater(result.min_alongtrack_speed_mps, 0.0)
+        self.assertTrue(result.longitudinal_response_integrated)
+        self.assertEqual(result.longitudinal_state_source, "time_integrated")
+
+    def test_simulator_does_not_impose_discontinuous_planned_speed(self) -> None:
+        v_tas_mps = np.array(self.plan.v_tas_mps, dtype=float, copy=True)
+        v_tas_mps[:-1] = 50.0
+        v_tas_mps[-1] = 200.0
+        h_m = np.array(self.plan.h_m, dtype=float, copy=True)
+        h_m[:] = h_m[-1]
+        gamma_rad = np.zeros_like(self.plan.gamma_rad)
+        thrust_n = np.zeros_like(self.plan.thrust_n)
+        discontinuous_plan = replace(
+            self.plan,
+            h_m=h_m,
+            v_tas_mps=v_tas_mps,
+            v_cas_mps=np.asarray([aero.tas2cas(float(v_tas), float(h)) for v_tas, h in zip(v_tas_mps, h_m, strict=True)]),
+            gamma_rad=gamma_rad,
+            thrust_n=thrust_n,
+        )
+        result = simulate_plan(
+            SimulationRequest(
+                cfg=self.plan_request.cfg,
+                perf=self.plan_request.perf,
+                plan=discontinuous_plan,
+                reference_path=self.reference_path,
+                weather=self.plan_request.weather,
+                dt_s=10.0,
+                threshold_tolerance_m=0.0,
+            )
+        )
+
+        sampled_profile_speed_after_first_step = float(
+            np.interp(result.s_m[1], discontinuous_plan.s_m, discontinuous_plan.v_tas_mps)
+        )
+        self.assertGreater(result.v_tas_mps[1], 190.0)
+        self.assertLess(sampled_profile_speed_after_first_step, result.v_tas_mps[1] - 10.0)
 
     def test_simulator_recovers_from_cross_track_offset(self) -> None:
         start_sample = self.plan.s_m[-1]
@@ -64,6 +102,7 @@ class CoupledSimulatorTests(unittest.TestCase):
         result = simulate_plan(
             SimulationRequest(
                 cfg=self.plan_request.cfg,
+                perf=self.plan_request.perf,
                 plan=self.plan,
                 reference_path=self.reference_path,
                 weather=self.plan_request.weather,
@@ -101,6 +140,7 @@ class CoupledSimulatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "top of descent"):
             SimulationRequest(
                 cfg=self.plan_request.cfg,
+                perf=self.plan_request.perf,
                 plan=self.plan,
                 reference_path=short_path,
             )

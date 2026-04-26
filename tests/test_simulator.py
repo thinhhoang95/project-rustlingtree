@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -176,6 +177,16 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertTrue(np.all(plan.v_cas_mps > 0.0))
         self.assertGreater(np.min(plan.alongtrack_speed_mps), 0.0)
         self.assertLess(plan.constraint_slack, 5.0)
+
+    def test_exact_upstream_cas_boundary_is_enforced(self) -> None:
+        request = replace(
+            self.request,
+            upstream=replace(self.request.upstream, cas_window_mps=(95.0, 95.0)),
+            optimizer=replace(self.request.optimizer, maxiter=100),
+        )
+        plan = plan_coupled_descent(request)
+
+        self.assertAlmostEqual(plan.v_cas_mps[-1], 95.0, delta=1e-4)
 
     def test_solver_is_deterministic_for_fixed_boundaries(self) -> None:
         plan_a = self.plan

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from openap import aero
 
+from .backends import PerformanceBackend
 from .config import AircraftConfig, mode_for_s
 from .lateral_dynamics import (
     LateralGuidanceConfig,
@@ -108,6 +109,7 @@ class CoupledDescentPlanProfile:
 @dataclass(frozen=True)
 class SimulationRequest:
     cfg: AircraftConfig
+    perf: PerformanceBackend
     plan: CoupledDescentPlanResult
     reference_path: ReferencePath
     weather: WeatherProvider = field(default_factory=ConstantWeather)
@@ -164,6 +166,8 @@ class SimulationResult:
     min_alongtrack_speed_mps: float
     max_bank_command_ratio: float
     final_threshold_error_m: float
+    longitudinal_state_source: str = "time_integrated"
+    longitudinal_response_integrated: bool = True
 
     def __len__(self) -> int:
         return int(len(self.t_s))
@@ -231,12 +235,11 @@ def _initial_state(request: SimulationRequest, profile: CoupledDescentPlanProfil
             reference_path=request.reference_path,
         )
 
-    sample = profile.sample(request.initial_state.s_m)
     return State(
         t_s=float(request.initial_state.t_s),
         s_m=float(request.initial_state.s_m),
-        h_m=sample.h_m,
-        v_tas_mps=sample.v_tas_mps,
+        h_m=float(request.initial_state.h_m),
+        v_tas_mps=float(request.initial_state.v_tas_mps),
         east_m=float(request.initial_state.east_m),
         north_m=float(request.initial_state.north_m),
         psi_rad=float(request.initial_state.psi_rad),
@@ -244,13 +247,37 @@ def _initial_state(request: SimulationRequest, profile: CoupledDescentPlanProfil
     )
 
 
-def simulate_plan(request: SimulationRequest) -> SimulationResult:
-    """Replay a descent plan through the lateral simulation model.
+def _longitudinal_rates(
+    *,
+    request: SimulationRequest,
+    state: State,
+    mode,
+    gamma_rad: float,
+    thrust_n: float,
+) -> tuple[float, float]:
+    delta_isa_K = float(request.weather.delta_isa_K(state.s_m, state.h_m, state.t_s))
+    drag_n = request.perf.drag_newtons(
+        mode=mode,
+        mass_kg=request.cfg.mass_kg,
+        wing_area_m2=request.cfg.wing_area_m2,
+        v_tas_mps=state.v_tas_mps,
+        h_m=state.h_m,
+        gamma_rad=gamma_rad,
+        bank_rad=state.phi_rad,
+        delta_isa_K=delta_isa_K,
+    )
+    h_dot_mps = float(max(1.0, state.v_tas_mps) * np.sin(gamma_rad))
+    v_dot_mps2 = float((thrust_n - drag_n) / request.cfg.mass_kg - aero.g0 * np.sin(gamma_rad))
+    return h_dot_mps, v_dot_mps2
 
-    The coupled planner is authoritative over the optimized node profile. This
-    replay helper advances a time-stepped lateral model while resampling
-    altitude, speed, gamma, and thrust from the planned profile at the current
-    along-track position.
+
+def simulate_plan(request: SimulationRequest) -> SimulationResult:
+    """Simulate aircraft response to a descent plan.
+
+    The coupled planner supplies command profiles for flight-path angle and
+    thrust. This replay advances lateral position, bank, altitude, and TAS in
+    time, so infeasible planned speed/altitude changes appear as tracking
+    deviations instead of being imposed directly on the state.
     """
 
     profile = CoupledDescentPlanProfile(request.plan)
@@ -351,13 +378,20 @@ def simulate_plan(request: SimulationRequest) -> SimulationResult:
         next_phi_rad = float(state.phi_rad + phi_dot_rps * step_dt_s)
         if (command.phi_req_rad - state.phi_rad) * (command.phi_req_rad - next_phi_rad) < 0.0:
             next_phi_rad = float(command.phi_req_rad)
+
+        h_dot_mps, v_dot_mps2 = _longitudinal_rates(
+            request=request,
+            state=state,
+            mode=mode,
+            gamma_rad=float(sample.gamma_rad),
+            thrust_n=float(sample.thrust_n),
+        )
         next_state_s_m = float(max(0.0, state.s_m - command.alongtrack_speed_mps * step_dt_s))
-        next_sample = profile.sample(next_state_s_m)
         state = State(
             t_s=float(state.t_s + step_dt_s),
             s_m=next_state_s_m,
-            h_m=float(next_sample.h_m),
-            v_tas_mps=float(next_sample.v_tas_mps),
+            h_m=float(state.h_m + h_dot_mps * step_dt_s),
+            v_tas_mps=float(max(1.0, state.v_tas_mps + v_dot_mps2 * step_dt_s)),
             east_m=float(state.east_m + command.east_dot_mps * step_dt_s),
             north_m=float(state.north_m + command.north_dot_mps * step_dt_s),
             psi_rad=wrap_angle_rad(state.psi_rad + psi_dot_rps * step_dt_s),

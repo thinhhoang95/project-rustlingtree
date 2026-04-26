@@ -64,5 +64,6 @@ class TacticalPlanBundle:
     command: TacticalCommand
     path: ResolvedTacticalPath
     request: object
+    raw_plan: object | None = None
     plan: object | None = None
     simulation: object | None = None
