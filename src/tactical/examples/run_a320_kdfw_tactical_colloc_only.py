@@ -240,7 +240,13 @@ def main() -> None:
     bundle = solve_tactical_command(
         command,
         fixes_csv=repo_root / "data/kdfw_procs/airport_related_fixes.csv",
-        optimizer=OptimizerConfig(num_nodes=21, maxiter=220, gamma_smoothness_weight=5.0, verbose=1),
+        optimizer=OptimizerConfig(
+            num_nodes=21,
+            maxiter=300,
+            idle_thrust_margin_fraction=0.03,
+            gamma_smoothness_weight=5.0,
+            verbose=1,
+        ),
         guidance=LateralGuidanceConfig(
             lookahead_m=2_500.0,
             cross_track_gain=1.0,

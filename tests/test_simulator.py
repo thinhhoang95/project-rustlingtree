@@ -14,6 +14,13 @@ from simap.coupled_descent_planner import (
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
+    _PlannerScale,
+    _TrajectoryEvaluationCache,
+    _SolverProfilingState,
+    _inequality_constraints,
+    _initial_guess,
+    _initial_tod_guess,
+    _unpack,
     plan_coupled_descent,
 )
 from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile
@@ -220,6 +227,79 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertGreater(profile.equality_time_s, 0.0)
         self.assertGreater(profile.inequality_time_s, 0.0)
         self.assertGreater(profile.trajectory_evaluations, 0)
+
+    def test_idle_thrust_margin_initial_guess_starts_inside_band(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(self.request.optimizer, idle_thrust_margin_fraction=0.03),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        _, _, _, _, _, _, _, thrust_n, _, tod_m, _ = _unpack(z0, request.optimizer.num_nodes)
+        evaluation = _TrajectoryEvaluationCache(
+            request=request,
+            profiling=_SolverProfilingState(),
+        ).evaluate(z0)
+
+        thrust_lower, thrust_upper = evaluation.thrust_bounds_backend
+        idle_upper = evaluation.idle_thrust_n + 0.03 * np.maximum(thrust_upper - evaluation.idle_thrust_n, 0.0)
+        self.assertAlmostEqual(tod_m, evaluation.tod_m)
+        self.assertTrue(np.all(thrust_n >= evaluation.idle_thrust_n - 1e-9))
+        self.assertTrue(np.all(thrust_n <= idle_upper + 1e-9))
+        self.assertTrue(np.all(thrust_n >= thrust_lower - 1e-9))
+
+    def test_idle_thrust_margin_is_not_relaxed_by_generic_slack(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(self.request.optimizer, idle_thrust_margin_fraction=0.03),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        z_bad = np.array(z0, dtype=float, copy=True)
+        num_nodes = request.optimizer.num_nodes
+        thrust_start = 7 * num_nodes
+        slack_col = 9 * num_nodes + 1
+        cache = _TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState())
+        evaluation = cache.evaluate(z0)
+        z_bad[thrust_start] = evaluation.idle_thrust_n[0] - 10.0
+        z_bad[thrust_start + 1] = evaluation.idle_thrust_n[1] + 0.03 * (
+            evaluation.thrust_bounds_backend[1][1] - evaluation.idle_thrust_n[1]
+        ) + 10.0
+        z_bad[slack_col] = 5.0
+
+        residual = _inequality_constraints(
+            z_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        idle_lower_start = 11 * num_nodes
+        idle_upper_start = idle_lower_start + num_nodes
+
+        self.assertLess(residual[idle_lower_start], 0.0)
+        self.assertLess(residual[idle_upper_start + 1], 0.0)
 
 
 if __name__ == "__main__":

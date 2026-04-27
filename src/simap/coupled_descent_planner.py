@@ -68,6 +68,7 @@ class OptimizerConfig:
     maxiter: int = 400
     tod_reward_weight: float = 0.2
     thrust_penalty_weight: float = 0.5
+    idle_thrust_margin_fraction: float | None = None
     gamma_smoothness_weight: float = 0.05
     slack_penalty_weight: float = 1_000_000.0
     initial_tod_guess_m: float | None = None
@@ -87,6 +88,8 @@ class OptimizerConfig:
             raise ValueError("maxiter must be positive")
         if self.min_alongtrack_speed_mps <= 0.0:
             raise ValueError("min_alongtrack_speed_mps must be positive")
+        if self.idle_thrust_margin_fraction is not None and self.idle_thrust_margin_fraction < 0.0:
+            raise ValueError("idle_thrust_margin_fraction must be nonnegative")
 
 
 @dataclass(frozen=True)
@@ -912,10 +915,23 @@ def _initial_guess(
             h_m=float(h_val),
             delta_isa_K=delta_isa_K,
         )
+        idle_upper = thrust_upper
+        idle_margin_fraction = request.optimizer.idle_thrust_margin_fraction
+        if idle_margin_fraction is not None:
+            idle_thrust = request.perf.idle_thrust_newtons(
+                v_tas_mps=float(v_val),
+                h_m=float(h_val),
+                delta_isa_K=delta_isa_K,
+            )
+            thrust_lower = max(float(thrust_lower), float(idle_thrust))
+            idle_upper = float(idle_thrust) + float(idle_margin_fraction) * max(
+                float(thrust_upper) - float(idle_thrust),
+                0.0,
+            )
         thrust_guess = drag_n + request.cfg.mass_kg * (
             aero.g0 * np.sin(gamma_val) - float(v_val) * np.cos(gamma_val) * float(dvds)
         )
-        thrust_n[idx] = float(np.clip(thrust_guess, thrust_lower, thrust_upper))
+        thrust_n[idx] = float(np.clip(thrust_guess, thrust_lower, idle_upper))
 
     return _pack(
         h_m=h_m,
@@ -1030,17 +1046,25 @@ def _objective(
 ) -> float:
     evaluation = evaluation_cache.evaluate(z)
     ds_m = max(evaluation.tod_m / max(request.optimizer.num_nodes - 1, 1), 1.0)
-    thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / max(1.0, scale.thrust_n)
     gamma_gradient = np.diff(evaluation.gamma_rad) / max(ds_m, 1.0)
     lateral_scale = max(100.0, float(np.max(np.abs(evaluation.cross_track_m))), 1.0)
     heading_scale = np.deg2rad(5.0)
     bank_scale = np.deg2rad(20.0)
     roll_scale = max(1e-3, max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)))
+    thrust_objective = 0.0
+    if request.optimizer.idle_thrust_margin_fraction is None:
+        thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / max(1.0, scale.thrust_n)
+        thrust_objective = (
+            request.optimizer.thrust_penalty_weight
+            * (evaluation.tod_m / 1_000.0)
+            * float(np.mean(thrust_delta**2))
+        )
+    tod_objective = request.optimizer.tod_reward_weight * (evaluation.tod_m / 1_000.0)
+    if request.optimizer.idle_thrust_margin_fraction is None:
+        tod_objective = -tod_objective
     objective = (
-        -request.optimizer.tod_reward_weight * (evaluation.tod_m / 1_000.0)
-        + request.optimizer.thrust_penalty_weight
-        * (evaluation.tod_m / 1_000.0)
-        * float(np.mean(thrust_delta**2))
+        tod_objective
+        + thrust_objective
         + request.optimizer.gamma_smoothness_weight
         * float(np.mean((gamma_gradient / np.deg2rad(1.0) * 1_000.0) ** 2))
         + request.optimizer.cross_track_penalty_weight * float(np.mean((evaluation.cross_track_m / lateral_scale) ** 2))
@@ -1099,18 +1123,24 @@ def _objective_jac(
     tod_col = 9 * num_nodes
     slack_col = tod_col + 1
 
-    grad[tod_col] -= request.optimizer.tod_reward_weight / 1_000.0
+    if request.optimizer.idle_thrust_margin_fraction is None:
+        grad[tod_col] -= request.optimizer.tod_reward_weight / 1_000.0
+    else:
+        grad[tod_col] += request.optimizer.tod_reward_weight / 1_000.0
 
-    thrust_scale = max(1.0, scale.thrust_n)
-    thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / thrust_scale
-    thrust_mean_sq = float(np.mean(thrust_delta**2))
-    thrust_weight = request.optimizer.thrust_penalty_weight
-    grad[tod_col] += thrust_weight * thrust_mean_sq / 1_000.0
-    common_thrust_grad = thrust_weight * (evaluation.tod_m / 1_000.0) * (2.0 / num_nodes) * thrust_delta / thrust_scale
-    grad[thrust_start : thrust_start + num_nodes] += common_thrust_grad
-    d_idle_dv, d_idle_dh = _idle_thrust_partials(evaluation)
-    grad[v_start : v_start + num_nodes] -= common_thrust_grad * d_idle_dv
-    grad[h_start : h_start + num_nodes] -= common_thrust_grad * d_idle_dh
+    if request.optimizer.idle_thrust_margin_fraction is None:
+        thrust_scale = max(1.0, scale.thrust_n)
+        thrust_delta = (evaluation.thrust_n - evaluation.idle_thrust_n) / thrust_scale
+        thrust_mean_sq = float(np.mean(thrust_delta**2))
+        thrust_weight = request.optimizer.thrust_penalty_weight
+        grad[tod_col] += thrust_weight * thrust_mean_sq / 1_000.0
+        common_thrust_grad = (
+            thrust_weight * (evaluation.tod_m / 1_000.0) * (2.0 / num_nodes) * thrust_delta / thrust_scale
+        )
+        grad[thrust_start : thrust_start + num_nodes] += common_thrust_grad
+        d_idle_dv, d_idle_dh = _idle_thrust_partials(evaluation)
+        grad[v_start : v_start + num_nodes] -= common_thrust_grad * d_idle_dv
+        grad[h_start : h_start + num_nodes] -= common_thrust_grad * d_idle_dh
 
     ds_m = max(evaluation.tod_m / max(num_nodes - 1, 1), 1.0)
     diff_count = max(num_nodes - 1, 1)
@@ -1244,6 +1274,19 @@ def _inequality_constraints(
         evaluation.mode_roll_limit_rps - evaluation.roll_rate_rps + slack_roll,
         evaluation.alongtrack_speed_mps - request.optimizer.min_alongtrack_speed_mps + slack_speed,
     ]
+
+    idle_margin_fraction = request.optimizer.idle_thrust_margin_fraction
+    if idle_margin_fraction is not None:
+        idle_band_upper = evaluation.idle_thrust_n + float(idle_margin_fraction) * np.maximum(
+            thrust_upper_backend - evaluation.idle_thrust_n,
+            0.0,
+        )
+        residual_parts.extend(
+            [
+                evaluation.thrust_n - evaluation.idle_thrust_n,
+                idle_band_upper - evaluation.thrust_n,
+            ]
+        )
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(evaluation.s_m)
     if gamma_lower is not None:
@@ -1648,6 +1691,13 @@ def _constraint_jacobian_sparsity(
         for idx in range(num_nodes):
             add_ineq(row, ineq_node_cols(idx, names, depends_on_s=depends_on_s))
             row += 1
+
+    if request.optimizer.idle_thrust_margin_fraction is not None:
+        idle_thrust_block = ("h", "v", "thrust", *(() if not variable_weather else ("t",)))
+        for _ in range(2):
+            for idx in range(num_nodes):
+                add_ineq(row, sorted(set(node_var_cols(idx, idle_thrust_block) + [tod_col])))
+                row += 1
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(np.asarray([0.0], dtype=float))
     if gamma_lower is not None:

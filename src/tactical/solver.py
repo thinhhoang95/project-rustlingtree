@@ -8,6 +8,7 @@ from simap import (
     LateralGuidanceConfig,
     OptimizerConfig,
     SimulationRequest,
+    plan_coupled_descent,
     plan_full_route_longitudinal_descent,
     plan_smooth_idle_descent,
     simulate_plan,
@@ -16,6 +17,7 @@ from simap import (
 from .diagnostics import render_tactical_setup
 from .builder import build_tactical_plan_request
 from .models import TacticalCommand, TacticalPlanBundle
+from .plan_extension import extend_plan_to_tactical_start
 
 
 def _plan_is_usable(plan, *, residual_tolerance: float = 2e-2, replay_tolerance: float = 500.0) -> bool:
@@ -54,6 +56,10 @@ def solve_tactical_command(
         if console is not None:
             console.print("[cyan]Prefer smooth idle requested; building smooth idle profile directly.[/cyan]")
         raw_plan = plan_smooth_idle_descent(request, console=console)
+    elif request.optimizer.idle_thrust_margin_fraction is not None:
+        if console is not None:
+            console.print("[cyan]Solving free-TOD idle descent profile.[/cyan]")
+        raw_plan = plan_coupled_descent(request)
     else:
         if console is not None:
             console.print("[cyan]Solving full-route longitudinal FMS profile.[/cyan]")
@@ -69,6 +75,14 @@ def solve_tactical_command(
                 f"replay={float(raw_plan.replay_residual_max):.3e}[/dim]"
             )
     plan = raw_plan
+    if request.optimizer.idle_thrust_margin_fraction is not None:
+        plan = extend_plan_to_tactical_start(
+            request=request,
+            plan=raw_plan,
+            start_condition=command.upstream,
+            start_s_m=float(request.reference_path.total_length_m),
+            console=console,
+        )
     simulation = None
     if simulate:
         simulation = simulate_plan(
