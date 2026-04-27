@@ -89,8 +89,8 @@ def build_tactical_constraint_envelope(
     upstream_cas_mps = kts_to_mps(upstream_cas_kts)
     cas_s = np.unique(np.concatenate([speed_schedule.s_m, np.asarray([max_s_m], dtype=float)]))
     scheduled_cas = speed_schedule.values(cas_s)
-    cas_lower = np.maximum(scheduled_cas - kts_to_mps(12.0), threshold_cas_mps)
-    cas_upper = np.maximum(scheduled_cas, upstream_cas_mps)
+    cas_lower = np.maximum(scheduled_cas - kts_to_mps(80.0), threshold_cas_mps)
+    cas_upper = np.maximum(scheduled_cas + kts_to_mps(80.0), upstream_cas_mps)
 
     return ConstraintEnvelope.from_profiles(
         altitude_lower=ScalarProfile(s_m=s_alt_arr, y=altitude_lower_arr),
@@ -99,10 +99,10 @@ def build_tactical_constraint_envelope(
         cas_upper=ScalarProfile(s_m=cas_s, y=cas_upper),
         gamma_lower=ScalarProfile(
             s_m=np.asarray([0.0, max_s_m], dtype=float),
-            y=np.asarray([-np.deg2rad(5.5), -np.deg2rad(0.25)], dtype=float),
+            y=np.asarray([-np.deg2rad(8.0), -np.deg2rad(0.1)], dtype=float),
         ),
         gamma_upper=ScalarProfile(
             s_m=np.asarray([0.0, max_s_m], dtype=float),
-            y=np.asarray([-np.deg2rad(1.5), np.deg2rad(1.0)], dtype=float),
+            y=np.asarray([np.deg2rad(0.5), np.deg2rad(2.0)], dtype=float),
         ),
     )

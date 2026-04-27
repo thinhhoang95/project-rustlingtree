@@ -185,7 +185,7 @@ class ConstraintEnvelope:
 
 def build_speed_schedule_from_wrap(
     wrap,
-    s_nodes_km: tuple[float, ...] = (0.0, 8.0, 30.0, 60.0),
+    s_nodes_km: tuple[float, ...] = (0.0, 12.0, 35.0, 60.0),
 ) -> ScalarProfile:
     from .openap_adapter import wrap_default
 

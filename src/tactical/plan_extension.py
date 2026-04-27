@@ -5,12 +5,12 @@ from dataclasses import replace
 import numpy as np
 from openap import aero
 from rich.console import Console
-from rich.panel import Panel
 
 from simap import CoupledDescentPlanResult, CoupledDescentPlanRequest, mode_for_s
 from simap.openap_adapter import openap_dT
 from simap.units import kts_to_mps, mps_to_kts
 
+from .diagnostics import render_tactical_extension_summary
 from .models import TacticalCondition
 
 
@@ -39,19 +39,6 @@ def extend_plan_to_tactical_start(
             f"raw TOD CAS is {mps_to_kts(float(plan.v_cas_mps[-1])):.1f} kt, "
             f"tactical start CAS is {start_condition.cas_kts:.1f} kt "
             f"(jump {cas_jump_kts:.1f} kt > {max_cas_jump_kts:.1f} kt)"
-        )
-
-    if console is not None:
-        console.print(
-            Panel.fit(
-                f"[bold]Raw plan tail[/bold]: s = {float(plan.s_m[-1]):,.1f} m, "
-                f"CAS = {mps_to_kts(float(plan.v_cas_mps[-1])):.1f} kt, "
-                f"thrust = {float(plan.thrust_n[-1]):,.1f} N\n"
-                f"[bold]Tactical start[/bold]: s = {start_s_m:,.1f} m, CAS = {start_condition.cas_kts:.1f} kt\n"
-                f"[bold]Extension nodes[/bold]: {num_extension_nodes}",
-                title="Extending tactical plan",
-                border_style="cyan",
-            )
         )
 
     extension_s = np.linspace(float(plan.s_m[-1]), float(start_s_m), num_extension_nodes + 1, dtype=float)[1:]
@@ -102,14 +89,7 @@ def extend_plan_to_tactical_start(
     )
     mode = tuple(mode.name for mode in modes)
 
-    if console is not None:
-        console.print(
-            f"[green]Extension thrust recomputed[/green]: "
-            f"{float(plan.thrust_n[-1]):,.1f} N -> {float(thrust_extension[0]):,.1f} N "
-            f"(first node), {float(thrust_extension[-1]):,.1f} N (last node)"
-        )
-
-    return replace(
+    extended_plan = replace(
         plan,
         s_m=np.concatenate([plan.s_m, extension_s]),
         h_m=np.concatenate([plan.h_m, h_extension]),
@@ -134,3 +114,15 @@ def extend_plan_to_tactical_start(
         thrust_n=np.concatenate([plan.thrust_n, thrust_extension]),
         mode=tuple(plan.mode) + mode,
     )
+    if console is not None:
+        render_tactical_extension_summary(
+            console,
+            request=request,
+            raw_plan=plan,
+            extended_plan=extended_plan,
+            start_condition=start_condition,
+            start_s_m=start_s_m,
+            num_extension_nodes=num_extension_nodes,
+        )
+
+    return extended_plan

@@ -21,6 +21,7 @@ from .coupled_descent_planner import (
     UpstreamBoundary,
     plan_coupled_descent,
 )
+from .full_route_descent_planner import plan_full_route_longitudinal_descent
 from .smooth_idle_planner import plan_smooth_idle_descent
 from .longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
 from .openap_adapter import (
@@ -93,6 +94,7 @@ __all__ = [
     "load_openap",
     "mode_for_s",
     "plan_coupled_descent",
+    "plan_full_route_longitudinal_descent",
     "plan_smooth_idle_descent",
     "planned_cas_bounds_mps",
     "plot_altitude_response",

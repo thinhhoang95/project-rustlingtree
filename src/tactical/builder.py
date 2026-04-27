@@ -82,6 +82,10 @@ def build_tactical_plan_request(
         constraints=envelope,
         reference_path=reference_path,
         weather=ConstantWeather(),
-        optimizer=optimizer if optimizer is not None else OptimizerConfig(num_nodes=41, maxiter=400),
+        optimizer=optimizer if optimizer is not None else OptimizerConfig(
+            num_nodes=21,
+            maxiter=220,
+            gamma_smoothness_weight=5.0,
+        ),
     )
     return TacticalPlanBundle(command=command, path=resolved_path, request=request)

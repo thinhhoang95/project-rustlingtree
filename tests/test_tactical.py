@@ -5,6 +5,7 @@ from pathlib import Path
 
 from simap.units import ft_to_m
 from simap.units import kts_to_mps
+from simap import planned_cas_bounds_mps
 
 from tactical import (
     AltitudeConstraint,
@@ -65,6 +66,22 @@ class TacticalBuilderTests(unittest.TestCase):
         _, upper_m = bundle.request.constraints.h_bounds(0.75 * bundle.request.reference_path.total_length_m)
         self.assertGreaterEqual(upper_m, ft_to_m(26_000.0))
         self.assertEqual(bundle.request.upstream.cas_window_mps, (kts_to_mps(290.0), kts_to_mps(290.0)))
+
+    def test_tactical_speed_envelope_is_compatible_with_mode_limits(self) -> None:
+        command = TacticalCommand(
+            lateral_path="JUSST SWTCH THEMM TUSLE SEEVR BRDJE NUSSS YAHBT ZINGG RW17C",
+            upstream=TacticalCondition("JUSST", cas_kts=290.0, altitude_ft=26_000.0),
+            runway_altitude_ft=620.0,
+        )
+        bundle = build_tactical_plan_request(
+            command,
+            fixes_csv=DATA_DIR / "airport_related_fixes.csv",
+        )
+
+        for s_m in bundle.request.constraints.s_m:
+            route_lower, route_upper = bundle.request.constraints.cas_bounds(float(s_m))
+            mode_lower, mode_upper = planned_cas_bounds_mps(bundle.request.cfg, float(s_m))
+            self.assertLessEqual(max(route_lower, mode_lower), min(route_upper, mode_upper))
 
 
 if __name__ == "__main__":
