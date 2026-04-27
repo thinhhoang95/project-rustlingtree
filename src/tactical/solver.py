@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.console import Console
+
 from simap import (
     LateralGuidanceConfig,
     OptimizerConfig,
@@ -36,6 +38,7 @@ def solve_tactical_command(
     guidance: LateralGuidanceConfig | None = None,
     dt_s: float = 0.5,
     prefer_smooth_idle: bool = False,
+    console: Console | None = None,
 ) -> TacticalPlanBundle:
     bundle = build_tactical_plan_request(
         command,
@@ -46,16 +49,39 @@ def solve_tactical_command(
     )
     request = bundle.request
     if prefer_smooth_idle:
-        raw_plan = plan_smooth_idle_descent(request)
+        if console is not None:
+            console.print("[cyan]Prefer smooth idle requested; building fallback profile directly.[/cyan]")
+        raw_plan = plan_smooth_idle_descent(request, console=console)
     else:
+        if console is not None:
+            console.print("[cyan]Attempting coupled descent optimizer first.[/cyan]")
         raw_plan = plan_coupled_descent(request)
         if not _plan_is_usable(raw_plan):
-            raw_plan = plan_smooth_idle_descent(request)
+            if console is not None:
+                console.print(
+                    "[yellow]Coupled plan failed usability checks; falling back to smooth idle profile.[/yellow]\n"
+                    f"[dim]success={raw_plan.solver_success}, slack={float(raw_plan.constraint_slack):.3e}, "
+                    f"collocation={float(raw_plan.collocation_residual_max):.3e}, "
+                    f"replay={float(raw_plan.replay_residual_max):.3e}[/dim]"
+                )
+            raw_plan = plan_smooth_idle_descent(request, console=console)
+        elif console is not None:
+            console.print(
+                "[green]Coupled plan accepted.[/green]\n"
+                f"[dim]slack={float(raw_plan.constraint_slack):.3e}, "
+                f"collocation={float(raw_plan.collocation_residual_max):.3e}, "
+                f"replay={float(raw_plan.replay_residual_max):.3e}[/dim]"
+            )
+    if console is not None:
+        console.print(
+            f"[cyan]Extending plan to tactical start at s={request.reference_path.total_length_m:,.1f} m.[/cyan]"
+        )
     plan = extend_plan_to_tactical_start(
         request=request,
         plan=raw_plan,
         start_condition=command.upstream,
         start_s_m=request.reference_path.total_length_m,
+        console=console,
     )
     simulation = None
     if simulate:

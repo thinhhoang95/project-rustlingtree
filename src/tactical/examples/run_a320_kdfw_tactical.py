@@ -11,6 +11,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from rich.console import Console
 
 from simap import LateralGuidanceConfig, OptimizerConfig
 from simap.units import m_to_ft, mps_to_kts
@@ -267,6 +268,7 @@ def print_tod_diagnostics(bundle, *, plan_window: int = 4, simulation_window: in
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
+    console = Console()
     command = TacticalCommand(
         lateral_path=LATERAL_PATH,
         upstream=TacticalCondition(
@@ -278,7 +280,7 @@ def main() -> None:
         runway_altitude_ft=620.0,
     )
 
-    print("Building smooth tactical descent profile...")
+    console.rule("[bold cyan]Building smooth tactical descent profile[/bold cyan]")
     bundle = solve_tactical_command(
         command,
         fixes_csv=repo_root / "data/kdfw_procs/airport_related_fixes.csv",
@@ -290,6 +292,7 @@ def main() -> None:
         ),
         dt_s=0.5,
         prefer_smooth_idle=True,
+        console=console,
     )
     plan = bundle.plan
     raw_plan = bundle.raw_plan

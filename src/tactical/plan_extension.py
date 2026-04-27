@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import numpy as np
 from openap import aero
+from rich.console import Console
+from rich.panel import Panel
 
 from simap import CoupledDescentPlanResult, CoupledDescentPlanRequest, mode_for_s
 from simap.openap_adapter import openap_dT
@@ -20,8 +22,13 @@ def extend_plan_to_tactical_start(
     start_s_m: float,
     num_extension_nodes: int = 12,
     max_cas_jump_kts: float = 5.0,
+    console: Console | None = None,
 ) -> CoupledDescentPlanResult:
     if start_s_m <= float(plan.s_m[-1]) + 1e-6:
+        if console is not None:
+            console.print(
+                f"[dim]No tactical extension required; plan already reaches s={float(plan.s_m[-1]):,.1f} m.[/dim]"
+            )
         return plan
 
     start_cas_mps = kts_to_mps(start_condition.cas_kts)
@@ -32,6 +39,19 @@ def extend_plan_to_tactical_start(
             f"raw TOD CAS is {mps_to_kts(float(plan.v_cas_mps[-1])):.1f} kt, "
             f"tactical start CAS is {start_condition.cas_kts:.1f} kt "
             f"(jump {cas_jump_kts:.1f} kt > {max_cas_jump_kts:.1f} kt)"
+        )
+
+    if console is not None:
+        console.print(
+            Panel.fit(
+                f"[bold]Raw plan tail[/bold]: s = {float(plan.s_m[-1]):,.1f} m, "
+                f"CAS = {mps_to_kts(float(plan.v_cas_mps[-1])):.1f} kt, "
+                f"thrust = {float(plan.thrust_n[-1]):,.1f} N\n"
+                f"[bold]Tactical start[/bold]: s = {start_s_m:,.1f} m, CAS = {start_condition.cas_kts:.1f} kt\n"
+                f"[bold]Extension nodes[/bold]: {num_extension_nodes}",
+                title="Extending tactical plan",
+                border_style="cyan",
+            )
         )
 
     extension_s = np.linspace(float(plan.s_m[-1]), float(start_s_m), num_extension_nodes + 1, dtype=float)[1:]
@@ -81,6 +101,13 @@ def extend_plan_to_tactical_start(
         dtype=float,
     )
     mode = tuple(mode.name for mode in modes)
+
+    if console is not None:
+        console.print(
+            f"[green]Extension thrust recomputed[/green]: "
+            f"{float(plan.thrust_n[-1]):,.1f} N -> {float(thrust_extension[0]):,.1f} N "
+            f"(first node), {float(thrust_extension[-1]):,.1f} N (last node)"
+        )
 
     return replace(
         plan,
