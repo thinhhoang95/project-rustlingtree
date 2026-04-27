@@ -149,8 +149,20 @@ class ReferencePath:
         s = float(np.clip(s_m, 0.0, self.total_length_m))
         return float(np.interp(s, self.s_m[::-1], values[::-1]))
 
+    def _interp_many_for_s(self, values: np.ndarray, s_m: np.ndarray) -> np.ndarray:
+        s = np.clip(np.asarray(s_m, dtype=float), 0.0, self.total_length_m)
+        return np.asarray(np.interp(s, self.s_m[::-1], values[::-1]), dtype=float)
+
     def position_ne(self, s_m: float) -> tuple[float, float]:
         return self._interp_for_s(self.east_m, s_m), self._interp_for_s(self.north_m, s_m)
+
+    def position_ne_many(self, s_m: np.ndarray) -> np.ndarray:
+        return np.column_stack(
+            [
+                self._interp_many_for_s(self.east_m, s_m),
+                self._interp_many_for_s(self.north_m, s_m),
+            ]
+        )
 
     def latlon(self, s_m: float) -> tuple[float, float]:
         return self._interp_for_s(self.lat_deg, s_m), self._interp_for_s(self.lon_deg, s_m)
@@ -158,19 +170,40 @@ class ReferencePath:
     def track_angle_rad(self, s_m: float) -> float:
         return _wrap_angle_rad(self._interp_for_s(self.track_rad, s_m))
 
+    def track_angle_rad_many(self, s_m: np.ndarray) -> np.ndarray:
+        track = self._interp_many_for_s(self.track_rad, s_m)
+        return np.arctan2(np.sin(track), np.cos(track))
+
     def curvature(self, s_m: float) -> float:
         return self._interp_for_s(self.curvature_inv_m, s_m)
+
+    def curvature_many(self, s_m: np.ndarray) -> np.ndarray:
+        return self._interp_many_for_s(self.curvature_inv_m, s_m)
 
     def tangent_hat(self, s_m: float) -> np.ndarray:
         track_rad = self.track_angle_rad(s_m)
         return np.asarray([np.cos(track_rad), np.sin(track_rad)], dtype=float)
 
+    def tangent_hat_many(self, s_m: np.ndarray) -> np.ndarray:
+        track_rad = self.track_angle_rad_many(s_m)
+        return np.column_stack([np.cos(track_rad), np.sin(track_rad)])
+
     def normal_hat(self, s_m: float) -> np.ndarray:
         tangent = self.tangent_hat(s_m)
         return np.asarray([-tangent[1], tangent[0]], dtype=float)
+
+    def normal_hat_many(self, s_m: np.ndarray) -> np.ndarray:
+        tangent = self.tangent_hat_many(s_m)
+        return np.column_stack([-tangent[:, 1], tangent[:, 0]])
 
     def latlon_from_ne(self, east_m: float, north_m: float) -> tuple[float, float]:
         lat0_rad = np.deg2rad(self.origin_lat_deg)
         lat_deg = self.origin_lat_deg + np.rad2deg(north_m / EARTH_RADIUS_M)
         lon_deg = self.origin_lon_deg + np.rad2deg(east_m / (EARTH_RADIUS_M * np.cos(lat0_rad)))
         return float(lat_deg), float(lon_deg)
+
+    def latlon_from_ne_many(self, east_m: np.ndarray, north_m: np.ndarray) -> np.ndarray:
+        lat0_rad = np.deg2rad(self.origin_lat_deg)
+        lat_deg = self.origin_lat_deg + np.rad2deg(np.asarray(north_m, dtype=float) / EARTH_RADIUS_M)
+        lon_deg = self.origin_lon_deg + np.rad2deg(np.asarray(east_m, dtype=float) / (EARTH_RADIUS_M * np.cos(lat0_rad)))
+        return np.column_stack([lat_deg, lon_deg])

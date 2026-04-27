@@ -2,11 +2,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from simap import LateralGuidanceConfig, OptimizerConfig, SimulationRequest, plan_coupled_descent, simulate_plan
+from simap import (
+    LateralGuidanceConfig,
+    OptimizerConfig,
+    SimulationRequest,
+    plan_coupled_descent,
+    plan_smooth_idle_descent,
+    simulate_plan,
+)
 
 from .builder import build_tactical_plan_request
 from .models import TacticalCommand, TacticalPlanBundle
 from .plan_extension import extend_plan_to_tactical_start
+
+
+def _plan_is_usable(plan, *, residual_tolerance: float = 1e-2, replay_tolerance: float = 25.0) -> bool:
+    return (
+        bool(plan.solver_success)
+        and float(plan.constraint_slack) <= residual_tolerance
+        and float(plan.collocation_residual_max) <= replay_tolerance
+        and float(plan.replay_residual_max) <= replay_tolerance
+    )
 
 
 def solve_tactical_command(
@@ -19,6 +35,7 @@ def solve_tactical_command(
     simulate: bool = True,
     guidance: LateralGuidanceConfig | None = None,
     dt_s: float = 0.5,
+    prefer_smooth_idle: bool = False,
 ) -> TacticalPlanBundle:
     bundle = build_tactical_plan_request(
         command,
@@ -28,7 +45,12 @@ def solve_tactical_command(
         optimizer=optimizer,
     )
     request = bundle.request
-    raw_plan = plan_coupled_descent(request)
+    if prefer_smooth_idle:
+        raw_plan = plan_smooth_idle_descent(request)
+    else:
+        raw_plan = plan_coupled_descent(request)
+        if not _plan_is_usable(raw_plan):
+            raw_plan = plan_smooth_idle_descent(request)
     plan = extend_plan_to_tactical_start(
         request=request,
         plan=raw_plan,

@@ -56,7 +56,31 @@ def extend_plan_to_tactical_start(
     psi_extension = np.asarray([request.reference_path.track_angle_rad(float(s_m)) for s_m in extension_s], dtype=float)
     zeros = np.zeros_like(extension_s)
     phi_max = np.full_like(extension_s, float(plan.phi_max_rad[-1]))
-    mode = tuple(mode_for_s(request.cfg, float(s_m)).name for s_m in extension_s)
+    modes = tuple(mode_for_s(request.cfg, float(s_m)) for s_m in extension_s)
+    thrust_extension = np.asarray(
+        [
+            request.perf.drag_newtons(
+                mode=mode,
+                mass_kg=request.cfg.mass_kg,
+                wing_area_m2=request.cfg.wing_area_m2,
+                v_tas_mps=float(v_tas),
+                h_m=float(h_m),
+                gamma_rad=0.0,
+                bank_rad=0.0,
+                delta_isa_K=request.weather.delta_isa_K(float(s_m), float(h_m), float(t_s)),
+            )
+            for mode, s_m, h_m, v_tas, t_s in zip(
+                modes,
+                extension_s,
+                h_extension,
+                v_tas_extension,
+                t_extension,
+                strict=True,
+            )
+        ],
+        dtype=float,
+    )
+    mode = tuple(mode.name for mode in modes)
 
     return replace(
         plan,
@@ -80,6 +104,6 @@ def extend_plan_to_tactical_start(
         track_error_rad=np.concatenate([plan.track_error_rad, zeros]),
         phi_max_rad=np.concatenate([plan.phi_max_rad, phi_max]),
         gamma_rad=np.concatenate([plan.gamma_rad, zeros]),
-        thrust_n=np.concatenate([plan.thrust_n, np.full_like(extension_s, float(plan.thrust_n[-1]))]),
+        thrust_n=np.concatenate([plan.thrust_n, thrust_extension]),
         mode=tuple(plan.mode) + mode,
     )

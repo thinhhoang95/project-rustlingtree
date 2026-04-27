@@ -278,16 +278,18 @@ def main() -> None:
         runway_altitude_ft=620.0,
     )
 
+    print("Building smooth tactical descent profile...")
     bundle = solve_tactical_command(
         command,
         fixes_csv=repo_root / "data/kdfw_procs/airport_related_fixes.csv",
-        optimizer=OptimizerConfig(num_nodes=31, maxiter=350),
+        optimizer=OptimizerConfig(num_nodes=81, maxiter=500, verbose=1),
         guidance=LateralGuidanceConfig(
             lookahead_m=2_500.0,
             cross_track_gain=1.0,
             track_error_gain=2.0,
         ),
         dt_s=0.5,
+        prefer_smooth_idle=True,
     )
     plan = bundle.plan
     raw_plan = bundle.raw_plan
