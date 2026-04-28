@@ -72,6 +72,8 @@ def build_tactical_plan_request(
         openap_wrap=openap.wrap,
         altitude_constraints=command.altitude_constraints,
         constraint_s_m=waypoint_s_m,
+        final_gate_m=cfg.final_gate_m,
+        approach_gate_m=cfg.approach_gate_m,
     )
 
     request = CoupledDescentPlanRequest(
@@ -83,9 +85,12 @@ def build_tactical_plan_request(
         reference_path=reference_path,
         weather=ConstantWeather(),
         optimizer=optimizer if optimizer is not None else OptimizerConfig(
-            num_nodes=21,
-            maxiter=220,
+            num_nodes=41,
+            maxiter=400,
             gamma_smoothness_weight=5.0,
+            enforce_monotonic_descent=True,
+            gamma_gradient_limit_deg_per_km=0.35,
+            gamma_curvature_limit_deg_per_km2=0.12,
         ),
     )
     return TacticalPlanBundle(command=command, path=resolved_path, request=request)

@@ -301,6 +301,60 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertLess(residual[idle_lower_start], 0.0)
         self.assertLess(residual[idle_upper_start + 1], 0.0)
 
+    def test_realism_constraints_report_direct_violations(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(
+                self.request.optimizer,
+                enforce_monotonic_descent=True,
+                gamma_gradient_limit_deg_per_km=0.1,
+                gamma_curvature_limit_deg_per_km2=0.1,
+            ),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        num_nodes = request.optimizer.num_nodes
+        gamma_start = 6 * num_nodes
+        residual_start = 14 * num_nodes
+
+        z_descent_bad = np.array(z0, dtype=float, copy=True)
+        z_descent_bad[1] = z_descent_bad[0] - 10.0
+        descent_residual = _inequality_constraints(
+            z_descent_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        self.assertLess(descent_residual[residual_start], 0.0)
+
+        z_gamma_bad = np.array(z0, dtype=float, copy=True)
+        z_gamma_bad[gamma_start + 1] = z_gamma_bad[gamma_start] + np.deg2rad(20.0)
+        gamma_residual = _inequality_constraints(
+            z_gamma_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        gamma_gradient_upper_start = residual_start + num_nodes - 1
+        gamma_curvature_lower_start = (
+            gamma_gradient_upper_start
+            + 2 * (num_nodes - 1)
+            + (num_nodes - 2)
+        )
+        self.assertLess(gamma_residual[gamma_gradient_upper_start], 0.0)
+        self.assertLess(gamma_residual[gamma_curvature_lower_start], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

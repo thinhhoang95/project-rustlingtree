@@ -64,16 +64,30 @@ def solve_tactical_command(
         if console is not None:
             console.print("[cyan]Solving full-route longitudinal FMS profile.[/cyan]")
         raw_plan = plan_full_route_longitudinal_descent(request)
-        if not _plan_is_usable(raw_plan):
-            if console is not None:
-                console.print("[yellow]Full-route profile failed usability checks; continuing with NLP result.[/yellow]")
-        elif console is not None:
+        if _plan_is_usable(raw_plan) and console is not None:
             console.print(
                 "[green]Full-route profile accepted.[/green]\n"
                 f"[dim]slack={float(raw_plan.constraint_slack):.3e}, "
                 f"collocation={float(raw_plan.collocation_residual_max):.3e}, "
                 f"replay={float(raw_plan.replay_residual_max):.3e}[/dim]"
             )
+    if not _plan_is_usable(raw_plan):
+        if console is not None:
+            console.print(
+                "[yellow]Raw tactical profile failed usability checks; returning diagnostics without extension or simulation.[/yellow]\n"
+                f"[dim]solver_success={raw_plan.solver_success}, "
+                f"slack={float(raw_plan.constraint_slack):.3e}, "
+                f"collocation={float(raw_plan.collocation_residual_max):.3e}, "
+                f"replay={float(raw_plan.replay_residual_max):.3e}[/dim]"
+            )
+        return TacticalPlanBundle(
+            command=bundle.command,
+            path=bundle.path,
+            request=request,
+            raw_plan=raw_plan,
+            plan=None,
+            simulation=None,
+        )
     plan = raw_plan
     if request.optimizer.idle_thrust_margin_fraction is not None:
         plan = extend_plan_to_tactical_start(

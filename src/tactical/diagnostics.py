@@ -345,6 +345,9 @@ def _render_inequality_residual_table(
     take("roll lower", num_nodes)
     take("roll upper", num_nodes)
     take("along-track speed", num_nodes)
+    if request.optimizer.idle_thrust_margin_fraction is not None:
+        take("thrust to idle", num_nodes)
+        take("idle band upper", num_nodes)
 
     gamma_lower, gamma_upper = request.constraints.gamma_bounds_many(plan.s_m)
     if gamma_lower is not None:
@@ -353,6 +356,14 @@ def _render_inequality_residual_table(
         take("gamma upper", num_nodes)
     if request.constraints.cl_max is not None:
         take("CL upper", num_nodes)
+    if request.optimizer.enforce_monotonic_descent:
+        take("monotonic descent", num_nodes - 1)
+    if request.optimizer.gamma_gradient_limit_deg_per_km is not None:
+        take("gamma gradient upper", num_nodes - 1)
+        take("gamma gradient lower", num_nodes - 1)
+    if request.optimizer.gamma_curvature_limit_deg_per_km2 is not None:
+        take("gamma curvature upper", num_nodes - 2)
+        take("gamma curvature lower", num_nodes - 2)
     take("upstream CAS lower", 1)
     take("upstream CAS upper", 1)
 

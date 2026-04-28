@@ -80,6 +80,9 @@ class OptimizerConfig:
     bank_penalty_weight: float = 0.02
     roll_rate_penalty_weight: float = 0.02
     min_alongtrack_speed_mps: float = 1.0
+    enforce_monotonic_descent: bool = False
+    gamma_gradient_limit_deg_per_km: float | None = None
+    gamma_curvature_limit_deg_per_km2: float | None = None
 
     def __post_init__(self) -> None:
         if self.num_nodes < 4:
@@ -90,6 +93,10 @@ class OptimizerConfig:
             raise ValueError("min_alongtrack_speed_mps must be positive")
         if self.idle_thrust_margin_fraction is not None and self.idle_thrust_margin_fraction < 0.0:
             raise ValueError("idle_thrust_margin_fraction must be nonnegative")
+        if self.gamma_gradient_limit_deg_per_km is not None and self.gamma_gradient_limit_deg_per_km <= 0.0:
+            raise ValueError("gamma_gradient_limit_deg_per_km must be positive")
+        if self.gamma_curvature_limit_deg_per_km2 is not None and self.gamma_curvature_limit_deg_per_km2 <= 0.0:
+            raise ValueError("gamma_curvature_limit_deg_per_km2 must be positive")
 
 
 @dataclass(frozen=True)
@@ -1248,7 +1255,10 @@ def _inequality_constraints(
     slack_gamma = evaluation.constraint_slack * scale.gamma_rad
     slack_thrust = evaluation.constraint_slack * scale.thrust_n
     slack_bank = evaluation.constraint_slack * np.deg2rad(10.0)
-    slack_roll = evaluation.constraint_slack * max(1e-3, max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)))
+    slack_roll = evaluation.constraint_slack * max(
+        1e-3,
+        max(mode.p_max_rps for mode in (request.cfg.clean, request.cfg.approach, request.cfg.final)),
+    )
 
     h_lower, h_upper = request.constraints.h_bounds_many(evaluation.s_m)
     cas_lower_env, cas_upper_env = request.constraints.cas_bounds_many(evaluation.s_m)
@@ -1319,6 +1329,34 @@ def _inequality_constraints(
             dtype=float,
         )
         residual_parts.append(cl_upper - cl_values + evaluation.constraint_slack)
+
+    if request.optimizer.enforce_monotonic_descent:
+        residual_parts.append(np.diff(evaluation.h_m) + slack_altitude)
+
+    ds_m = float(evaluation.tod_m / max(request.optimizer.num_nodes - 1, 1))
+    gamma_gradient_limit = request.optimizer.gamma_gradient_limit_deg_per_km
+    if gamma_gradient_limit is not None:
+        gamma_step_limit = np.deg2rad(float(gamma_gradient_limit)) * max(ds_m, 1.0) / 1_000.0
+        gamma_delta = np.diff(evaluation.gamma_rad)
+        residual_parts.extend(
+            [
+                gamma_step_limit - gamma_delta + slack_gamma,
+                gamma_step_limit + gamma_delta + slack_gamma,
+            ]
+        )
+
+    gamma_curvature_limit = request.optimizer.gamma_curvature_limit_deg_per_km2
+    if gamma_curvature_limit is not None and evaluation.num_nodes >= 3:
+        gamma_second = evaluation.gamma_rad[2:] - 2.0 * evaluation.gamma_rad[1:-1] + evaluation.gamma_rad[:-2]
+        gamma_second_limit = (
+            np.deg2rad(float(gamma_curvature_limit)) * max(ds_m, 1.0) ** 2 / 1_000_000.0
+        )
+        residual_parts.extend(
+            [
+                gamma_second_limit - gamma_second + slack_gamma,
+                gamma_second_limit + gamma_second + slack_gamma,
+            ]
+        )
 
     residual_parts.append(
         np.asarray(
@@ -1720,6 +1758,34 @@ def _constraint_jacobian_sparsity(
                 ),
             )
             row += 1
+
+    if request.optimizer.enforce_monotonic_descent:
+        for idx in range(num_nodes - 1):
+            add_ineq(row, sorted({h_start + idx, h_start + idx + 1, slack_col}))
+            row += 1
+
+    if request.optimizer.gamma_gradient_limit_deg_per_km is not None:
+        for _ in range(2):
+            for idx in range(num_nodes - 1):
+                add_ineq(row, sorted({gamma_start + idx, gamma_start + idx + 1, tod_col, slack_col}))
+                row += 1
+
+    if request.optimizer.gamma_curvature_limit_deg_per_km2 is not None:
+        for _ in range(2):
+            for idx in range(num_nodes - 2):
+                add_ineq(
+                    row,
+                    sorted(
+                        {
+                            gamma_start + idx,
+                            gamma_start + idx + 1,
+                            gamma_start + idx + 2,
+                            tod_col,
+                            slack_col,
+                        }
+                    ),
+                )
+                row += 1
 
     upstream_cas_cols = [h_start + num_nodes - 1, v_start + num_nodes - 1, slack_col]
     if variable_weather:

@@ -62,8 +62,12 @@ def build_tactical_constraint_envelope(
     openap_wrap,
     altitude_constraints: tuple[AltitudeConstraint, ...] = (),
     constraint_s_m: dict[str, float] | None = None,
+    final_gate_m: float = 12_000.0,
+    approach_gate_m: float = 35_000.0,
 ) -> ConstraintEnvelope:
     max_s_m = float(max(total_path_length_m, 60_000.0))
+    final_gate_m = float(min(max(final_gate_m, 0.0), max_s_m))
+    approach_gate_m = float(min(max(approach_gate_m, final_gate_m), max_s_m))
     altitude_capture_s_m = min(5_000.0, max_s_m)
     s_alt = [0.0, altitude_capture_s_m, max_s_m]
     altitude_lower = [threshold_altitude_m, threshold_altitude_m, threshold_altitude_m]
@@ -98,11 +102,27 @@ def build_tactical_constraint_envelope(
         cas_lower=ScalarProfile(s_m=cas_s, y=cas_lower),
         cas_upper=ScalarProfile(s_m=cas_s, y=cas_upper),
         gamma_lower=ScalarProfile(
-            s_m=np.asarray([0.0, max_s_m], dtype=float),
-            y=np.asarray([-np.deg2rad(8.0), -np.deg2rad(0.1)], dtype=float),
+            s_m=np.asarray([0.0, final_gate_m, approach_gate_m, max_s_m], dtype=float),
+            y=np.asarray(
+                [
+                    -np.deg2rad(3.8),
+                    -np.deg2rad(4.2),
+                    -np.deg2rad(6.0),
+                    -np.deg2rad(6.0),
+                ],
+                dtype=float,
+            ),
         ),
         gamma_upper=ScalarProfile(
-            s_m=np.asarray([0.0, max_s_m], dtype=float),
-            y=np.asarray([np.deg2rad(0.5), np.deg2rad(2.0)], dtype=float),
+            s_m=np.asarray([0.0, final_gate_m, approach_gate_m, max_s_m], dtype=float),
+            y=np.asarray(
+                [
+                    -np.deg2rad(2.2),
+                    -np.deg2rad(2.0),
+                    -np.deg2rad(0.2),
+                    np.deg2rad(0.25),
+                ],
+                dtype=float,
+            ),
         ),
     )
