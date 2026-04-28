@@ -3,6 +3,9 @@
 This document explains how SIMAP now plans the longitudinal and lateral
 trajectory in one distance-domain nonlinear program.
 
+If you are looking for the FMS heuristic instead of the collocation planner,
+see `fms_walkthrough.md` in the same directory.
+
 The important change is that cross-track error, heading error, bank, roll rate,
 wind, and along-track speed are part of the optimizer. The simulator can still
 replay a result, but the planner is now the source of truth for the coupled
@@ -206,7 +209,7 @@ That behavior is now planned before replay, not discovered afterward by
 Start with:
 
 1. `CoupledDescentPlanRequest` and `CoupledDescentPlanResult` in
-   `src/simap/coupled_descent_planner.py`
+   `src/simap/nlp_colloc/coupled.py`
 2. `_TrajectoryEvaluation.state_derivatives`
 3. `_equality_constraints`
 4. `_inequality_constraints`

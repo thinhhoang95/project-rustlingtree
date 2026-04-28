@@ -9,7 +9,7 @@ import numpy as np
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from simap.config import AircraftConfig, ModeConfig, planned_cas_bounds_mps
-from simap.coupled_descent_planner import (
+from simap.nlp_colloc.coupled import (
     CoupledDescentPlanRequest,
     OptimizerConfig,
     ThresholdBoundary,
@@ -145,7 +145,7 @@ def build_test_request() -> CoupledDescentPlanRequest:
     )
 
 
-class LongitudinalPlannerTests(unittest.TestCase):
+class CoupledPlannerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.request = build_test_request()

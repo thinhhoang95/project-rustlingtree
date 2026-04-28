@@ -9,21 +9,35 @@ from .config import (
     planned_cas_bounds_mps,
     stall_margin_cas_mps,
 )
+from .fms import (
+    FMSPIConfig,
+    FMSRequest,
+    FMSResult,
+    FMSSpeedTargets,
+    HoldAwareFMSRequest,
+    HoldControllerConfig,
+    HoldInstruction,
+    infer_fms_speed_targets,
+    plan_fms_descent,
+    plan_hold_aware_fms_descent,
+    simulate_fms_descent,
+    simulate_hold_aware_fms_descent,
+)
+from .idle_thrust_fallback import plan_idle_thrust_fallback
 from .lateral_dynamics import LateralGuidanceConfig
 from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
-from .coupled_descent_planner import (
-    LateralBoundary,
+from .longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
+from .nlp_colloc import (
     CoupledDescentPlanRequest,
     CoupledDescentPlanResult,
     CoupledDescentSolveProfile,
+    LateralBoundary,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
     plan_coupled_descent,
+    plan_full_route_longitudinal_descent,
 )
-from .full_route_descent_planner import plan_full_route_longitudinal_descent
-from .smooth_idle_planner import plan_smooth_idle_descent
-from .longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
 from .openap_adapter import (
     OpenAPAircraftData,
     OpenAPObjects,
@@ -52,23 +66,20 @@ from .simulator import (
 )
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
-LongitudinalPlanRequest = CoupledDescentPlanRequest
-LongitudinalPlanResult = CoupledDescentPlanResult
-LongitudinalSolveProfile = CoupledDescentSolveProfile
-LongitudinalPlanProfile = CoupledDescentPlanProfile
-LongitudinalPlanSample = CoupledDescentPlanSample
-plan_longitudinal_descent = plan_coupled_descent
-
 __all__ = [
     "AircraftConfig",
     "ConstantWeather",
     "ConstraintEnvelope",
     "EffectivePolarBackend",
-    "LateralGuidanceConfig",
+    "FMSPIConfig",
+    "FMSRequest",
+    "FMSResult",
+    "FMSSpeedTargets",
+    "HoldAwareFMSRequest",
+    "HoldControllerConfig",
+    "HoldInstruction",
     "LateralBoundary",
-    "CoupledDescentPlanRequest",
-    "CoupledDescentPlanResult",
-    "CoupledDescentSolveProfile",
+    "LateralGuidanceConfig",
     "ModeConfig",
     "ModeName",
     "OpenAPAircraftData",
@@ -84,18 +95,24 @@ __all__ = [
     "UpstreamBoundary",
     "WeatherProvider",
     "CoupledDescentPlanProfile",
+    "CoupledDescentPlanRequest",
+    "CoupledDescentPlanResult",
     "CoupledDescentPlanSample",
+    "CoupledDescentSolveProfile",
     "alongtrack_wind_mps",
     "bank_limit_rad",
     "build_default_aircraft_config",
     "build_speed_schedule_from_wrap",
     "distance_state_derivatives",
     "extract_aircraft_data",
+    "infer_fms_speed_targets",
     "load_openap",
     "mode_for_s",
     "plan_coupled_descent",
+    "plan_fms_descent",
+    "plan_hold_aware_fms_descent",
     "plan_full_route_longitudinal_descent",
-    "plan_smooth_idle_descent",
+    "plan_idle_thrust_fallback",
     "planned_cas_bounds_mps",
     "plot_altitude_response",
     "plot_cas_response",
@@ -105,6 +122,8 @@ __all__ = [
     "plot_tas_response",
     "plot_thrust_response",
     "quasi_steady_cl",
+    "simulate_fms_descent",
+    "simulate_hold_aware_fms_descent",
     "simulate_plan",
     "stall_margin_cas_mps",
     "suggest_approach_mass_kg",

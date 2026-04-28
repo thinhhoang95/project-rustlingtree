@@ -14,11 +14,11 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
-from simap.descend_now_heuristics import (
-    DescendNowRequest,
-    HoldAwareDescendRequest,
+from simap.fms import (
+    FMSRequest,
+    HoldAwareFMSRequest,
     HoldInstruction,
-    simulate_hold_aware_stitched_descent,
+    plan_hold_aware_fms_descent,
 )
 from simap.units import m_to_ft, mps_to_fpm, mps_to_kts
 from tactical import TacticalCommand, TacticalCondition
@@ -60,7 +60,7 @@ def _phase_totals(result) -> dict[str, tuple[float, float]]:
     return totals
 
 
-def plot_descend_now_response(result) -> None:
+def plot_fms_response(result) -> None:
     fig, axes = plt.subplots(3, 2, figsize=(12.0, 13.0), sharex=True)
 
     axes[0, 0].plot(result.t_s, m_to_ft(result.h_m), linewidth=2.0, color="#1f6f4a")
@@ -109,12 +109,12 @@ def plot_descend_now_response(result) -> None:
             ax.axvline(result.t_s[tod_idx], color="0.25", linestyle="--", linewidth=1.0, label="TOD")
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle("A320 KDFW Stitched Level + Descend-Now Heuristic")
+    fig.suptitle("A320 KDFW FMS Profile")
     fig.tight_layout()
 
 
 def render_summary(console: Console, result) -> None:
-    table = Table(title="Descend-now heuristic summary")
+    table = Table(title="FMS heuristic summary")
     table.add_column("field")
     table.add_column("value", justify="right")
     table.add_row("success", str(result.success))
@@ -147,34 +147,34 @@ def render_summary(console: Console, result) -> None:
 def render_input_summary(
     console: Console,
     bundle,
-    descend_request: DescendNowRequest,
+    fms_request: FMSRequest,
     holds: tuple[HoldInstruction, ...],
 ) -> None:
-    table = Table(title="Descend-now heuristic inputs")
+    table = Table(title="FMS heuristic inputs")
     table.add_column("field")
     table.add_column("value", justify="right")
     table.add_row("route", " -> ".join(bundle.path.identifiers))
-    table.add_row("reference length", f"{descend_request.reference_path.total_length_m:,.1f} m")
-    table.add_row("start s", f"{descend_request.start_s_m:,.1f} m")
-    table.add_row("start altitude", f"{m_to_ft(descend_request.start_h_m):,.0f} ft")
-    table.add_row("target altitude", f"{m_to_ft(descend_request.target_h_m):,.0f} ft")
-    table.add_row("start CAS", f"{mps_to_kts(descend_request.start_cas_mps):,.1f} kt")
-    table.add_row("clean target", f"{mps_to_kts(descend_request.speed_targets.clean_cas_mps):,.1f} kt")
-    table.add_row("approach target", f"{mps_to_kts(descend_request.speed_targets.approach_cas_mps):,.1f} kt")
-    table.add_row("final target", f"{mps_to_kts(descend_request.speed_targets.final_cas_mps):,.1f} kt")
+    table.add_row("reference length", f"{fms_request.reference_path.total_length_m:,.1f} m")
+    table.add_row("start s", f"{fms_request.start_s_m:,.1f} m")
+    table.add_row("start altitude", f"{m_to_ft(fms_request.start_h_m):,.0f} ft")
+    table.add_row("target altitude", f"{m_to_ft(fms_request.target_h_m):,.0f} ft")
+    table.add_row("start CAS", f"{mps_to_kts(fms_request.start_cas_mps):,.1f} kt")
+    table.add_row("clean target", f"{mps_to_kts(fms_request.speed_targets.clean_cas_mps):,.1f} kt")
+    table.add_row("approach target", f"{mps_to_kts(fms_request.speed_targets.approach_cas_mps):,.1f} kt")
+    table.add_row("final target", f"{mps_to_kts(fms_request.speed_targets.final_cas_mps):,.1f} kt")
     if (
-        descend_request.speed_targets.below_altitude_limit_h_m is not None
-        and descend_request.speed_targets.below_altitude_limit_cas_mps is not None
+        fms_request.speed_targets.below_altitude_limit_h_m is not None
+        and fms_request.speed_targets.below_altitude_limit_cas_mps is not None
     ):
         table.add_row(
             "altitude speed cap",
             (
-                f"{mps_to_kts(descend_request.speed_targets.below_altitude_limit_cas_mps):,.0f} kt "
-                f"below {m_to_ft(descend_request.speed_targets.below_altitude_limit_h_m):,.0f} ft"
+                f"{mps_to_kts(fms_request.speed_targets.below_altitude_limit_cas_mps):,.0f} kt "
+                f"below {m_to_ft(fms_request.speed_targets.below_altitude_limit_h_m):,.0f} ft"
             ),
         )
-    table.add_row("vertical-speed lower", f"{mps_to_fpm(descend_request.controller.min_vertical_speed_mps):,.0f} fpm")
-    table.add_row("vertical-speed upper", f"{mps_to_fpm(descend_request.controller.max_vertical_speed_mps):,.0f} fpm")
+    table.add_row("vertical-speed lower", f"{mps_to_fpm(fms_request.controller.min_vertical_speed_mps):,.0f} fpm")
+    table.add_row("vertical-speed upper", f"{mps_to_fpm(fms_request.controller.max_vertical_speed_mps):,.0f} fpm")
     if holds:
         for idx, hold in enumerate(holds, start=1):
             speed = "auto" if hold.holding_speed_kts is None else f"{hold.holding_speed_kts:,.1f} kt"
@@ -206,16 +206,16 @@ def main() -> None:
         fixes_csv=repo_root / "data/kdfw_procs/airport_related_fixes.csv",
     )
 
-    descend_request = DescendNowRequest.from_coupled_request(bundle.request, dt_s=0.5)
-    hold_request = HoldAwareDescendRequest(
-        base_request=descend_request,
+    fms_request = FMSRequest.from_coupled_request(bundle.request, dt_s=0.5)
+    hold_request = HoldAwareFMSRequest(
+        base_request=fms_request,
         holds=DEFAULT_HOLDS,
     )
-    render_input_summary(console, bundle, descend_request, hold_request.holds)
-    result = simulate_hold_aware_stitched_descent(hold_request)
+    render_input_summary(console, bundle, fms_request, hold_request.holds)
+    result = plan_hold_aware_fms_descent(hold_request)
 
     render_summary(console, result)
-    plot_descend_now_response(result)
+    plot_fms_response(result)
 
     print(result.to_pandas().head())
     print(result.to_pandas().tail())

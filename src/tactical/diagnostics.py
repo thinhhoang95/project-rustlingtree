@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from simap import CoupledDescentPlanRequest, CoupledDescentPlanResult, planned_cas_bounds_mps
-from simap.coupled_descent_planner import (
+from simap.nlp_colloc.coupled import (
     _PlannerScale,
     _SolverProfilingState,
     _TrajectoryEvaluationCache,

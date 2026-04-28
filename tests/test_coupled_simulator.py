@@ -9,7 +9,7 @@ from openap import aero
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.coupled_descent_planner import LateralBoundary, OptimizerConfig, plan_coupled_descent
+from simap.nlp_colloc.coupled import LateralBoundary, OptimizerConfig, plan_coupled_descent
 from simap.path_geometry import ReferencePath
 from simap.simulator import SimulationRequest, State, simulate_plan
 from tests.test_simulator import build_test_request

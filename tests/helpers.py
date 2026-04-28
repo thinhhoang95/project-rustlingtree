@@ -12,7 +12,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 from simap.backends import EffectivePolarBackend
 from simap.config import AircraftConfig
 from simap.calibration import build_default_aircraft_config, suggest_approach_mass_kg
-from simap.coupled_descent_planner import (
+from simap.nlp_colloc.coupled import (
     CoupledDescentPlanRequest,
     OptimizerConfig,
     ThresholdBoundary,

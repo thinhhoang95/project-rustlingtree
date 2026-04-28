@@ -14,7 +14,7 @@ from .lateral_dynamics import (
     lateral_rates,
     wrap_angle_rad,
 )
-from .coupled_descent_planner import CoupledDescentPlanResult
+from .nlp_colloc.coupled import CoupledDescentPlanResult
 from .openap_adapter import openap_dT
 from .path_geometry import ReferencePath
 from .weather import ConstantWeather, WeatherProvider
@@ -455,6 +455,3 @@ __all__ = [
     "simulate_plan",
 ]
 
-
-LongitudinalPlanSample = CoupledDescentPlanSample
-LongitudinalPlanProfile = CoupledDescentPlanProfile

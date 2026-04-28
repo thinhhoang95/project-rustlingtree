@@ -5,12 +5,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from openap import aero
 
-from simap.config import ModeConfig, mode_for_s
-from simap.units import fpm_to_mps, ft_to_m, kts_to_mps
+from ..config import ModeConfig, mode_for_s
+from ..units import fpm_to_mps, ft_to_m, kts_to_mps
 
 from .core import (
-    DescendNowRequest,
-    DescendNowResult,
+    FMSRequest,
+    FMSResult,
     _cas_from_tas,
     _copy_request,
     _drag,
@@ -71,8 +71,8 @@ class HoldControllerConfig:
 
 
 @dataclass(frozen=True)
-class HoldAwareDescendRequest:
-    base_request: DescendNowRequest
+class HoldAwareFMSRequest:
+    base_request: FMSRequest
     holds: tuple[HoldInstruction, ...] = field(default_factory=tuple)
     hold_controller: HoldControllerConfig = field(default_factory=HoldControllerConfig)
 
@@ -121,7 +121,7 @@ def _hold_target_speed_mps(instruction: HoldInstruction, *, captured_cas_mps: fl
 
 def _managed_command(
     *,
-    request: DescendNowRequest,
+    request: FMSRequest,
     mode: ModeConfig,
     s_m: float,
     h_m: float,
@@ -201,8 +201,8 @@ def _managed_command(
 
 def _hold_command(
     *,
-    request: DescendNowRequest,
-    hold_request: HoldAwareDescendRequest,
+    request: FMSRequest,
+    hold_request: HoldAwareFMSRequest,
     hold: _HoldRuntime,
     mode: ModeConfig,
     s_m: float,
@@ -308,8 +308,8 @@ def _result_from_histories(
     histories: dict[str, list[float] | list[str]],
     success: bool,
     message: str,
-) -> DescendNowResult:
-    return DescendNowResult(
+) -> FMSResult:
+    return FMSResult(
         t_s=np.asarray(histories["t_s"], dtype=float),
         s_m=np.asarray(histories["s_m"], dtype=float),
         distance_flown_m=np.asarray(histories["distance_flown_m"], dtype=float),
@@ -331,7 +331,7 @@ def _result_from_histories(
     )
 
 
-def simulate_hold_aware_descend_now(request: HoldAwareDescendRequest) -> DescendNowResult:
+def simulate_hold_aware_fms_descent(request: HoldAwareFMSRequest) -> FMSResult:
     base = request.base_request
     t_s = 0.0
     s_m = float(base.start_s_m)
@@ -504,12 +504,12 @@ def simulate_hold_aware_descend_now(request: HoldAwareDescendRequest) -> Descend
 
 
 def _copy_hold_request(
-    request: HoldAwareDescendRequest,
+    request: HoldAwareFMSRequest,
     *,
     start_s_m: float | None = None,
     stop_at_reference_path_end: bool | None = None,
-) -> HoldAwareDescendRequest:
-    return HoldAwareDescendRequest(
+) -> HoldAwareFMSRequest:
+    return HoldAwareFMSRequest(
         base_request=_copy_request(
             request.base_request,
             start_s_m=start_s_m,
@@ -520,14 +520,14 @@ def _copy_hold_request(
     )
 
 
-def _tod_metric(result: DescendNowResult, *, target_h_m: float) -> float:
+def _tod_metric(result: FMSResult, *, target_h_m: float) -> float:
     if result.success:
         return float(max(result.s_m[-1], 0.0))
     return -float(max(result.h_m[-1] - target_h_m, 0.0))
 
 
-def _simulate_to_threshold(request: HoldAwareDescendRequest, *, start_s_m: float) -> DescendNowResult:
-    return simulate_hold_aware_descend_now(
+def _simulate_to_threshold(request: HoldAwareFMSRequest, *, start_s_m: float) -> FMSResult:
+    return simulate_hold_aware_fms_descent(
         _copy_hold_request(
             request,
             start_s_m=start_s_m,
@@ -537,15 +537,15 @@ def _simulate_to_threshold(request: HoldAwareDescendRequest, *, start_s_m: float
 
 
 def _find_tod_s_m(
-    request: HoldAwareDescendRequest,
+    request: HoldAwareFMSRequest,
     *,
     tolerance_m: float,
     max_iterations: int,
-) -> tuple[float | None, DescendNowResult]:
+) -> tuple[float | None, FMSResult]:
     available_s_m = float(request.base_request.start_s_m)
-    descend_now = _simulate_to_threshold(request, start_s_m=available_s_m)
-    if _tod_metric(descend_now, target_h_m=request.base_request.target_h_m) < 0.0:
-        return None, descend_now
+    fms_descent = _simulate_to_threshold(request, start_s_m=available_s_m)
+    if _tod_metric(fms_descent, target_h_m=request.base_request.target_h_m) < 0.0:
+        return None, fms_descent
 
     low_s_m = 1e-3
     high_s_m = available_s_m
@@ -574,7 +574,7 @@ def _find_tod_s_m(
 
 
 def _with_metadata(
-    result: DescendNowResult,
+    result: FMSResult,
     *,
     success: bool,
     message: str,
@@ -583,8 +583,8 @@ def _with_metadata(
     level_time_s: float,
     descent_segment_distance_m: float | None,
     descent_segment_time_s: float | None,
-) -> DescendNowResult:
-    return DescendNowResult(
+) -> FMSResult:
+    return FMSResult(
         t_s=result.t_s,
         s_m=result.s_m,
         distance_flown_m=result.distance_flown_m,
@@ -611,11 +611,11 @@ def _with_metadata(
     )
 
 
-def _stitch_with_level(level: DescendNowResult, descent: DescendNowResult, *, tod_s_m: float) -> DescendNowResult:
+def _stitch_with_level(level: FMSResult, descent: FMSResult, *, tod_s_m: float) -> FMSResult:
     descent_slice = slice(1, None) if len(level) > 0 and len(descent) > 1 else slice(None)
     t_offset_s = float(level.t_s[-1])
     distance_offset_m = float(level.distance_flown_m[-1])
-    return DescendNowResult(
+    return FMSResult(
         t_s=np.concatenate([level.t_s, descent.t_s[descent_slice] + t_offset_s]),
         s_m=np.concatenate([level.s_m, descent.s_m[descent_slice]]),
         distance_flown_m=np.concatenate(
@@ -644,12 +644,12 @@ def _stitch_with_level(level: DescendNowResult, descent: DescendNowResult, *, to
     )
 
 
-def simulate_hold_aware_stitched_descent(
-    request: HoldAwareDescendRequest,
+def plan_hold_aware_fms_descent(
+    request: HoldAwareFMSRequest,
     *,
     tod_tolerance_m: float = 5.0,
     max_tod_iterations: int = 40,
-) -> DescendNowResult:
+) -> FMSResult:
     tod_s_m, descent = _find_tod_s_m(
         request,
         tolerance_m=tod_tolerance_m,
@@ -660,7 +660,7 @@ def simulate_hold_aware_stitched_descent(
             descent,
             success=False,
             message=(
-                "infeasible: not enough along-track distance to complete hold-aware descend-now profile before "
+                "infeasible: not enough along-track distance to complete hold-aware FMS profile before "
                 "threshold; showing immediate descent with holds truncated at threshold"
             ),
             tod_s_m=None,
@@ -675,9 +675,9 @@ def simulate_hold_aware_stitched_descent(
 
 
 __all__ = [
-    "HoldAwareDescendRequest",
+    "HoldAwareFMSRequest",
     "HoldControllerConfig",
     "HoldInstruction",
-    "simulate_hold_aware_descend_now",
-    "simulate_hold_aware_stitched_descent",
+    "plan_hold_aware_fms_descent",
+    "simulate_hold_aware_fms_descent",
 ]

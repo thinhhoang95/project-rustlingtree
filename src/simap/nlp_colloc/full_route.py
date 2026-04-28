@@ -8,16 +8,16 @@ from openap import aero
 from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, minimize
 
-from .config import bank_limit_rad, mode_for_s
-from .coupled_descent_planner import (
+from ..config import bank_limit_rad, mode_for_s
+from .coupled import (
     CoupledDescentPlanRequest,
     CoupledDescentPlanResult,
     CoupledDescentSolveProfile,
     _PlannerScale,
     _planned_cas_bounds_many,
 )
-from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
-from .openap_adapter import openap_dT
+from ..longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
+from ..openap_adapter import openap_dT
 
 __all__ = ["plan_full_route_longitudinal_descent"]
 

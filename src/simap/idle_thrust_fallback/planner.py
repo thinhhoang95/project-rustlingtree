@@ -12,8 +12,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import bank_limit_rad, mode_for_s
-from .coupled_descent_planner import (
+from ..config import bank_limit_rad, mode_for_s
+from ..nlp_colloc.coupled import (
     CoupledDescentPlanRequest,
     CoupledDescentPlanResult,
     CoupledDescentSolveProfile,
@@ -26,10 +26,10 @@ from .coupled_descent_planner import (
     _planned_cas_bounds_many,
     _replay_solution,
 )
-from .openap_adapter import openap_dT
-from .weather import ConstantWeather, alongtrack_wind_mps
+from ..openap_adapter import openap_dT
+from ..weather import ConstantWeather, alongtrack_wind_mps
 
-__all__ = ["plan_smooth_idle_descent"]
+__all__ = ["plan_idle_thrust_fallback"]
 
 
 def _render_tod_search(
@@ -254,13 +254,13 @@ def _render_reassembly_summary(
     )
 
 
-def plan_smooth_idle_descent(
+def plan_idle_thrust_fallback(
     request: CoupledDescentPlanRequest,
     *,
     num_nodes: int | None = None,
     console: Console | None = None,
 ) -> CoupledDescentPlanResult:
-    """Construct a smooth idle-thrust descent profile."""
+    """Construct an idle-thrust fallback descent profile."""
 
     solve_started_at = perf_counter()
     profile_nodes = int(num_nodes if num_nodes is not None else request.optimizer.num_nodes)
@@ -278,7 +278,7 @@ def plan_smooth_idle_descent(
         target_cas_mps = 0.5 * (request.upstream.cas_lower_mps + request.upstream.cas_upper_mps)
 
     def final_cas_error(tod_m: float) -> float:
-        profile = _integrate_smooth_idle_profile(
+        profile = _integrate_idle_thrust_fallback_profile(
             request=request,
             tod_m=float(tod_m),
             threshold_v_tas=threshold_v_tas,
@@ -331,7 +331,7 @@ def plan_smooth_idle_descent(
             bracket=bracket,
         )
 
-    profile = _integrate_smooth_idle_profile(
+    profile = _integrate_idle_thrust_fallback_profile(
         request=request,
         tod_m=tod_m,
         threshold_v_tas=threshold_v_tas,
@@ -462,7 +462,7 @@ def plan_smooth_idle_descent(
         mode=mode,
         solver_success=True,
         solver_status=2,
-        solver_message="constructed smooth near-idle fallback profile",
+        solver_message="constructed idle-thrust fallback profile",
         objective_value=0.0,
         tod_m=float(tod_m),
         collocation_residual_max=collocation_residual_max,
@@ -495,7 +495,7 @@ def _cubic_gamma_at_s(
     return float(-np.arctan(dhds))
 
 
-def _integrate_smooth_idle_profile(
+def _integrate_idle_thrust_fallback_profile(
     *,
     request: CoupledDescentPlanRequest,
     tod_m: float,
@@ -507,7 +507,7 @@ def _integrate_smooth_idle_profile(
     s_m = np.linspace(0.0, float(tod_m), int(num_nodes), dtype=float)
 
     if emit_logs and console is not None:
-        console.rule("[bold cyan]Step 4.2  Build smooth altitude and FPA shape[/bold cyan]")
+        console.rule("[bold cyan]Step 4.2  Build fallback altitude and FPA shape[/bold cyan]")
         console.print(
             Panel.fit(
                 f"[bold]Domain[/bold]: s = [0.0, {tod_m:,.1f}] m\n"
@@ -573,7 +573,7 @@ def _integrate_smooth_idle_profile(
         atol=1e-9,
     )
     if not solution.success or solution.y.shape[1] != len(s_m):
-        raise RuntimeError(f"smooth idle descent integration failed: {solution.message}")
+        raise RuntimeError(f"idle-thrust fallback integration failed: {solution.message}")
 
     h_m = np.asarray(solution.y[0], dtype=float)
     v_tas_mps = np.asarray(solution.y[1], dtype=float)

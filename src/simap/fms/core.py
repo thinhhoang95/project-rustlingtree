@@ -6,17 +6,17 @@ import numpy as np
 import pandas as pd
 from openap import aero
 
-from simap.backends import PerformanceBackend
-from simap.config import AircraftConfig, ModeConfig, mode_for_s
-from simap.coupled_descent_planner import CoupledDescentPlanRequest
-from simap.openap_adapter import openap_dT
-from simap.path_geometry import ReferencePath
-from simap.units import fpm_to_mps, ft_to_m, kts_to_mps
-from simap.weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
+from ..backends import PerformanceBackend
+from ..config import AircraftConfig, ModeConfig, mode_for_s
+from ..nlp_colloc.coupled import CoupledDescentPlanRequest
+from ..openap_adapter import openap_dT
+from ..path_geometry import ReferencePath
+from ..units import fpm_to_mps, ft_to_m, kts_to_mps
+from ..weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 
 @dataclass(frozen=True)
-class DescendNowSpeedTargets:
+class FMSSpeedTargets:
     clean_cas_mps: float
     approach_cas_mps: float
     final_cas_mps: float
@@ -42,7 +42,7 @@ class DescendNowSpeedTargets:
 
 
 @dataclass(frozen=True)
-class DescendNowPIConfig:
+class FMSPIConfig:
     nominal_pitch_rad: float = -np.deg2rad(3.0)
     kp_rad_per_mps: float = np.deg2rad(0.10)
     ki_rad_per_mps_s: float = np.deg2rad(0.003)
@@ -58,7 +58,7 @@ class DescendNowPIConfig:
 
 
 @dataclass(frozen=True)
-class DescendNowRequest:
+class FMSRequest:
     cfg: AircraftConfig
     perf: PerformanceBackend
     reference_path: ReferencePath
@@ -66,9 +66,9 @@ class DescendNowRequest:
     start_h_m: float
     start_cas_mps: float
     target_h_m: float
-    speed_targets: DescendNowSpeedTargets
+    speed_targets: FMSSpeedTargets
     weather: WeatherProvider = field(default_factory=ConstantWeather)
-    controller: DescendNowPIConfig = field(default_factory=DescendNowPIConfig)
+    controller: FMSPIConfig = field(default_factory=FMSPIConfig)
     dt_s: float = 0.5
     max_time_s: float = 7_200.0
     stop_at_reference_path_end: bool = False
@@ -90,12 +90,12 @@ class DescendNowRequest:
         cls,
         request: CoupledDescentPlanRequest,
         *,
-        speed_targets: DescendNowSpeedTargets | None = None,
+        speed_targets: FMSSpeedTargets | None = None,
         start_s_m: float | None = None,
         dt_s: float = 0.5,
         max_time_s: float = 7_200.0,
-        controller: DescendNowPIConfig | None = None,
-    ) -> "DescendNowRequest":
+        controller: FMSPIConfig | None = None,
+    ) -> "FMSRequest":
         return cls(
             cfg=request.cfg,
             perf=request.perf,
@@ -104,16 +104,16 @@ class DescendNowRequest:
             start_h_m=float(request.upstream.h_m),
             start_cas_mps=float(request.upstream.cas_upper_mps),
             target_h_m=float(request.threshold.h_m),
-            speed_targets=infer_speed_targets(request) if speed_targets is None else speed_targets,
+            speed_targets=infer_fms_speed_targets(request) if speed_targets is None else speed_targets,
             weather=request.weather,
-            controller=DescendNowPIConfig() if controller is None else controller,
+            controller=FMSPIConfig() if controller is None else controller,
             dt_s=dt_s,
             max_time_s=max_time_s,
         )
 
 
 @dataclass(frozen=True)
-class DescendNowResult:
+class FMSResult:
     t_s: np.ndarray
     s_m: np.ndarray
     distance_flown_m: np.ndarray
@@ -179,8 +179,8 @@ def _first_not_none(*values: float | None) -> float:
     raise ValueError("expected at least one non-None value")
 
 
-def infer_speed_targets(request: CoupledDescentPlanRequest) -> DescendNowSpeedTargets:
-    return DescendNowSpeedTargets(
+def infer_fms_speed_targets(request: CoupledDescentPlanRequest) -> FMSSpeedTargets:
+    return FMSSpeedTargets(
         clean_cas_mps=float(request.upstream.cas_upper_mps),
         approach_cas_mps=_first_not_none(request.cfg.approach.cas_min_mps, request.upstream.cas_lower_mps),
         final_cas_mps=_first_not_none(request.cfg.final.cas_min_mps, request.threshold.cas_mps),
@@ -213,7 +213,7 @@ def _tas_from_cas(
 
 def _idle_thrust(
     *,
-    request: DescendNowRequest,
+    request: FMSRequest,
     mode: ModeConfig,
     v_tas_mps: float,
     h_m: float,
@@ -232,7 +232,7 @@ def _idle_thrust(
 
 def _drag(
     *,
-    request: DescendNowRequest,
+    request: FMSRequest,
     mode: ModeConfig,
     v_tas_mps: float,
     h_m: float,
@@ -256,7 +256,7 @@ def _drag(
 
 def _ground_speed_mps(
     *,
-    request: DescendNowRequest,
+    request: FMSRequest,
     s_m: float,
     h_m: float,
     t_s: float,
@@ -268,12 +268,12 @@ def _ground_speed_mps(
 
 
 def _copy_request(
-    request: DescendNowRequest,
+    request: FMSRequest,
     *,
     start_s_m: float | None = None,
     stop_at_reference_path_end: bool | None = None,
-) -> DescendNowRequest:
-    return DescendNowRequest(
+) -> FMSRequest:
+    return FMSRequest(
         cfg=request.cfg,
         perf=request.perf,
         reference_path=request.reference_path,
@@ -293,7 +293,7 @@ def _copy_request(
 
 
 def _result_with_metadata(
-    result: DescendNowResult,
+    result: FMSResult,
     *,
     success: bool,
     message: str,
@@ -303,8 +303,8 @@ def _result_with_metadata(
     descent_segment_distance_m: float | None,
     descent_segment_time_s: float | None,
     phase: tuple[str, ...] | None = None,
-) -> DescendNowResult:
-    return DescendNowResult(
+) -> FMSResult:
+    return FMSResult(
         t_s=result.t_s,
         s_m=result.s_m,
         distance_flown_m=result.distance_flown_m,
@@ -331,7 +331,7 @@ def _result_with_metadata(
     )
 
 
-def simulate_descend_now(request: DescendNowRequest) -> DescendNowResult:
+def simulate_fms_descent(request: FMSRequest) -> FMSResult:
     t_s = 0.0
     s_m = float(request.start_s_m)
     h_m = float(request.start_h_m)
@@ -477,7 +477,7 @@ def simulate_descend_now(request: DescendNowRequest) -> DescendNowResult:
         h_m = float(h_m + vertical_speed_mps * step_dt_s)
         v_tas_mps = float(max(1.0, v_tas_mps + v_dot_mps2 * step_dt_s))
 
-    return DescendNowResult(
+    return FMSResult(
         t_s=np.asarray(t_hist, dtype=float),
         s_m=np.asarray(s_hist, dtype=float),
         distance_flown_m=np.asarray(distance_hist, dtype=float),
@@ -498,14 +498,14 @@ def simulate_descend_now(request: DescendNowRequest) -> DescendNowResult:
     )
 
 
-def _tod_metric(result: DescendNowResult, *, target_h_m: float) -> float:
+def _tod_metric(result: FMSResult, *, target_h_m: float) -> float:
     if result.success:
         return float(max(result.s_m[-1], 0.0))
     return -float(max(result.h_m[-1] - target_h_m, 0.0))
 
 
-def _simulate_descent_to_threshold(request: DescendNowRequest, *, start_s_m: float) -> DescendNowResult:
-    return simulate_descend_now(
+def _simulate_descent_to_threshold(request: FMSRequest, *, start_s_m: float) -> FMSResult:
+    return simulate_fms_descent(
         _copy_request(
             request,
             start_s_m=start_s_m,
@@ -515,19 +515,19 @@ def _simulate_descent_to_threshold(request: DescendNowRequest, *, start_s_m: flo
 
 
 def _find_tod_s_m(
-    request: DescendNowRequest,
+    request: FMSRequest,
     *,
     tolerance_m: float,
     max_iterations: int,
-) -> tuple[float | None, DescendNowResult]:
+) -> tuple[float | None, FMSResult]:
     available_s_m = float(request.start_s_m)
-    descend_now = _simulate_descent_to_threshold(request, start_s_m=available_s_m)
-    if _tod_metric(descend_now, target_h_m=request.target_h_m) < 0.0:
-        return None, descend_now
+    fms_descent = _simulate_descent_to_threshold(request, start_s_m=available_s_m)
+    if _tod_metric(fms_descent, target_h_m=request.target_h_m) < 0.0:
+        return None, fms_descent
 
     low_s_m = 1e-3
     high_s_m = available_s_m
-    best = descend_now
+    best = fms_descent
     for _ in range(max_iterations):
         mid_s_m = 0.5 * (low_s_m + high_s_m)
         candidate = _simulate_descent_to_threshold(request, start_s_m=mid_s_m)
@@ -553,7 +553,7 @@ def _find_tod_s_m(
     return tod_s_m, descent
 
 
-def _simulate_level_segment(request: DescendNowRequest, *, tod_s_m: float) -> DescendNowResult:
+def _simulate_level_segment(request: FMSRequest, *, tod_s_m: float) -> FMSResult:
     start_s_m = float(request.start_s_m)
     tod_s_m = float(tod_s_m)
     if tod_s_m >= start_s_m:
@@ -583,7 +583,7 @@ def _simulate_level_segment(request: DescendNowRequest, *, tod_s_m: float) -> De
             t_s=0.0,
             v_tas_mps=v_tas_mps,
         )
-        return DescendNowResult(
+        return FMSResult(
             t_s=empty,
             s_m=np.asarray([start_s_m], dtype=float),
             distance_flown_m=empty,
@@ -673,7 +673,7 @@ def _simulate_level_segment(request: DescendNowRequest, *, tod_s_m: float) -> De
         s_m = float(max(tod_s_m, s_m - ground_speed * step_dt_s))
 
     zeros = np.zeros(len(t_hist), dtype=float)
-    return DescendNowResult(
+    return FMSResult(
         t_s=np.asarray(t_hist, dtype=float),
         s_m=np.asarray(s_hist, dtype=float),
         distance_flown_m=np.asarray(distance_hist, dtype=float),
@@ -695,7 +695,7 @@ def _simulate_level_segment(request: DescendNowRequest, *, tod_s_m: float) -> De
     )
 
 
-def _stitch_results(level: DescendNowResult, descent: DescendNowResult, *, tod_s_m: float) -> DescendNowResult:
+def _stitch_results(level: FMSResult, descent: FMSResult, *, tod_s_m: float) -> FMSResult:
     descent_t_offset = float(level.t_s[-1])
     descent_distance_offset = float(level.distance_flown_m[-1])
     descent_slice = slice(1, None) if len(level) > 0 and len(descent) > 1 else slice(None)
@@ -704,7 +704,7 @@ def _stitch_results(level: DescendNowResult, descent: DescendNowResult, *, tod_s
         [level.distance_flown_m, descent.distance_flown_m[descent_slice] + descent_distance_offset]
     )
     phase = level.phase + ("descent",) * len(descent.t_s[descent_slice])
-    return DescendNowResult(
+    return FMSResult(
         t_s=t_s,
         s_m=np.concatenate([level.s_m, descent.s_m[descent_slice]]),
         distance_flown_m=distance_flown_m,
@@ -731,12 +731,12 @@ def _stitch_results(level: DescendNowResult, descent: DescendNowResult, *, tod_s
     )
 
 
-def simulate_stitched_level_then_descend(
-    request: DescendNowRequest,
+def plan_fms_descent(
+    request: FMSRequest,
     *,
     tod_tolerance_m: float = 5.0,
     max_tod_iterations: int = 40,
-) -> DescendNowResult:
+) -> FMSResult:
     tod_s_m, descent = _find_tod_s_m(
         request,
         tolerance_m=tod_tolerance_m,
@@ -747,8 +747,8 @@ def simulate_stitched_level_then_descend(
             descent,
             success=False,
             message=(
-                "infeasible: not enough along-track distance to complete descend-now profile before threshold; "
-                "showing descend-now response truncated at threshold"
+                "infeasible: not enough along-track distance to complete FMS profile before threshold; "
+                "showing FMS response truncated at threshold"
             ),
             tod_s_m=None,
             level_distance_m=0.0,
@@ -761,3 +761,13 @@ def simulate_stitched_level_then_descend(
 
     level = _simulate_level_segment(request, tod_s_m=tod_s_m)
     return _stitch_results(level, descent, tod_s_m=tod_s_m)
+
+__all__ = [
+    "FMSPIConfig",
+    "FMSRequest",
+    "FMSResult",
+    "FMSSpeedTargets",
+    "infer_fms_speed_targets",
+    "plan_fms_descent",
+    "simulate_fms_descent",
+]

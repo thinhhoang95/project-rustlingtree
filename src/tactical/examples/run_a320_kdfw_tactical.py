@@ -247,7 +247,7 @@ def main() -> None:
             track_error_gain=2.0,
         ),
         dt_s=0.5,
-        prefer_smooth_idle=False,
+        prefer_idle_thrust_fallback=False,
         console=console,
     )
     plan = bundle.plan

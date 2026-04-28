@@ -10,7 +10,7 @@ from simap import (
     SimulationRequest,
     plan_coupled_descent,
     plan_full_route_longitudinal_descent,
-    plan_smooth_idle_descent,
+    plan_idle_thrust_fallback,
     simulate_plan,
 )
 
@@ -39,7 +39,7 @@ def solve_tactical_command(
     simulate: bool = True,
     guidance: LateralGuidanceConfig | None = None,
     dt_s: float = 0.5,
-    prefer_smooth_idle: bool = False,
+    prefer_idle_thrust_fallback: bool = False,
     console: Console | None = None,
 ) -> TacticalPlanBundle:
     bundle = build_tactical_plan_request(
@@ -52,13 +52,13 @@ def solve_tactical_command(
     request = bundle.request
     if console is not None:
         render_tactical_setup(console, bundle=bundle)
-    if prefer_smooth_idle:
+    if prefer_idle_thrust_fallback:
         if console is not None:
-            console.print("[cyan]Prefer smooth idle requested; building smooth idle profile directly.[/cyan]")
-        raw_plan = plan_smooth_idle_descent(request, console=console)
+            console.print("[cyan]Prefer idle-thrust fallback requested; building fallback profile directly.[/cyan]")
+        raw_plan = plan_idle_thrust_fallback(request, console=console)
     elif request.optimizer.idle_thrust_margin_fraction is not None:
         if console is not None:
-            console.print("[cyan]Solving free-TOD idle descent profile.[/cyan]")
+            console.print("[cyan]Solving free-TOD idle-thrust fallback profile.[/cyan]")
         raw_plan = plan_coupled_descent(request)
     else:
         if console is not None:

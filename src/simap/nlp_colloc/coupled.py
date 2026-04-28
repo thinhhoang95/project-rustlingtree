@@ -11,12 +11,12 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import Bounds, NonlinearConstraint, minimize
 from scipy.sparse import coo_matrix, csr_array, csr_matrix
 
-from .backends import PerformanceBackend
-from .config import AircraftConfig, bank_limit_rad, mode_for_s, planned_cas_bounds_mps
-from .longitudinal_profiles import ConstraintEnvelope
-from .openap_adapter import openap_dT
-from .path_geometry import ReferencePath
-from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
+from ..backends import PerformanceBackend
+from ..config import AircraftConfig, bank_limit_rad, mode_for_s, planned_cas_bounds_mps
+from ..longitudinal_profiles import ConstraintEnvelope
+from ..openap_adapter import openap_dT
+from ..path_geometry import ReferencePath
+from ..weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 
 @dataclass(frozen=True)
@@ -1802,8 +1802,3 @@ def _constraint_jacobian_sparsity(
     ).tocsr()
     return equality, inequality
 
-
-LongitudinalPlanRequest = CoupledDescentPlanRequest
-LongitudinalPlanResult = CoupledDescentPlanResult
-LongitudinalSolveProfile = CoupledDescentSolveProfile
-plan_longitudinal_descent = plan_coupled_descent
