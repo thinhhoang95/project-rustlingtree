@@ -8,9 +8,8 @@ from openap import aero
 from ..config import ModeConfig, mode_for_s
 from ..units import fpm_to_mps, ft_to_m, kts_to_mps
 
-from .core import (
-    FMSRequest,
-    FMSResult,
+from .datatypes import FMSRequest, FMSResult
+from .helpers import (
     _cas_from_tas,
     _copy_request,
     _drag,
