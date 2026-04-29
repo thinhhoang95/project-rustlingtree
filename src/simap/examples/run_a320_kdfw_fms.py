@@ -21,8 +21,8 @@ from simap.fms import (
     plan_hold_aware_fms_descent,
 )
 from simap.units import m_to_ft, mps_to_fpm, mps_to_kts
-from tactical import TacticalCommand, TacticalCondition
-from tactical.builder import build_tactical_plan_request
+from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition
+from simap.nlp_colloc.tactical.builder import build_tactical_plan_request
 
 
 LATERAL_PATH = "JUSST SWTCH THEMM TUSLE SEEVR BRDJE NUSSS YAHBT ZINGG RW17C"

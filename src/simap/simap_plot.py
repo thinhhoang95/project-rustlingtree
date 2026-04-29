@@ -7,7 +7,7 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from .longitudinal_profiles import ConstraintEnvelope
+from .nlp_colloc.profiles import ConstraintEnvelope
 
 
 def _series(values: Any, field: str) -> np.ndarray:

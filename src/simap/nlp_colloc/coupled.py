@@ -13,7 +13,7 @@ from scipy.sparse import coo_matrix, csr_array, csr_matrix
 
 from ..backends import PerformanceBackend
 from ..config import AircraftConfig, bank_limit_rad, mode_for_s, planned_cas_bounds_mps
-from ..longitudinal_profiles import ConstraintEnvelope
+from .profiles import ConstraintEnvelope
 from ..openap_adapter import openap_dT
 from ..path_geometry import ReferencePath
 from ..weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
@@ -418,17 +418,21 @@ class _TrajectoryEvaluation:
 
     @property
     def alongtrack_speed_mps(self) -> np.ndarray:
-        if self._alongtrack_speed_mps is None:
+        value = self._alongtrack_speed_mps
+        if value is None:
             tangent = self.request.reference_path.tangent_hat_many(self.s_m)
-            self._alongtrack_speed_mps = np.einsum("ij,ij->i", self.ground_velocity_ne_mps, tangent)
-        return self._alongtrack_speed_mps
+            value = np.einsum("ij,ij->i", self.ground_velocity_ne_mps, tangent)
+            self._alongtrack_speed_mps = value
+        return value
 
     @property
     def crosstrack_speed_mps(self) -> np.ndarray:
-        if self._crosstrack_speed_mps is None:
+        value = self._crosstrack_speed_mps
+        if value is None:
             normal = self.request.reference_path.normal_hat_many(self.s_m)
-            self._crosstrack_speed_mps = np.einsum("ij,ij->i", self.ground_velocity_ne_mps, normal)
-        return self._crosstrack_speed_mps
+            value = np.einsum("ij,ij->i", self.ground_velocity_ne_mps, normal)
+            self._crosstrack_speed_mps = value
+        return value
 
     @property
     def track_error_rad(self) -> np.ndarray:
@@ -1801,4 +1805,3 @@ def _constraint_jacobian_sparsity(
         dtype=bool,
     ).tocsr()
     return equality, inequality
-

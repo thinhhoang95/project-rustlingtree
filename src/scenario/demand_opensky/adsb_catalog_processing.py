@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -15,13 +16,41 @@ from scenario.demand_opensky.adsb_catalog_common import (
 )
 
 
+class ThresholdEventRecord(TypedDict):
+    date: str
+    flight_id: str
+    callsign: str
+    icao24: str
+    operation: str
+    runway: str
+    event_time: int
+    event_time_utc: str
+    event_lat: float
+    event_lon: float
+    event_geoaltitude_m: float
+    threshold_lat: float
+    threshold_lon: float
+    threshold_distance_m: float
+    comparison_time: int
+    comparison_time_utc: str
+    comparison_geoaltitude_m: float
+    altitude_delta_m: float
+
+
+class RunwayThresholdRecord(TypedDict):
+    runway: str
+    runway_pair: str
+    threshold_lat: float
+    threshold_lon: float
+
+
 def build_event_record(
     flight: pd.DataFrame,
     classification: str,
     candidate: ThresholdCandidate,
-    threshold_row: pd.Series,
+    threshold_row: RunwayThresholdRecord,
     date_label: str,
-) -> dict[str, object]:
+) -> ThresholdEventRecord:
     event = flight.iloc[candidate.event_index]
     comparison = flight.iloc[candidate.comparison_index]
     event_time = int(event["time"])
@@ -64,7 +93,7 @@ def classify_flight_track(
     lookaround_seconds: int,
     min_altitude_change_m: float,
     date_label: str,
-) -> tuple[str, dict[str, object] | None]:
+    ) -> tuple[str, ThresholdEventRecord | None]:
     valid = flight.loc[
         flight["time"].notna()
         & flight["lat"].notna()
@@ -81,15 +110,16 @@ def classify_flight_track(
     altitudes = valid["geoaltitude"].to_numpy(dtype=float)
 
     best_candidate: ThresholdCandidate | None = None
-    best_threshold_row: pd.Series | None = None
+    best_threshold_row: RunwayThresholdRecord | None = None
     saw_ground_relevant_threshold = False
 
-    for threshold_row in thresholds.itertuples(index=False):
+    threshold_rows = cast(list[RunwayThresholdRecord], thresholds.to_dict("records"))
+    for threshold_row in threshold_rows:
         distances = haversine_distance_m(
             lats,
             lons,
-            float(threshold_row.threshold_lat),
-            float(threshold_row.threshold_lon),
+            float(threshold_row["threshold_lat"]),
+            float(threshold_row["threshold_lon"]),
         )
         nearby_indices = (distances <= runway_radius_m) & (altitudes < GROUND_RELEVANT_ALTITUDE_M)
         if not nearby_indices.any():
@@ -114,7 +144,7 @@ def classify_flight_track(
         if comparison_index != first_index and arrival_delta <= -min_altitude_change_m:
             candidate = ThresholdCandidate(
                 operation="arrival",
-                runway=str(threshold_row.runway),
+                runway=str(threshold_row["runway"]),
                 event_index=first_index,
                 comparison_index=comparison_index,
                 event_distance_m=float(distances[first_index]),
@@ -122,7 +152,7 @@ def classify_flight_track(
             )
             if is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
-                best_threshold_row = pd.Series(threshold_row._asdict())
+                best_threshold_row = threshold_row
 
         if last_index < len(valid) - 1:
             comparison_index = nearest_index_in_slice(
@@ -138,7 +168,7 @@ def classify_flight_track(
         if comparison_index != last_index and departure_delta >= min_altitude_change_m:
             candidate = ThresholdCandidate(
                 operation="departure",
-                runway=str(threshold_row.runway),
+                runway=str(threshold_row["runway"]),
                 event_index=last_index,
                 comparison_index=comparison_index,
                 event_distance_m=float(distances[last_index]),
@@ -146,7 +176,7 @@ def classify_flight_track(
             )
             if is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
-                best_threshold_row = pd.Series(threshold_row._asdict())
+                best_threshold_row = threshold_row
 
     if best_candidate is None:
         if saw_ground_relevant_threshold:
@@ -179,10 +209,10 @@ def extract_fix_sequence(
         fix_lons = fixes["longitude_deg"].to_numpy(dtype=float)
         fix_identifiers = fixes["identifier"].astype(str).to_numpy()
 
-        for row in valid.itertuples(index=False):
+        for lat_deg, lon_deg in valid[["lat", "lon"]].itertuples(index=False, name=None):
             distances = haversine_distance_m(
-                float(row.lat),
-                float(row.lon),
+                float(lat_deg),
+                float(lon_deg),
                 fix_lats,
                 fix_lons,
             )
@@ -246,7 +276,7 @@ def process_tracks(
     split_gap_seconds: int,
     date_label: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Counter[str]]:
-    event_records: list[dict[str, object]] = []
+    event_records: list[ThresholdEventRecord] = []
     fix_records: list[dict[str, object]] = []
     classification_counts: Counter[str] = Counter()
 

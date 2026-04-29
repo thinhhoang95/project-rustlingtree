@@ -25,18 +25,27 @@ from .fms import (
 )
 from .idle_thrust_fallback import plan_idle_thrust_fallback
 from .lateral_dynamics import LateralGuidanceConfig
-from .longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
-from .longitudinal_profiles import ConstraintEnvelope, ScalarProfile, build_speed_schedule_from_wrap
 from .nlp_colloc import (
+    ConstraintEnvelope,
+    CoupledDescentPlanProfile,
     CoupledDescentPlanRequest,
     CoupledDescentPlanResult,
+    CoupledDescentPlanSample,
     CoupledDescentSolveProfile,
     LateralBoundary,
     OptimizerConfig,
+    ScalarProfile,
+    SimulationRequest,
+    SimulationResult,
+    State,
     ThresholdBoundary,
     UpstreamBoundary,
+    build_speed_schedule_from_wrap,
+    distance_state_derivatives,
     plan_coupled_descent,
     plan_full_route_longitudinal_descent,
+    quasi_steady_cl,
+    simulate_plan,
 )
 from .openap_adapter import (
     OpenAPAircraftData,
@@ -55,14 +64,6 @@ from .simap_plot import (
     plot_longitudinal_plan,
     plot_tas_response,
     plot_thrust_response,
-)
-from .simulator import (
-    CoupledDescentPlanProfile,
-    CoupledDescentPlanSample,
-    SimulationRequest,
-    SimulationResult,
-    State,
-    simulate_plan,
 )
 from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 

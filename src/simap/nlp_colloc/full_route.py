@@ -16,7 +16,7 @@ from .coupled import (
     _PlannerScale,
     _planned_cas_bounds_many,
 )
-from ..longitudinal_dynamics import distance_state_derivatives, quasi_steady_cl
+from .dynamics import distance_state_derivatives, quasi_steady_cl
 from ..openap_adapter import openap_dT
 
 __all__ = ["plan_full_route_longitudinal_descent"]

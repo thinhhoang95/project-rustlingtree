@@ -15,8 +15,8 @@ from rich.console import Console
 
 from simap import LateralGuidanceConfig, OptimizerConfig
 from simap.units import m_to_ft, mps_to_kts
-from tactical.diagnostics import render_tod_neighborhood
-from tactical import TacticalCommand, TacticalCondition, solve_tactical_command
+from simap.nlp_colloc.tactical.diagnostics import render_tod_neighborhood
+from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition, solve_tactical_command
 
 
 LATERAL_PATH = "JUSST SWTCH THEMM TUSLE SEEVR BRDJE NUSSS YAHBT ZINGG RW17C"

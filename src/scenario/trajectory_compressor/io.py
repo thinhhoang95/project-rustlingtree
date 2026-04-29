@@ -98,14 +98,14 @@ def load_raw_adsb(input_dir: Path, processes: int) -> pd.DataFrame:
 
 
 def load_arrival_departure_flight_ids(catalog_path: Path) -> set[str]:
-    catalog = pd.read_csv(catalog_path, usecols=["flight_id", "operation"])
+    catalog = pd.read_csv(catalog_path).loc[:, ["flight_id", "operation"]]
     operations = catalog["operation"].astype(str).str.strip().str.lower()
     flight_ids = catalog.loc[operations.isin(["arrival", "departure"]), "flight_id"]
     return set(flight_ids.astype(str).str.strip())
 
 
 def filter_tracks_to_flights(tracks: pd.DataFrame, flight_ids: set[str]) -> pd.DataFrame:
-    filtered = tracks.loc[tracks["flight_id"].isin(flight_ids)].copy()
+    filtered = tracks.loc[tracks["flight_id"].isin(list(flight_ids))].copy()
     filtered.reset_index(drop=True, inplace=True)
     return filtered
 
@@ -153,12 +153,12 @@ def build_flight_tasks(tracks: pd.DataFrame) -> list[FlightCompressionTask]:
         first = flight.iloc[0]
         records = tuple(
             (
-                int(row.time),
-                float(row.lat),
-                float(row.lon),
-                float(row.geoaltitude),
+                int(time_s),
+                float(lat_deg),
+                float(lon_deg),
+                float(geoaltitude_m),
             )
-            for row in flight[columns].itertuples(index=False)
+            for time_s, lat_deg, lon_deg, geoaltitude_m in flight[columns].itertuples(index=False, name=None)
         )
         tasks.append(
             FlightCompressionTask(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from openap import aero
@@ -313,7 +313,18 @@ def plan_idle_thrust_fallback(
         tod_m = bracket[0]
         selected_error_mps = float(exact_sample_error_mps if exact_sample_error_mps is not None else sample_errors[selected_sample_idx])
     else:
-        tod_m = float(brentq(final_cas_error, bracket[0], bracket[1], xtol=25.0, rtol=1e-6, maxiter=30))
+        tod_m = cast(
+            float,
+            brentq(
+                final_cas_error,
+                bracket[0],
+                bracket[1],
+                xtol=25.0,
+                rtol=np.float64(1e-6),
+                maxiter=30,
+                full_output=False,
+            ),
+        )
         selected_error_mps = float(final_cas_error(tod_m))
 
     if console is not None:

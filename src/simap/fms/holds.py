@@ -282,7 +282,7 @@ def _append_sample(
     h_m: float,
     v_tas_mps: float,
     cas_mps: float,
-    histories: dict[str, list[float] | list[str]],
+    histories: dict[str, list[float | str]],
 ) -> None:
     histories["t_s"].append(float(t_s))
     histories["s_m"].append(float(s_m))
@@ -304,7 +304,7 @@ def _append_sample(
 
 def _result_from_histories(
     *,
-    histories: dict[str, list[float] | list[str]],
+    histories: dict[str, list[float | str]],
     success: bool,
     message: str,
 ) -> FMSResult:
@@ -347,7 +347,7 @@ def simulate_hold_aware_fms_descent(request: HoldAwareFMSRequest) -> FMSResult:
     next_hold_idx = 0
     active_hold: _HoldRuntime | None = None
 
-    histories: dict[str, list[float] | list[str]] = {
+    histories: dict[str, list[float | str]] = {
         "t_s": [],
         "s_m": [],
         "distance_flown_m": [],

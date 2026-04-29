@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from multiprocessing import Pool
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 
@@ -20,7 +21,7 @@ def list_input_csv_files(input_dir: Path) -> list[Path]:
 
 
 def normalize_callsign(value: object) -> str:
-    if pd.isna(value):
+    if cast(bool, pd.isna(value)):
         return ""
     return str(value).strip()
 
@@ -72,22 +73,22 @@ def load_tracks(input_dir: Path, processes: int) -> pd.DataFrame:
 def load_runway_thresholds(path: Path) -> pd.DataFrame:
     frame = pd.read_csv(path)
     rows: list[dict[str, object]] = []
-    for row in frame.itertuples(index=False):
-        runway_a, runway_b = str(row.runway_pair).split("/", maxsplit=1)
+    for row in frame.to_dict("records"):
+        runway_a, runway_b = str(row["runway_pair"]).split("/", maxsplit=1)
         rows.append(
             {
                 "runway": runway_a,
-                "runway_pair": row.runway_pair,
-                "threshold_lat": float(row.latitude_a),
-                "threshold_lon": float(row.longitude_a),
+                "runway_pair": row["runway_pair"],
+                "threshold_lat": float(row["latitude_a"]),
+                "threshold_lon": float(row["longitude_a"]),
             }
         )
         rows.append(
             {
                 "runway": runway_b,
-                "runway_pair": row.runway_pair,
-                "threshold_lat": float(row.latitude_b),
-                "threshold_lon": float(row.longitude_b),
+                "runway_pair": row["runway_pair"],
+                "threshold_lat": float(row["latitude_b"]),
+                "threshold_lon": float(row["longitude_b"]),
             }
         )
     return pd.DataFrame(rows).sort_values("runway").reset_index(drop=True)
