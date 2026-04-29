@@ -9,6 +9,7 @@ description = "Reduced-order approach simulation package backed by OpenAP"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.116.0",
     "ipykernel>=7.2.0",
     "matplotlib>=3.8.0",
     "notebook>=7.5.5",
@@ -24,10 +25,12 @@ dependencies = [
     "seaborn>=0.13.0",
     "statsmodels>=0.14.0",
     "tqdm>=4.67.3",
+    "uvicorn>=0.35.0",
 ]
 
 [project.scripts]
 adsb-trajectory-compress = "scenario.trajectory_compressor.cli:main"
+scenario-manager-api = "mcp_tools.scenario_manager.server:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
