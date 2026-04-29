@@ -6,17 +6,18 @@ import numpy as np
 import pandas as pd
 from openap import aero
 
-from .config import AircraftConfig, mode_for_s
-from .lateral_dynamics import (
+from ..backends import PerformanceBackend
+from ..config import AircraftConfig, mode_for_s
+from ..lateral_dynamics import (
     LateralGuidanceConfig,
     compute_lateral_command,
     lateral_rates,
     wrap_angle_rad,
 )
-from .longitudinal_planner import LongitudinalPlanResult
-from .openap_adapter import openap_dT
-from .path_geometry import ReferencePath
-from .weather import ConstantWeather, WeatherProvider
+from .coupled import CoupledDescentPlanResult
+from ..openap_adapter import openap_dT
+from ..path_geometry import ReferencePath
+from ..weather import ConstantWeather, WeatherProvider
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ class State:
 
 
 @dataclass(frozen=True)
-class LongitudinalPlanSample:
+class CoupledDescentPlanSample:
     s_m: float
     h_m: float
     v_tas_mps: float
@@ -71,16 +72,16 @@ class LongitudinalPlanSample:
 
 
 @dataclass(frozen=True)
-class LongitudinalPlanProfile:
-    plan: LongitudinalPlanResult
+class CoupledDescentPlanProfile:
+    plan: CoupledDescentPlanResult
 
     def __post_init__(self) -> None:
         if len(self.plan) < 2:
-            raise ValueError("longitudinal plan requires at least two samples")
+            raise ValueError("descent plan requires at least two samples")
         if np.any(np.diff(self.plan.s_m) <= 0.0):
-            raise ValueError("longitudinal plan s_m must be strictly increasing")
+            raise ValueError("descent plan s_m must be strictly increasing")
         if np.any(np.diff(self.plan.t_s) < 0.0):
-            raise ValueError("longitudinal plan t_s must be nondecreasing")
+            raise ValueError("descent plan t_s must be nondecreasing")
 
     @property
     def start_s_m(self) -> float:
@@ -90,10 +91,10 @@ class LongitudinalPlanProfile:
     def duration_s(self) -> float:
         return float(self.plan.t_s[-1])
 
-    def sample(self, s_m: float) -> LongitudinalPlanSample:
+    def sample(self, s_m: float) -> CoupledDescentPlanSample:
         s_val = float(np.clip(s_m, float(self.plan.s_m[0]), float(self.plan.s_m[-1])))
         time_from_threshold_s = float(np.interp(s_val, self.plan.s_m, self.plan.t_s))
-        return LongitudinalPlanSample(
+        return CoupledDescentPlanSample(
             s_m=s_val,
             h_m=float(np.interp(s_val, self.plan.s_m, self.plan.h_m)),
             v_tas_mps=float(np.interp(s_val, self.plan.s_m, self.plan.v_tas_mps)),
@@ -108,7 +109,8 @@ class LongitudinalPlanProfile:
 @dataclass(frozen=True)
 class SimulationRequest:
     cfg: AircraftConfig
-    plan: LongitudinalPlanResult
+    perf: PerformanceBackend
+    plan: CoupledDescentPlanResult
     reference_path: ReferencePath
     weather: WeatherProvider = field(default_factory=ConstantWeather)
     guidance: LateralGuidanceConfig = field(default_factory=LateralGuidanceConfig)
@@ -164,6 +166,8 @@ class SimulationResult:
     min_alongtrack_speed_mps: float
     max_bank_command_ratio: float
     final_threshold_error_m: float
+    longitudinal_state_source: str = "time_integrated"
+    longitudinal_response_integrated: bool = True
 
     def __len__(self) -> int:
         return int(len(self.t_s))
@@ -209,9 +213,20 @@ def _cas_from_tas(
     return float(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(delta_isa_K)))
 
 
-def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile) -> State:
+def _initial_state(request: SimulationRequest, profile: CoupledDescentPlanProfile) -> State:
     if request.initial_state is None:
         sample = profile.sample(profile.start_s_m)
+        if all(hasattr(profile.plan, field_name) for field_name in ("east_m", "north_m", "psi_rad", "phi_rad")):
+            return State(
+                t_s=0.0,
+                s_m=sample.s_m,
+                h_m=sample.h_m,
+                v_tas_mps=sample.v_tas_mps,
+                east_m=float(profile.plan.east_m[-1]),
+                north_m=float(profile.plan.north_m[-1]),
+                psi_rad=float(profile.plan.psi_rad[-1]),
+                phi_rad=float(profile.plan.phi_rad[-1]),
+            )
         return State.on_reference_path(
             t_s=0.0,
             s_m=sample.s_m,
@@ -220,12 +235,11 @@ def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile)
             reference_path=request.reference_path,
         )
 
-    sample = profile.sample(request.initial_state.s_m)
     return State(
         t_s=float(request.initial_state.t_s),
         s_m=float(request.initial_state.s_m),
-        h_m=sample.h_m,
-        v_tas_mps=sample.v_tas_mps,
+        h_m=float(request.initial_state.h_m),
+        v_tas_mps=float(request.initial_state.v_tas_mps),
         east_m=float(request.initial_state.east_m),
         north_m=float(request.initial_state.north_m),
         psi_rad=float(request.initial_state.psi_rad),
@@ -233,16 +247,40 @@ def _initial_state(request: SimulationRequest, profile: LongitudinalPlanProfile)
     )
 
 
-def simulate_plan(request: SimulationRequest) -> SimulationResult:
-    """Replay a longitudinal plan through the lateral simulation model.
+def _longitudinal_rates(
+    *,
+    request: SimulationRequest,
+    state: State,
+    mode,
+    gamma_rad: float,
+    thrust_n: float,
+) -> tuple[float, float]:
+    delta_isa_K = float(request.weather.delta_isa_K(state.s_m, state.h_m, state.t_s))
+    drag_n = request.perf.drag_newtons(
+        mode=mode,
+        mass_kg=request.cfg.mass_kg,
+        wing_area_m2=request.cfg.wing_area_m2,
+        v_tas_mps=state.v_tas_mps,
+        h_m=state.h_m,
+        gamma_rad=gamma_rad,
+        bank_rad=state.phi_rad,
+        delta_isa_K=delta_isa_K,
+    )
+    h_dot_mps = float(max(1.0, state.v_tas_mps) * np.sin(gamma_rad))
+    v_dot_mps2 = float((thrust_n - drag_n) / request.cfg.mass_kg - aero.g0 * np.sin(gamma_rad))
+    return h_dot_mps, v_dot_mps2
 
-    The longitudinal plan is treated as authoritative over the path coordinate
-    ``s_m``. The simulator therefore advances the lateral states and elapsed
-    time while resampling altitude, speed, gamma, and thrust from the planned
-    profile at the current along-track position.
+
+def simulate_plan(request: SimulationRequest) -> SimulationResult:
+    """Simulate aircraft response to a descent plan.
+
+    The coupled planner supplies command profiles for flight-path angle and
+    thrust. This replay advances lateral position, bank, altitude, and TAS in
+    time, so infeasible planned speed/altitude changes appear as tracking
+    deviations instead of being imposed directly on the state.
     """
 
-    profile = LongitudinalPlanProfile(request.plan)
+    profile = CoupledDescentPlanProfile(request.plan)
     state = _initial_state(request, profile)
     max_time_s = max(float(request.dt_s), profile.duration_s * float(request.max_time_factor))
 
@@ -340,13 +378,20 @@ def simulate_plan(request: SimulationRequest) -> SimulationResult:
         next_phi_rad = float(state.phi_rad + phi_dot_rps * step_dt_s)
         if (command.phi_req_rad - state.phi_rad) * (command.phi_req_rad - next_phi_rad) < 0.0:
             next_phi_rad = float(command.phi_req_rad)
+
+        h_dot_mps, v_dot_mps2 = _longitudinal_rates(
+            request=request,
+            state=state,
+            mode=mode,
+            gamma_rad=float(sample.gamma_rad),
+            thrust_n=float(sample.thrust_n),
+        )
         next_state_s_m = float(max(0.0, state.s_m - command.alongtrack_speed_mps * step_dt_s))
-        next_sample = profile.sample(next_state_s_m)
         state = State(
             t_s=float(state.t_s + step_dt_s),
             s_m=next_state_s_m,
-            h_m=float(next_sample.h_m),
-            v_tas_mps=float(next_sample.v_tas_mps),
+            h_m=float(state.h_m + h_dot_mps * step_dt_s),
+            v_tas_mps=float(max(1.0, state.v_tas_mps + v_dot_mps2 * step_dt_s)),
             east_m=float(state.east_m + command.east_dot_mps * step_dt_s),
             north_m=float(state.north_m + command.north_dot_mps * step_dt_s),
             psi_rad=wrap_angle_rad(state.psi_rad + psi_dot_rps * step_dt_s),
@@ -402,8 +447,8 @@ def simulate_plan(request: SimulationRequest) -> SimulationResult:
 
 
 __all__ = [
-    "LongitudinalPlanProfile",
-    "LongitudinalPlanSample",
+    "CoupledDescentPlanProfile",
+    "CoupledDescentPlanSample",
     "SimulationRequest",
     "SimulationResult",
     "State",

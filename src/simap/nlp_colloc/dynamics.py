@@ -3,10 +3,10 @@ from __future__ import annotations
 import numpy as np
 from openap import aero
 
-from .backends import PerformanceBackend
-from .config import AircraftConfig, ModeConfig, mode_for_s
-from .openap_adapter import openap_dT
-from .weather import WeatherProvider, alongtrack_wind_mps
+from ..backends import PerformanceBackend
+from ..config import AircraftConfig, ModeConfig, mode_for_s
+from ..openap_adapter import openap_dT
+from ..weather import WeatherProvider, alongtrack_wind_mps
 
 
 def quasi_steady_cl(
@@ -79,3 +79,6 @@ def distance_state_derivatives(
     )
     dtds = 1.0 / ground_speed
     return np.asarray([dhds, dvds, dtds], dtype=float)
+
+
+__all__ = ["distance_state_derivatives", "mode_and_atmosphere", "quasi_steady_cl"]

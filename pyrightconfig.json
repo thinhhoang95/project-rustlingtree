@@ -1,0 +1,9 @@
+{
+  "venvPath": "/Users/thinhhoang/miniforge3/envs",
+  "venv": "silverdrizzle",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic",
+  "extraPaths": [
+    "src"
+  ]
+}

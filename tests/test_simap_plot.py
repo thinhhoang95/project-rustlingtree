@@ -60,10 +60,10 @@ class SimapPlotTests(unittest.TestCase):
     def test_plan_overview_draws_four_panels(self) -> None:
         fig, axes = plot_longitudinal_plan(self.plan, envelope=self.envelope, show=False)
         self.assertEqual(axes.shape, (2, 2))
-        self.assertEqual(axes[0, 0].get_title(), "Altitude")
-        self.assertEqual(axes[0, 1].get_title(), "CAS")
-        self.assertEqual(axes[1, 0].get_title(), "Flight-Path Angle")
-        self.assertEqual(axes[1, 1].get_title(), "Thrust")
+        self.assertEqual(axes[0, 0].get_title(), "Planned Altitude")
+        self.assertEqual(axes[0, 1].get_title(), "Planned CAS")
+        self.assertEqual(axes[1, 0].get_title(), "Planned Flight-Path Angle")
+        self.assertEqual(axes[1, 1].get_title(), "Planned Thrust")
         plt.close(fig)
 
     def test_constraint_envelope_plot_draws_two_panels(self) -> None:

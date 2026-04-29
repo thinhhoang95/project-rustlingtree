@@ -14,8 +14,9 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 from simap import (
     ConstraintEnvelope,
     EffectivePolarBackend,
-    LongitudinalPlanRequest,
+    CoupledDescentPlanRequest,
     OptimizerConfig,
+    ReferencePath,
     ScalarProfile,
     ThresholdBoundary,
     UpstreamBoundary,
@@ -23,7 +24,7 @@ from simap import (
     build_speed_schedule_from_wrap,
     extract_aircraft_data,
     load_openap,
-    plan_longitudinal_descent,
+    plan_coupled_descent,
     plot_constraint_envelope,
     plot_longitudinal_plan,
     suggest_approach_mass_kg,
@@ -57,7 +58,11 @@ def main() -> None:
     # s_m = array([0, 8km, 30km, 60km]) y = array([135 knots (touchdown), 140 knots (final), 280 knots (descent), 280 knots (descent)])
     speed_schedule = build_speed_schedule_from_wrap(openap.wrap)
 
-    max_s_m = 60_000.0
+    reference_path = ReferencePath.from_geographic(
+        lat_deg=np.asarray([0.0, 0.0], dtype=float),
+        lon_deg=np.asarray([0.55, 0.0], dtype=float),
+    )
+    max_s_m = max(60_000.0, reference_path.total_length_m)
     envelope = ConstraintEnvelope.from_profiles(
         altitude_lower=ScalarProfile(
             s_m=np.asarray([0.0, max_s_m], dtype=float),
@@ -84,18 +89,19 @@ def main() -> None:
             y=np.asarray([-np.deg2rad(2.0), np.deg2rad(0.5)], dtype=float),
         ),
     )
-    request = LongitudinalPlanRequest(
+    request = CoupledDescentPlanRequest(
         cfg=cfg,
         perf=perf,
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
     )
 
     plot_constraint_envelope(envelope)
 
-    plan = plan_longitudinal_descent(request)
+    plan = plan_coupled_descent(request)
     plot_longitudinal_plan(plan, envelope=envelope)
     print(plan.to_pandas().head())
     print(plan.to_pandas().tail())

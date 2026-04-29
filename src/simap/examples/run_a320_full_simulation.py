@@ -17,7 +17,7 @@ from simap import (
     ConstraintEnvelope,
     EffectivePolarBackend,
     LateralGuidanceConfig,
-    LongitudinalPlanRequest,
+    CoupledDescentPlanRequest,
     OptimizerConfig,
     ReferencePath,
     ScalarProfile,
@@ -28,7 +28,7 @@ from simap import (
     build_speed_schedule_from_wrap,
     extract_aircraft_data,
     load_openap,
-    plan_longitudinal_descent,
+    plan_coupled_descent,
     plot_constraint_envelope,
     plot_longitudinal_plan,
     simulate_plan,
@@ -36,7 +36,7 @@ from simap import (
 )
 
 
-def build_demo_inputs() -> tuple[LongitudinalPlanRequest, ReferencePath]:
+def build_demo_inputs() -> tuple[CoupledDescentPlanRequest, ReferencePath]:
     openap = load_openap("A320")
     aircraft_data = extract_aircraft_data(openap)
     mass_kg = suggest_approach_mass_kg(aircraft_data, payload_kg=12_000.0)
@@ -90,15 +90,15 @@ def build_demo_inputs() -> tuple[LongitudinalPlanRequest, ReferencePath]:
             y=np.asarray([-np.deg2rad(2.0), np.deg2rad(0.5)], dtype=float),
         ),
     )
-    request = LongitudinalPlanRequest(
+    request = CoupledDescentPlanRequest(
         cfg=cfg,
         perf=perf,
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         weather=weather,
         optimizer=OptimizerConfig(num_nodes=31, maxiter=300),
-        reference_track_rad=reference_path.track_angle_rad(reference_path.total_length_m),
     )
     return request, reference_path
 
@@ -141,10 +141,11 @@ def plot_simulation_overview(reference_path: ReferencePath, simulation) -> None:
 
 def main() -> None:
     request, reference_path = build_demo_inputs()
-    plan = plan_longitudinal_descent(request)
+    plan = plan_coupled_descent(request)
     simulation = simulate_plan(
         SimulationRequest(
             cfg=request.cfg,
+            perf=request.perf,
             plan=plan,
             reference_path=reference_path,
             weather=request.weather,

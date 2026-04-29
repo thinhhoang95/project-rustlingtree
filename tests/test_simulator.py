@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from simap.config import AircraftConfig, ModeConfig, planned_cas_bounds_mps
-from simap.longitudinal_planner import (
-    LongitudinalPlanRequest,
+from simap.nlp_colloc.coupled import (
+    CoupledDescentPlanRequest,
     OptimizerConfig,
     ThresholdBoundary,
     UpstreamBoundary,
-    plan_longitudinal_descent,
+    _PlannerScale,
+    _TrajectoryEvaluationCache,
+    _SolverProfilingState,
+    _inequality_constraints,
+    _initial_guess,
+    _initial_tod_guess,
+    _unpack,
+    plan_coupled_descent,
 )
 from simap.longitudinal_profiles import ConstraintEnvelope, ScalarProfile
+from simap.path_geometry import ReferencePath
 from simap.weather import ConstantWeather
 
 
@@ -58,7 +67,7 @@ class SmoothBackend:
         return idle, float(25_000.0 * phase_scale)
 
 
-def build_test_request() -> LongitudinalPlanRequest:
+def build_test_request() -> CoupledDescentPlanRequest:
     mode = ModeConfig(
         name="clean",
         tau_v_s=20.0,
@@ -119,23 +128,28 @@ def build_test_request() -> LongitudinalPlanRequest:
             y=np.asarray([1.6, 1.6], dtype=float),
         ),
     )
-    return LongitudinalPlanRequest(
+    reference_path = ReferencePath.from_geographic(
+        lat_deg=np.asarray([0.0, 0.0], dtype=float),
+        lon_deg=np.asarray([0.70, 0.0], dtype=float),
+    )
+    return CoupledDescentPlanRequest(
         cfg=cfg,
         perf=SmoothBackend(),
         threshold=threshold,
         upstream=upstream,
         constraints=envelope,
+        reference_path=reference_path,
         weather=ConstantWeather(),
         optimizer=OptimizerConfig(num_nodes=9, maxiter=80, verbose=0),
         initial_tod_guess_m=48_000.0,
     )
 
 
-class LongitudinalPlannerTests(unittest.TestCase):
+class CoupledPlannerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.request = build_test_request()
-        cls.plan = plan_longitudinal_descent(cls.request)
+        cls.plan = plan_coupled_descent(cls.request)
 
     def test_mode_gate_selection_is_deterministic(self) -> None:
         cfg = self.request.cfg
@@ -148,25 +162,47 @@ class LongitudinalPlannerTests(unittest.TestCase):
 
         self.assertAlmostEqual(plan.h_m[0], request.threshold.h_m, delta=1e-2)
         self.assertAlmostEqual(plan.gamma_rad[0], request.threshold.gamma_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.cross_track_m[0], request.threshold_lateral.cross_track_m, delta=1e-2)
+        self.assertAlmostEqual(plan.heading_error_rad[0], request.threshold_lateral.heading_error_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.phi_rad[0], request.threshold_lateral.bank_rad, delta=1e-4)
         self.assertAlmostEqual(plan.h_m[-1], request.upstream.h_m, delta=1e-2)
         self.assertAlmostEqual(plan.gamma_rad[-1], request.upstream.gamma_rad, delta=1e-3)
+        self.assertAlmostEqual(plan.cross_track_m[-1], request.upstream_lateral.cross_track_m, delta=1e-2)
+        self.assertAlmostEqual(plan.heading_error_rad[-1], request.upstream_lateral.heading_error_rad, delta=1e-4)
+        self.assertAlmostEqual(plan.phi_rad[-1], request.upstream_lateral.bank_rad, delta=1e-4)
         self.assertEqual(len(plan.s_m), self.request.optimizer.num_nodes)
         self.assertTrue(np.all(np.isfinite(plan.h_m)))
         self.assertTrue(np.all(np.isfinite(plan.v_tas_mps)))
         self.assertTrue(np.all(np.isfinite(plan.v_cas_mps)))
         self.assertTrue(np.all(np.isfinite(plan.gamma_rad)))
         self.assertTrue(np.all(np.isfinite(plan.thrust_n)))
+        self.assertTrue(np.all(np.isfinite(plan.cross_track_m)))
+        self.assertTrue(np.all(np.isfinite(plan.heading_error_rad)))
+        self.assertTrue(np.all(np.isfinite(plan.phi_rad)))
+        self.assertTrue(np.all(np.isfinite(plan.roll_rate_rps)))
         self.assertTrue(np.all(plan.v_tas_mps > 0.0))
         self.assertTrue(np.all(plan.v_cas_mps > 0.0))
+        self.assertGreater(np.min(plan.alongtrack_speed_mps), 0.0)
         self.assertLess(plan.constraint_slack, 5.0)
+
+    def test_exact_upstream_cas_boundary_is_enforced(self) -> None:
+        request = replace(
+            self.request,
+            upstream=replace(self.request.upstream, cas_window_mps=(95.0, 95.0)),
+            optimizer=replace(self.request.optimizer, maxiter=100),
+        )
+        plan = plan_coupled_descent(request)
+
+        self.assertAlmostEqual(plan.v_cas_mps[-1], 95.0, delta=1e-4)
 
     def test_solver_is_deterministic_for_fixed_boundaries(self) -> None:
         plan_a = self.plan
-        plan_b = plan_longitudinal_descent(self.request)
+        plan_b = plan_coupled_descent(self.request)
 
         self.assertAlmostEqual(plan_a.tod_m, plan_b.tod_m, delta=1e-6)
         self.assertTrue(np.allclose(plan_a.h_m, plan_b.h_m))
         self.assertTrue(np.allclose(plan_a.v_tas_mps, plan_b.v_tas_mps))
+        self.assertTrue(np.allclose(plan_a.cross_track_m, plan_b.cross_track_m))
 
     def test_replay_and_collocation_diagnostics_are_reported(self) -> None:
         plan = self.plan
@@ -191,6 +227,133 @@ class LongitudinalPlannerTests(unittest.TestCase):
         self.assertGreater(profile.equality_time_s, 0.0)
         self.assertGreater(profile.inequality_time_s, 0.0)
         self.assertGreater(profile.trajectory_evaluations, 0)
+
+    def test_idle_thrust_margin_initial_guess_starts_inside_band(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(self.request.optimizer, idle_thrust_margin_fraction=0.03),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        _, _, _, _, _, _, _, thrust_n, _, tod_m, _ = _unpack(z0, request.optimizer.num_nodes)
+        evaluation = _TrajectoryEvaluationCache(
+            request=request,
+            profiling=_SolverProfilingState(),
+        ).evaluate(z0)
+
+        thrust_lower, thrust_upper = evaluation.thrust_bounds_backend
+        idle_upper = evaluation.idle_thrust_n + 0.03 * np.maximum(thrust_upper - evaluation.idle_thrust_n, 0.0)
+        self.assertAlmostEqual(tod_m, evaluation.tod_m)
+        self.assertTrue(np.all(thrust_n >= evaluation.idle_thrust_n - 1e-9))
+        self.assertTrue(np.all(thrust_n <= idle_upper + 1e-9))
+        self.assertTrue(np.all(thrust_n >= thrust_lower - 1e-9))
+
+    def test_idle_thrust_margin_is_not_relaxed_by_generic_slack(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(self.request.optimizer, idle_thrust_margin_fraction=0.03),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        z_bad = np.array(z0, dtype=float, copy=True)
+        num_nodes = request.optimizer.num_nodes
+        thrust_start = 7 * num_nodes
+        slack_col = 9 * num_nodes + 1
+        cache = _TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState())
+        evaluation = cache.evaluate(z0)
+        z_bad[thrust_start] = evaluation.idle_thrust_n[0] - 10.0
+        z_bad[thrust_start + 1] = evaluation.idle_thrust_n[1] + 0.03 * (
+            evaluation.thrust_bounds_backend[1][1] - evaluation.idle_thrust_n[1]
+        ) + 10.0
+        z_bad[slack_col] = 5.0
+
+        residual = _inequality_constraints(
+            z_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        idle_lower_start = 11 * num_nodes
+        idle_upper_start = idle_lower_start + num_nodes
+
+        self.assertLess(residual[idle_lower_start], 0.0)
+        self.assertLess(residual[idle_upper_start + 1], 0.0)
+
+    def test_realism_constraints_report_direct_violations(self) -> None:
+        request = replace(
+            self.request,
+            optimizer=replace(
+                self.request.optimizer,
+                enforce_monotonic_descent=True,
+                gamma_gradient_limit_deg_per_km=0.1,
+                gamma_curvature_limit_deg_per_km2=0.1,
+            ),
+        )
+        scale = _PlannerScale.from_request(request)
+        threshold_v_tas = 70.0
+        max_tod_m = float(min(request.constraints.s_m[-1], request.reference_path.total_length_m))
+        z0 = _initial_guess(
+            request=request,
+            threshold_v_tas=threshold_v_tas,
+            initial_tod_guess_m=_initial_tod_guess(
+                request,
+                threshold_v_tas=threshold_v_tas,
+                max_tod_m=max_tod_m,
+            ),
+            scale=scale,
+        )
+        num_nodes = request.optimizer.num_nodes
+        gamma_start = 6 * num_nodes
+        residual_start = 14 * num_nodes
+
+        z_descent_bad = np.array(z0, dtype=float, copy=True)
+        z_descent_bad[1] = z_descent_bad[0] - 10.0
+        descent_residual = _inequality_constraints(
+            z_descent_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        self.assertLess(descent_residual[residual_start], 0.0)
+
+        z_gamma_bad = np.array(z0, dtype=float, copy=True)
+        z_gamma_bad[gamma_start + 1] = z_gamma_bad[gamma_start] + np.deg2rad(20.0)
+        gamma_residual = _inequality_constraints(
+            z_gamma_bad,
+            request=request,
+            scale=scale,
+            evaluation_cache=_TrajectoryEvaluationCache(request=request, profiling=_SolverProfilingState()),
+        )
+        gamma_gradient_upper_start = residual_start + num_nodes - 1
+        gamma_curvature_lower_start = (
+            gamma_gradient_upper_start
+            + 2 * (num_nodes - 1)
+            + (num_nodes - 2)
+        )
+        self.assertLess(gamma_residual[gamma_gradient_upper_start], 0.0)
+        self.assertLess(gamma_residual[gamma_curvature_lower_start], 0.0)
 
 
 if __name__ == "__main__":

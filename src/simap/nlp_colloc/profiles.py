@@ -4,9 +4,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .units import km_to_m
-
-
 @dataclass(frozen=True)
 class ScalarProfile:
     s_m: np.ndarray
@@ -185,9 +182,9 @@ class ConstraintEnvelope:
 
 def build_speed_schedule_from_wrap(
     wrap,
-    s_nodes_km: tuple[float, ...] = (0.0, 8.0, 30.0, 60.0),
+    s_nodes_km: tuple[float, ...] = (0.0, 12.0, 35.0, 60.0),
 ) -> ScalarProfile:
-    from .openap_adapter import wrap_default
+    from ..openap_adapter import wrap_default
 
     v_des_mps = wrap_default(wrap, "descent_const_vcas")
     v_final_mps = wrap_default(wrap, "finalapp_vcas")
@@ -198,3 +195,6 @@ def build_speed_schedule_from_wrap(
     if len(s_km) != len(v_mps):
         raise ValueError("s_nodes_km must provide four schedule anchors")
     return ScalarProfile(s_m=s_km * 1_000.0, y=v_mps)
+
+
+__all__ = ["ConstraintEnvelope", "ScalarProfile", "build_speed_schedule_from_wrap"]
