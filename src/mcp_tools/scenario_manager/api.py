@@ -37,6 +37,11 @@ def create_app() -> FastAPI:
         manager: ScenarioManager = request.app.state.scenario_manager
         return manager.arrival_schedule()
 
+    @app.get("/diff", response_model=list[dict[str, object]])
+    def diff(request: Request) -> list[dict[str, object]]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        return manager.intervention_diff()
+
     return app
 
 

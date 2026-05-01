@@ -31,6 +31,7 @@ dependencies = [
 [project.scripts]
 adsb-trajectory-compress = "scenario.trajectory_compressor.cli:main"
 scenario-manager-api = "mcp_tools.scenario_manager.server:main"
+scenario-manager-precompute-artifact = "mcp_tools.scenario_manager.precompute_artifact:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
