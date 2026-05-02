@@ -26,8 +26,8 @@ from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
 from simap.units import m_to_ft, mps_to_kts
 
 
-DEFAULT_EVENTS_PATH = Path("data/adsb/catalogs/2025-04-01_landings_and_departures.csv")
-DEFAULT_FIX_SEQUENCES_PATH = Path("data/adsb/catalogs/2025-04-01_fix_sequences.csv")
+DEFAULT_EVENTS_PATH = Path("data/adsb/catalogs/2026-04-01_landings_and_departures.csv")
+DEFAULT_FIX_SEQUENCES_PATH = Path("data/adsb/catalogs/2026-04-01_fix_sequences.csv")
 DEFAULT_RAW_ADSB_DIR = Path("data/adsb/raw")
 DEFAULT_FIXES_CSV = Path("data/kdfw_procs/airport_related_fixes.csv")
 DEFAULT_OUTPUT_DIR = Path("data/artifacts")
