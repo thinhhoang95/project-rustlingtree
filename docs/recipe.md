@@ -20,12 +20,14 @@ Then you can run the script `src/scenario/demand_opensky/extract_departures_and_
 ### ADS-B Data Processing
 Generate the arrival, departure catalogs, and compress data for the rustlingleaves client.
 
+### Arrival and Departure Catalog
 python src/scenario/demand_opensky/extract_departures_and_arrivals.py \
   --from-datetime "2025-04-01T00:00:00" \
   --to-datetime "2025-04-01T23:59:59" \
   --timezone "America/Chicago" \
   --split-gap-seconds 1500
 
-This step writes the derived landings/departures catalog, the fix-sequence catalog, and the authoritative departures/arrivals catalog into `data/adsb/catalogs`.
+This step writes the derived landings/departures catalog, the fix-sequence catalog, and the authoritative departures/arrivals catalog into `data/adsb/catalogs`. You might want to check that the derived departure/arrival catalog should not miss too many flights (possibly less than 1-2%) of the OpenSky's authoritative catalog in the console output.
 
+### Compress the Data
 python src/scenario/trajectory_compressor/cli.py --landings-departures-catalog
