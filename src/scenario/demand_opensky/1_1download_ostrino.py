@@ -3,14 +3,18 @@ import datetime
 import requests
 import os
 from multiprocessing import Pool, cpu_count, Value, Manager
+from zoneinfo import ZoneInfo
+from rich.console import Console
+
 
 # jwt = 'eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJ0SVIwSDB0bmNEZTlKYmp4dFctWEtqZ0RYSWExNnR5eU5DWHJxUzJQNkRjIn0.eyJleHAiOjE3MjUzNTY4NjUsImlhdCI6MTcyNTM0OTY2NSwianRpIjoiMGNiYzYxZTEtNDI2Mi00MDA3LTg5MTQtZTgxN2EzNjRmM2M5IiwiaXNzIjoiaHR0cHM6Ly9hdXRoLm9wZW5za3ktbmV0d29yay5vcmcvYXV0aC9yZWFsbXMvb3BlbnNreS1uZXR3b3JrIiwiYXVkIjoiYWNjb3VudCIsInN1YiI6IjEzYmYwYmQwLTMzOTktNDA2NS04ZGFiLTIyYzI0Njg1N2E4MSIsInR5cCI6IkJlYXJlciIsImF6cCI6InRyaW5vLWNsaWVudCIsInNlc3Npb25fc3RhdGUiOiIxZjQ2MzhhMy0wYjk4LTRmYzctOWNlOC1jZDBiOWJiMGI1N2UiLCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsib2ZmbGluZV9hY2Nlc3MiLCJ1bWFfYXV0aG9yaXphdGlvbiIsImRlZmF1bHQtcm9sZXMtb3BlbnNreS1uZXR3b3JrIl19LCJyZXNvdXJjZV9hY2Nlc3MiOnsiYWNjb3VudCI6eyJyb2xlcyI6WyJtYW5hZ2UtYWNjb3VudCIsIm1hbmFnZS1hY2NvdW50LWxpbmtzIiwidmlldy1wcm9maWxlIl19fSwic2NvcGUiOiJwcm9maWxlIGdyb3VwcyBlbWFpbCIsInNpZCI6IjFmNDYzOGEzLTBiOTgtNGZjNy05Y2U4LWNkMGI5YmIwYjU3ZSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJuYW1lIjoiVGhpbmggSG9hbmciLCJncm91cHMiOlsiL29wZW5za3kvdHJpbm8vcmVhZG9ubHkiXSwicHJlZmVycmVkX3VzZXJuYW1lIjoidGhpbmhob2FuZ2RpbmgiLCJnaXZlbl9uYW1lIjoiVGhpbmgiLCJmYW1pbHlfbmFtZSI6IkhvYW5nIiwiZW1haWwiOiJ0aGluaC5ob2FuZ2RpbmhAZW5hYy5mciJ9.GeiFz_Num5kgHA6BwosqilwlKUmdpi8fKsaPIO06PotBWLmCkrl7Y6g-os60xyILuvd31W1T-pT0-llwTPyO1PBs0VsCsOPa1mgrRyFE5uAa-QFGV_MuaLcd6BGeTR6Ss9E2vrJYcmNu630uKYu3UJOYjeCA0whkUccAUKiBiGrQohwlec0Ryz1I67rEruENt6sgV3urrywURJ8BDtJPbMnqdrG_FpMgqaWl83PEsN2aypL9Oq36fOOT68gZONgvx5s1SU6SUIDKzEVRL_V8JhBzDaY8fWJNuHaZYAsPTyUoOV_ChUSIeyvek5nm8BFsH8fjc-tUvfSXXgpZUd5jpg'
 
 MASTER_DATASET_PREFIX = 'data/adsb'
+LOCAL_TZ = ZoneInfo("America/Chicago")
 
 # # Resolve the Trino CLI path relative to this file so we don't depend on $PATH.
 # # This assumes the `trino` executable lives at the project root alongside `trino.jar`.
-TRINO_BIN = "/Volumes/CrucialX/project-rustlingtree/trino"
+TRINO_BIN = "/mnt/d/project-rustlingtree/trino"
 
 print("Resolved Trino CLI path: ", TRINO_BIN)
 
@@ -63,10 +67,11 @@ def download_for_timestamp(timestamp):
         else:
             print(f"WARNING: Legacy file {timestamp}.csv exists but is empty (size=0). Will re-download.")
     
-    timestamp_dt = datetime.datetime.fromtimestamp(int(timestamp), tz=datetime.timezone.utc)
+    timestamp_dt_utc = datetime.datetime.fromtimestamp(int(timestamp), tz=datetime.timezone.utc)
+    timestamp_dt = timestamp_dt_utc.astimezone(LOCAL_TZ)
     print("Current timestamp: ", int(timestamp))
-    print("Current datetime: ", timestamp_dt.strftime('%Y-%m-%d %H:%M:%S'))
-    # Get the date of the timestamp in YYYY-MM-DD format, always in UTC.
+    print(f"Current datetime ({LOCAL_TZ.key}): ", timestamp_dt.strftime('%Y-%m-%d %H:%M:%S'))
+    # Get the date of the timestamp in YYYY-MM-DD format in America/Chicago.
     date = timestamp_dt.strftime('%Y-%m-%d')
 
     # Create the date folder if it doesn't exist
@@ -146,21 +151,24 @@ def execute_trino_commands(from_datetime, to_datetime):
     """
     Executes Trino shell commands in parallel for each hour within the specified datetime range.
     """
-    # Generate UTC timestamps directly so we never depend on pandas' integer view
-    # or the local machine timezone.
+    # Normalize the requested range to America/Chicago so the date/hour selection
+    # matches the intended local wall-clock window.
     if from_datetime.tzinfo is None:
-        from_datetime = from_datetime.replace(tzinfo=datetime.timezone.utc)
+        from_datetime = from_datetime.replace(tzinfo=LOCAL_TZ)
     else:
-        from_datetime = from_datetime.astimezone(datetime.timezone.utc)
+        from_datetime = from_datetime.astimezone(LOCAL_TZ)
 
     if to_datetime.tzinfo is None:
-        to_datetime = to_datetime.replace(tzinfo=datetime.timezone.utc)
+        to_datetime = to_datetime.replace(tzinfo=LOCAL_TZ)
     else:
-        to_datetime = to_datetime.astimezone(datetime.timezone.utc)
+        to_datetime = to_datetime.astimezone(LOCAL_TZ)
+
+    utc_from_datetime = from_datetime.astimezone(datetime.timezone.utc)
+    utc_to_datetime = to_datetime.astimezone(datetime.timezone.utc)
 
     hourly_timestamps = []
-    current_datetime = from_datetime
-    while current_datetime <= to_datetime:
+    current_datetime = utc_from_datetime
+    while current_datetime <= utc_to_datetime:
         hourly_timestamps.append(int(current_datetime.timestamp()))
         current_datetime += datetime.timedelta(hours=1)
     
@@ -184,8 +192,12 @@ def execute_trino_commands(from_datetime, to_datetime):
 
 
 if __name__ == "__main__":
-    from_datetime = datetime.datetime(2025, 4, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    to_datetime = datetime.datetime(2025, 4, 1, 23, 0, 0, tzinfo=datetime.timezone.utc)
+    console = Console()
+    
+    from_datetime = datetime.datetime(2026, 4, 1, 0, 0, 0, tzinfo=LOCAL_TZ)
+    to_datetime = datetime.datetime(2026, 4, 1, 23, 59, 59, tzinfo=LOCAL_TZ)
+    console.print(f"[yellow] Local timezone: {LOCAL_TZ.key}")
+    console.print(f"[yellow underline] Data range from {from_datetime.strftime('%Y-%m-%d %H:%M:%S %z')} to {to_datetime.strftime('%Y-%m-%d %H:%M:%S %z')}")
 
     # Create the MASTER download folder
     os.makedirs(MASTER_DATASET_PREFIX, exist_ok=True)

@@ -7,12 +7,12 @@ import numpy as np
 import pandas as pd
 
 from scenario.demand_opensky.adsb_catalog_common import (
+    DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M,
     FIX_SEQUENCE_DELIMITER,
     GROUND_RELEVANT_ALTITUDE_M,
     ISO_DATE_FORMAT,
     ThresholdCandidate,
     haversine_distance_m,
-    nearest_index_in_slice,
 )
 
 
@@ -35,6 +35,7 @@ class ThresholdEventRecord(TypedDict):
     comparison_time_utc: str
     comparison_geoaltitude_m: float
     altitude_delta_m: float
+    distance_delta_m: float
 
 
 class RunwayThresholdRecord(TypedDict):
@@ -74,6 +75,7 @@ def build_event_record(
         "comparison_time_utc": pd.to_datetime(comparison_time, unit="s", utc=True).strftime(ISO_DATE_FORMAT),
         "comparison_geoaltitude_m": float(comparison["geoaltitude"]),
         "altitude_delta_m": float(candidate.altitude_delta_m),
+        "distance_delta_m": float(candidate.distance_delta_m),
     }
 
 
@@ -81,8 +83,8 @@ def is_better_candidate(candidate: ThresholdCandidate, current_best: ThresholdCa
     if current_best is None:
         return True
 
-    candidate_score = (abs(candidate.altitude_delta_m), -candidate.event_distance_m)
-    current_score = (abs(current_best.altitude_delta_m), -current_best.event_distance_m)
+    candidate_score = (abs(candidate.distance_delta_m), -candidate.event_distance_m)
+    current_score = (abs(current_best.distance_delta_m), -current_best.event_distance_m)
     return candidate_score > current_score
 
 
@@ -93,25 +95,25 @@ def classify_flight_track(
     lookaround_seconds: int,
     min_altitude_change_m: float,
     date_label: str,
-    ) -> tuple[str, ThresholdEventRecord | None]:
-    valid = flight.loc[
+    min_proximity_distance_change_m: float = DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M,
+) -> tuple[str, ThresholdEventRecord | None]:
+    _ = (lookaround_seconds, min_altitude_change_m)
+    positions = flight.loc[
         flight["time"].notna()
         & flight["lat"].notna()
         & flight["lon"].notna()
-        & flight["geoaltitude"].notna()
     ].reset_index(drop=True)
 
-    if valid.empty:
+    if positions.empty:
         return "unclassified", None
 
-    times = valid["time"].to_numpy(dtype=float)
-    lats = valid["lat"].to_numpy(dtype=float)
-    lons = valid["lon"].to_numpy(dtype=float)
-    altitudes = valid["geoaltitude"].to_numpy(dtype=float)
+    lats = positions["lat"].to_numpy(dtype=float)
+    lons = positions["lon"].to_numpy(dtype=float)
+    altitudes = pd.to_numeric(positions["geoaltitude"], errors="coerce").to_numpy(dtype=float)
 
     best_candidate: ThresholdCandidate | None = None
     best_threshold_row: RunwayThresholdRecord | None = None
-    saw_ground_relevant_threshold = False
+    saw_proximity_threshold = False
 
     threshold_rows = cast(list[RunwayThresholdRecord], thresholds.to_dict("records"))
     for threshold_row in threshold_rows:
@@ -121,71 +123,52 @@ def classify_flight_track(
             float(threshold_row["threshold_lat"]),
             float(threshold_row["threshold_lon"]),
         )
-        nearby_indices = (distances <= runway_radius_m) & (altitudes < GROUND_RELEVANT_ALTITUDE_M)
-        if not nearby_indices.any():
+        proximity_indices = (distances <= runway_radius_m) & (altitudes <= GROUND_RELEVANT_ALTITUDE_M)
+        if not proximity_indices.any():
             continue
 
-        saw_ground_relevant_threshold = True
-        matching_indices = np.flatnonzero(nearby_indices)
-        first_index = int(matching_indices[0])
-        last_index = int(matching_indices[-1])
+        saw_proximity_threshold = True
+        matching_indices = np.flatnonzero(proximity_indices)
+        event_index = int(matching_indices[0])
+        event_distance = float(distances[event_index])
+        approach_evidence_m = float(distances[0] - event_distance)
+        departure_evidence_m = float(distances[-1] - event_distance)
 
-        if first_index > 0:
-            comparison_index = nearest_index_in_slice(
-                times,
-                times[first_index] - lookaround_seconds,
-                0,
-                first_index,
-            )
+        if max(approach_evidence_m, departure_evidence_m) < min_proximity_distance_change_m:
+            continue
+
+        if approach_evidence_m >= departure_evidence_m:
+            operation = "arrival"
+            comparison_index = 0
+            distance_delta = -approach_evidence_m
+            altitude_delta = float(altitudes[event_index] - altitudes[comparison_index])
         else:
-            comparison_index = first_index
+            operation = "departure"
+            comparison_index = len(positions) - 1
+            distance_delta = departure_evidence_m
+            altitude_delta = float(altitudes[comparison_index] - altitudes[event_index])
 
-        arrival_delta = altitudes[first_index] - altitudes[comparison_index]
-        if comparison_index != first_index and arrival_delta <= -min_altitude_change_m:
-            candidate = ThresholdCandidate(
-                operation="arrival",
-                runway=str(threshold_row["runway"]),
-                event_index=first_index,
-                comparison_index=comparison_index,
-                event_distance_m=float(distances[first_index]),
-                altitude_delta_m=float(arrival_delta),
-            )
-            if is_better_candidate(candidate, best_candidate):
-                best_candidate = candidate
-                best_threshold_row = threshold_row
-
-        if last_index < len(valid) - 1:
-            comparison_index = nearest_index_in_slice(
-                times,
-                times[last_index] + lookaround_seconds,
-                last_index + 1,
-                len(valid),
-            )
-        else:
-            comparison_index = last_index
-
-        departure_delta = altitudes[comparison_index] - altitudes[last_index]
-        if comparison_index != last_index and departure_delta >= min_altitude_change_m:
-            candidate = ThresholdCandidate(
-                operation="departure",
-                runway=str(threshold_row["runway"]),
-                event_index=last_index,
-                comparison_index=comparison_index,
-                event_distance_m=float(distances[last_index]),
-                altitude_delta_m=float(departure_delta),
-            )
-            if is_better_candidate(candidate, best_candidate):
-                best_candidate = candidate
-                best_threshold_row = threshold_row
+        candidate = ThresholdCandidate(
+            operation=operation,
+            runway=str(threshold_row["runway"]),
+            event_index=event_index,
+            comparison_index=comparison_index,
+            event_distance_m=event_distance,
+            altitude_delta_m=altitude_delta,
+            distance_delta_m=distance_delta,
+        )
+        if is_better_candidate(candidate, best_candidate):
+            best_candidate = candidate
+            best_threshold_row = threshold_row
 
     if best_candidate is None:
-        if saw_ground_relevant_threshold:
+        if saw_proximity_threshold:
             return "unclassified", None
         return "overflight", None
 
     assert best_threshold_row is not None
     return best_candidate.operation, build_event_record(
-        valid,
+        positions,
         best_candidate.operation,
         best_candidate,
         best_threshold_row,
@@ -275,6 +258,7 @@ def process_tracks(
     min_altitude_change_m: float,
     split_gap_seconds: int,
     date_label: str,
+    min_proximity_distance_change_m: float = DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Counter[str]]:
     event_records: list[ThresholdEventRecord] = []
     fix_records: list[dict[str, object]] = []
@@ -289,6 +273,7 @@ def process_tracks(
                 lookaround_seconds=lookaround_seconds,
                 min_altitude_change_m=min_altitude_change_m,
                 date_label=date_label,
+                min_proximity_distance_change_m=min_proximity_distance_change_m,
             )
             classification_counts[classification] += 1
             if event_record is not None:

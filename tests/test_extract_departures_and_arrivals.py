@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+from rich.console import Console
 
+from scenario.demand_opensky.adsb_authoritative_departures_and_arrivals_catalog import build_output_path
+from scenario.demand_opensky.adsb_authoritative_departures_and_arrivals_catalog import _read_catalog_csv
+from scenario.demand_opensky.adsb_authoritative_departures_and_arrivals_catalog import download_authoritative_departures_and_arrivals_catalog
 from scenario.demand_opensky.adsb_catalog_io import (
     build_flight_id,
     list_input_csv_files,
@@ -18,6 +25,7 @@ from scenario.demand_opensky.adsb_catalog_processing import (
     process_tracks,
     split_flight_track,
 )
+from scenario.demand_opensky.extract_departures_and_arrivals import _report_catalog_differences
 
 
 THRESHOLDS = pd.DataFrame(
@@ -122,22 +130,47 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(classification, "departure")
         assert event is not None
         self.assertEqual(event["runway"], "17C")
-        self.assertEqual(event["event_time"], 60)
+        self.assertEqual(event["event_time"], 0)
         self.assertGreater(float(event["altitude_delta_m"]), 0.0)
+        self.assertGreater(float(event["distance_delta_m"]), 0.0)
 
-    def test_classify_flight_track_returns_overflight_when_not_ground_relevant(self) -> None:
+    def test_classify_flight_track_uses_wide_low_altitude_proximity(self) -> None:
         flight = make_flight(
             [
-                {"time": 0, "icao24": "ghi789", "lat": 33.10, "lon": -97.20, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 2_000.0},
-                {"time": 60, "icao24": "ghi789", "lat": 33.00, "lon": -97.10, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 2_100.0},
-                {"time": 120, "icao24": "ghi789", "lat": 32.95, "lon": -97.00, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 2_300.0},
+                {"time": 0, "icao24": "abc124", "lat": 33.20, "lon": -97.20, "heading": 180.0, "callsign": "AAL101", "geoaltitude": 3_600.0},
+                {"time": 60, "icao24": "abc124", "lat": 32.955, "lon": -97.0260, "heading": 180.0, "callsign": "AAL101", "geoaltitude": 2_600.0},
+                {"time": 120, "icao24": "abc124", "lat": 32.930, "lon": -97.0260, "heading": 180.0, "callsign": "AAL101", "geoaltitude": 1_500.0},
+                {"time": 180, "icao24": "abc124", "lat": 32.916, "lon": -97.0260, "heading": 180.0, "callsign": "AAL101", "geoaltitude": float("nan")},
             ]
         )
 
         classification, event = classify_flight_track(
             flight=flight,
             thresholds=THRESHOLDS,
-            runway_radius_m=1_000.0,
+            runway_radius_m=5_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification, "arrival")
+        assert event is not None
+        self.assertEqual(event["event_time"], 60)
+        self.assertLess(float(event["distance_delta_m"]), 0.0)
+
+    def test_classify_flight_track_returns_overflight_when_not_ground_relevant(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "ghi789", "lat": 33.10, "lon": -97.20, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 7_000.0},
+                {"time": 60, "icao24": "ghi789", "lat": 32.94, "lon": -97.0260, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 6_500.0},
+                {"time": 120, "icao24": "ghi789", "lat": 32.92, "lon": -97.0260, "heading": 90.0, "callsign": "UAL300", "geoaltitude": 6_000.0},
+            ]
+        )
+
+        classification, event = classify_flight_track(
+            flight=flight,
+            thresholds=THRESHOLDS,
+            runway_radius_m=5_000.0,
             lookaround_seconds=300,
             min_altitude_change_m=75.0,
             date_label="2025-04-01",
@@ -228,6 +261,103 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(events["flight_id"].tolist(), ["AAL1061M1abc123", "AAL1061M2abc123"])
         self.assertEqual(events["operation"].tolist(), ["departure", "arrival"])
         self.assertEqual(fix_sequences["flight_id"].tolist(), ["AAL1061M1abc123", "AAL1061M2abc123"])
+
+    def test_build_output_path_uses_local_range_and_airport(self) -> None:
+        from_datetime = pd.Timestamp("2025-04-01T00:00:00")
+        to_datetime = pd.Timestamp("2025-04-01T23:59:59")
+
+        output_path = build_output_path(
+            Path("data/adsb/catalogs"),
+            from_datetime.to_pydatetime(),
+            to_datetime.to_pydatetime(),
+            ZoneInfo("America/Chicago"),
+            "KDFW",
+        )
+
+        self.assertEqual(output_path.name, "2025-04-01_kdfw_authoritative_departures_and_arrivals.csv")
+
+    def test_report_catalog_differences_shows_both_sides(self) -> None:
+        derived = pd.DataFrame(
+            [
+                {"flight_id": "DER1abc001", "callsign": "DER1", "icao24": "abc001", "operation": "arrival"},
+                {"flight_id": "DER2abc002", "callsign": "DER2", "icao24": "abc002", "operation": "departure"},
+            ]
+        )
+        authoritative = pd.DataFrame(
+            [
+                {"flight_type": "arrival", "callsign": "DER1", "icao24": "abc001", "flight_id": "DER1abc001"},
+                {"flight_type": "departure", "callsign": "AUTH1", "icao24": "def001", "flight_id": "AUTH1def001"},
+            ]
+        )
+
+        buffer = io.StringIO()
+        console = Console(file=buffer, force_terminal=True, width=100)
+
+        _report_catalog_differences(derived, authoritative, console)
+        output = buffer.getvalue()
+
+        self.assertIn("Derived only", output)
+        self.assertIn("Authoritative only", output)
+        self.assertIn("DER2abc002", output)
+        self.assertIn("AUTH1def001", output)
+
+    def test_read_catalog_csv_handles_headerless_trino_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "catalog.csv"
+            path.write_text(
+                "arrival,AAL100,abc123,100\n"
+                "departure,DAL200,def456,200\n",
+                encoding="utf-8",
+            )
+
+            frame = _read_catalog_csv(path)
+
+            self.assertEqual(frame.columns.tolist(), ["flight_type", "callsign", "icao24", "event_time"])
+            self.assertEqual(frame["callsign"].tolist(), ["AAL100", "DAL200"])
+
+    def test_download_authoritative_catalog_uses_single_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "catalogs"
+            output_dir.mkdir()
+            output_path = output_dir / "authoritative.csv"
+            inside_ts = int(pd.Timestamp("2025-04-01T05:00:59Z").timestamp())
+            outside_ts = int(pd.Timestamp("2025-03-31T23:00:00Z").timestamp())
+            departure_ts = int(pd.Timestamp("2025-04-01T12:00:00Z").timestamp())
+
+            def fake_run_query(query: str, path: Path, trino_bin: str, token: str) -> None:
+                self.assertIn("day BETWEEN", query)
+                self.assertIn("estarrivalairport", query)
+                self.assertIn("estdepartureairport", query)
+                path.write_text(
+                    "flight_type,callsign,icao24,event_time\n"
+                    f"arrival,AAL100,abc123,{inside_ts}\n"
+                    f"arrival,OUTSIDE1,abc999,{outside_ts}\n"
+                    f"departure,DAL200,def456,{departure_ts}\n",
+                    encoding="utf-8",
+                )
+
+            with patch(
+                "scenario.demand_opensky.adsb_authoritative_departures_and_arrivals_catalog.get_jwt",
+                return_value="token",
+            ), patch(
+                "scenario.demand_opensky.adsb_authoritative_departures_and_arrivals_catalog.run_query",
+                side_effect=fake_run_query,
+            ) as run_query_mock:
+                result_path = download_authoritative_departures_and_arrivals_catalog(
+                    from_datetime=pd.Timestamp("2025-04-01T00:00:00", tz="America/Chicago").to_pydatetime(),
+                    to_datetime=pd.Timestamp("2025-04-01T23:59:59", tz="America/Chicago").to_pydatetime(),
+                    timezone=ZoneInfo("America/Chicago"),
+                    output_dir=output_dir,
+                    output_path=output_path,
+                    console=Console(file=io.StringIO(), force_terminal=True, width=100),
+                )
+
+            self.assertEqual(result_path, output_path)
+            self.assertEqual(run_query_mock.call_count, 1)
+            written = pd.read_csv(output_path)
+            self.assertEqual(written["flight_id"].tolist(), ["AAL100abc123", "DAL200def456"])
+            self.assertNotIn("OUTSIDE1abc999", written["flight_id"].tolist())
+            self.assertIn("event_time_utc", written.columns)
 
 
 if __name__ == "__main__":
