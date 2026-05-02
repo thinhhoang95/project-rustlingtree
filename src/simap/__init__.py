@@ -23,6 +23,13 @@ from .fms import (
     simulate_fms_descent,
     simulate_hold_aware_fms_descent,
 )
+from .fms_bichannel import (
+    FMSBiChannelRequest,
+    FMSBiChannelResult,
+    FMSBiChannelState,
+    plan_fms_bichannel,
+    simulate_fms_bichannel,
+)
 from .idle_thrust_fallback import plan_idle_thrust_fallback
 from .lateral_dynamics import LateralGuidanceConfig
 from .nlp_colloc import (
@@ -73,6 +80,9 @@ __all__ = [
     "ConstraintEnvelope",
     "EffectivePolarBackend",
     "FMSPIConfig",
+    "FMSBiChannelRequest",
+    "FMSBiChannelResult",
+    "FMSBiChannelState",
     "FMSRequest",
     "FMSResult",
     "FMSSpeedTargets",
@@ -111,6 +121,7 @@ __all__ = [
     "mode_for_s",
     "plan_coupled_descent",
     "plan_fms_descent",
+    "plan_fms_bichannel",
     "plan_hold_aware_fms_descent",
     "plan_full_route_longitudinal_descent",
     "plan_idle_thrust_fallback",
@@ -124,6 +135,7 @@ __all__ = [
     "plot_thrust_response",
     "quasi_steady_cl",
     "simulate_fms_descent",
+    "simulate_fms_bichannel",
     "simulate_hold_aware_fms_descent",
     "simulate_plan",
     "stall_margin_cas_mps",

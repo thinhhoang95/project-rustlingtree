@@ -7,11 +7,12 @@ import numpy as np
 
 RAW_COLUMNS = ["time", "icao24", "lat", "lon", "heading", "callsign", "geoaltitude"]
 FIX_SEQUENCE_DELIMITER = ">"
-GROUND_RELEVANT_ALTITUDE_M = 500.0
-DEFAULT_RUNWAY_RADIUS_M = 1_000.0
+GROUND_RELEVANT_ALTITUDE_M = 10_000.0 * 0.3048
+DEFAULT_RUNWAY_RADIUS_M = 5_000.0
 DEFAULT_FIX_RADIUS_M = 2_000.0
 DEFAULT_LOOKAROUND_SECONDS = 300
 DEFAULT_MIN_ALTITUDE_CHANGE_M = 75.0
+DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M = 500.0
 ISO_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -24,6 +25,7 @@ class ThresholdCandidate:
     comparison_index: int
     event_distance_m: float
     altitude_delta_m: float
+    distance_delta_m: float
 
 
 def haversine_distance_m(

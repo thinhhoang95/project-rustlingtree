@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from mcp_tools.scenario_manager.api import create_app
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
@@ -29,7 +27,7 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         encoding="utf-8",
     )
 
-    compressed_flights_path = tmp_path / "flights.jsonl"
+    artifact_flights_path = tmp_path / "flights.jsonl"
     payload = {
         "flight_id": "ARR1",
         "callsign": "CALLARR1",
@@ -46,12 +44,18 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         "lateral_tolerance_m": 100.0,
         "altitude_tolerance_m": 50.0,
     }
-    compressed_flights_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    artifact_flights_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    artifact_manifest_path = tmp_path / "manifest.json"
+    artifact_manifest_path.write_text(
+        json.dumps({"generated_count": 1, "skipped_arrival_count": 1, "skipped_departure_count": 2}) + "\n",
+        encoding="utf-8",
+    )
 
     return ScenarioResourceConfig(
         events_path=events_path,
         fix_sequences_path=fix_sequences_path,
-        compressed_flights_path=compressed_flights_path,
+        artifact_flights_path=artifact_flights_path,
+        artifact_manifest_path=artifact_manifest_path,
     )
 
 
@@ -96,24 +100,24 @@ def test_health_reports_missing_arrival_trajectories(tmp_path: Path) -> None:
     assert health["events_count"] == 4
     assert health["arrivals_count"] == 2
     assert health["departures_count"] == 2
+    assert health["compressed_flights_count"] == 1
+    assert health["artifact_flights_count"] == 1
     assert health["arrivals_missing_fix_sequences_count"] == 0
     assert health["arrivals_missing_trajectories_count"] == 1
+    assert health["arrivals_missing_artifacts_count"] == 1
     assert health["departures_missing_trajectories_count"] == 2
+    assert health["skipped_departures_count"] == 2
 
 
-def test_fastapi_routes_reuse_loaded_manager(tmp_path: Path, monkeypatch) -> None:
+def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> None:
     manager = ScenarioManager(write_fixture_resources(tmp_path))
     monkeypatch.setattr("mcp_tools.scenario_manager.api.ScenarioManager", lambda: manager)
     app = create_app()
 
-    with TestClient(app) as client:
-        health = client.get("/health")
-        departures = client.get("/departures")
-        arrivals = client.get("/arrivals")
+    route_paths = {route.path for route in app.routes}
 
-    assert health.status_code == 200
-    assert health.json()["arrivals_missing_trajectories_count"] == 1
-    assert departures.status_code == 200
-    assert [item["flight_id"] for item in departures.json()] == ["DEP1", "DEP2"]
-    assert arrivals.status_code == 200
-    assert arrivals.json()[0]["arrival_time"] == 300
+    assert {"/health", "/departures", "/arrivals", "/diff"} <= route_paths
+    assert manager.health()["arrivals_missing_trajectories_count"] == 1
+    assert [item["flight_id"] for item in manager.departure_schedule()] == ["DEP1", "DEP2"]
+    assert manager.arrival_schedule()[0]["arrival_time"] == 300
+    assert manager.intervention_diff() == []

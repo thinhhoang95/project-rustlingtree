@@ -10,6 +10,7 @@ from mcp_tools.scenario_manager.resources import (
     load_compressed_flights,
     load_events,
     load_fix_sequences,
+    load_json_object,
 )
 
 
@@ -18,7 +19,9 @@ class ScenarioManager:
         self.config = config or ScenarioResourceConfig.default()
         self.events = load_events(self.config.events_path)
         self.fix_sequences = load_fix_sequences(self.config.fix_sequences_path)
-        self.compressed_flights = load_compressed_flights(self.config.compressed_flights_path)
+        self.artifact_flights = load_compressed_flights(self.config.artifact_flights_path)
+        self.artifact_manifest = load_json_object(self.config.artifact_manifest_path)
+        self.diff: list[dict[str, Any]] = []
         self._fix_sequence_by_flight_id = self._build_fix_sequence_index(self.fix_sequences)
 
     @staticmethod
@@ -57,11 +60,11 @@ class ScenarioManager:
         for event in self.arrivals.to_dict("records"):
             flight_id = str(event["flight_id"])
             fix_sequence = self._fix_sequence_by_flight_id.get(flight_id)
-            trajectory = self.compressed_flights.get(flight_id)
+            trajectory = self.artifact_flights.get(flight_id)
             if fix_sequence is None or trajectory is None:
                 continue
 
-            payload = dict(trajectory)
+            payload = self._apply_diff(dict(trajectory))
             payload.update(
                 {
                     "arrival_time": int(fix_sequence["first_time"]),
@@ -76,6 +79,14 @@ class ScenarioManager:
         arrivals.sort(key=lambda item: (int(item["arrival_time"]), str(item["flight_id"])))
         return arrivals
 
+    def _apply_diff(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Intervention patching will be implemented later. Keep the hook wired
+        # so API behavior is already centered on artifact + diff state.
+        return payload
+
+    def intervention_diff(self) -> list[dict[str, Any]]:
+        return list(self.diff)
+
     @staticmethod
     def _arrival_time_utc(_trajectory: dict[str, Any], arrival_time: int) -> str:
         return datetime.fromtimestamp(arrival_time, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -84,7 +95,8 @@ class ScenarioManager:
         arrival_ids = set(self.arrivals["flight_id"].astype(str))
         departure_ids = set(self.departures["flight_id"].astype(str))
         fix_ids = set(self._fix_sequence_by_flight_id)
-        trajectory_ids = set(self.compressed_flights)
+        trajectory_ids = set(self.artifact_flights)
+        skipped_departures_count = int(self.artifact_manifest.get("skipped_departure_count", len(departure_ids)))
 
         return {
             "status": "ok",
@@ -93,12 +105,17 @@ class ScenarioManager:
             "departures_count": int(len(self.departures)),
             "fix_sequences_count": int(len(fix_ids)),
             "compressed_flights_count": int(len(trajectory_ids)),
+            "artifact_flights_count": int(len(trajectory_ids)),
             "arrivals_missing_fix_sequences_count": int(len(arrival_ids - fix_ids)),
             "arrivals_missing_trajectories_count": int(len(arrival_ids - trajectory_ids)),
+            "arrivals_missing_artifacts_count": int(len(arrival_ids - trajectory_ids)),
             "departures_missing_trajectories_count": int(len(departure_ids - trajectory_ids)),
+            "skipped_departures_count": skipped_departures_count,
             "resource_paths": {
                 "events": self.config.events_path.as_posix(),
                 "fix_sequences": self.config.fix_sequences_path.as_posix(),
-                "compressed_flights": self.config.compressed_flights_path.as_posix(),
+                "compressed_flights": self.config.artifact_flights_path.as_posix(),
+                "artifact_flights": self.config.artifact_flights_path.as_posix(),
+                "artifact_manifest": self.config.artifact_manifest_path.as_posix(),
             },
         }

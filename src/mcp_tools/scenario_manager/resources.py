@@ -75,3 +75,14 @@ def load_compressed_flights(path: Path) -> dict[str, dict[str, Any]]:
                 raise ValueError(f"{path}:{line_number} is missing flight_id")
             flights[flight_id] = payload
     return flights
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Scenario resource not found: {path}")
+
+    with path.open("r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload

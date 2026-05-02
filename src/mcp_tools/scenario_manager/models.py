@@ -14,7 +14,8 @@ def project_root() -> Path:
 class ScenarioResourceConfig:
     events_path: Path
     fix_sequences_path: Path
-    compressed_flights_path: Path
+    artifact_flights_path: Path
+    artifact_manifest_path: Path
 
     @classmethod
     def default(cls) -> "ScenarioResourceConfig":
@@ -22,7 +23,8 @@ class ScenarioResourceConfig:
         return cls(
             events_path=root / "data/adsb/catalogs/2025-04-01_landings_and_departures.csv",
             fix_sequences_path=root / "data/adsb/catalogs/2025-04-01_fix_sequences.csv",
-            compressed_flights_path=root / "data/adsb/compressed/flights.jsonl",
+            artifact_flights_path=root / "data/artifacts/flights.jsonl",
+            artifact_manifest_path=root / "data/artifacts/manifest.json",
         )
 
 
@@ -66,7 +68,10 @@ class HealthResponse(BaseModel):
     departures_count: int
     fix_sequences_count: int
     compressed_flights_count: int
+    artifact_flights_count: int
     arrivals_missing_fix_sequences_count: int
     arrivals_missing_trajectories_count: int
+    arrivals_missing_artifacts_count: int
     departures_missing_trajectories_count: int
+    skipped_departures_count: int
     resource_paths: dict[str, str]
