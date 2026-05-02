@@ -21,13 +21,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.widgets import Slider
+from openap import aero
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from scenario.demand_opensky.adsb_catalog_common import haversine_distance_m
 from scenario.demand_opensky.adsb_catalog_io import normalize_callsign
 from scenario.trajectory_compressor.io import load_raw_adsb, split_tracks_by_gap
+from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition, build_tactical_plan_request
+from simap.nlp_colloc.tactical.diagnostics import render_tactical_setup
+from simap.openap_adapter import openap_dT
+from simap.units import m_to_ft, mps_to_kts
 
 DEFAULT_ARTIFACTS_PATH = PROJECT_ROOT / "data" / "artifacts" / "flights.jsonl"
 DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "adsb" / "raw" / "2026-04-01"
+DEFAULT_EVENTS_PATH = PROJECT_ROOT / "data" / "adsb" / "catalogs" / "2026-04-01_landings_and_departures.csv"
+DEFAULT_FIX_SEQUENCES_PATH = PROJECT_ROOT / "data" / "adsb" / "catalogs" / "2026-04-01_fix_sequences.csv"
+DEFAULT_FIXES_CSV = PROJECT_ROOT / "data" / "kdfw_procs" / "airport_related_fixes.csv"
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
 UTC_TZ = timezone.utc
 ADSB_COLOR = "#1b6b3a"
@@ -73,6 +85,16 @@ class Sample:
     lon_deg: float | None = None
     altitude_m: float | None = None
     speed_mps: float | None = None
+
+
+@dataclass(frozen=True)
+class SeedState:
+    time_s: int
+    lat_deg: float
+    lon_deg: float
+    geoaltitude_m: float
+    heading_deg: float | None
+    ground_speed_mps: float
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -162,6 +184,48 @@ def load_adsb_track(raw_dir: Path, key: FlightKey, split_gap_seconds: int) -> pd
     return selected.reset_index(drop=True)
 
 
+def _seed_for_flight(flight: pd.DataFrame, first_time: int) -> SeedState | None:
+    matches = flight.index[flight["time"].eq(first_time)].to_list()
+    if not matches:
+        return None
+
+    row_index = matches[0]
+    position = int(flight.index.get_loc(row_index))
+    if len(flight) < 2:
+        return None
+
+    if position + 1 < len(flight):
+        neighbor = flight.iloc[position + 1]
+        row = flight.loc[row_index]
+    else:
+        neighbor = flight.iloc[position - 1]
+        row = flight.loc[row_index]
+
+    dt_s = abs(float(neighbor["time"]) - float(row["time"]))
+    if dt_s <= 0.0:
+        return None
+
+    distance_m = haversine_distance_m(
+        float(row["lat"]),
+        float(row["lon"]),
+        float(neighbor["lat"]),
+        float(neighbor["lon"]),
+    )
+    ground_speed_mps = distance_m / dt_s
+    if not np.isfinite(ground_speed_mps) or ground_speed_mps <= 1.0:
+        return None
+
+    heading = float(row["heading"]) if pd.notna(row["heading"]) else None
+    return SeedState(
+        time_s=int(row["time"]),
+        lat_deg=float(row["lat"]),
+        lon_deg=float(row["lon"]),
+        geoaltitude_m=float(row["geoaltitude"]),
+        heading_deg=heading,
+        ground_speed_mps=float(ground_speed_mps),
+    )
+
+
 def trajectory_from_adsb_track(track: pd.DataFrame) -> Trajectory:
     required_columns = ["time", "lat", "lon", "geoaltitude"]
     valid = track.loc[track[required_columns].notna().all(axis=1), required_columns].copy()
@@ -246,6 +310,18 @@ def format_value(value: float | None, suffix: str, decimals: int = 1) -> str:
     return f"{value:.{decimals}f}{suffix}"
 
 
+def _fmt_ft(value_m: float) -> str:
+    return f"{m_to_ft(float(value_m)):,.1f}"
+
+
+def _fmt_kt(value_mps: float) -> str:
+    return f"{mps_to_kts(float(value_mps)):.1f}"
+
+
+def _fmt_deg(value_rad: float) -> str:
+    return f"{np.rad2deg(float(value_rad)):+.2f}"
+
+
 def sample_label(source_name: str, sample: Sample) -> str:
     if not sample.available:
         return f"{source_name}: {UNAVAILABLE}"
@@ -256,6 +332,85 @@ def sample_label(source_name: str, sample: Sample) -> str:
         f"alt {format_value(sample.altitude_m, ' m')}, "
         f"speed {format_value(sample.speed_mps, ' m/s')}"
     )
+
+
+def _resolve_manifest_path(value: object, fallback: Path) -> Path:
+    if isinstance(value, str) and value.strip():
+        candidate = Path(value.strip())
+        if candidate.exists():
+            return candidate
+    return fallback
+
+
+def _load_precompute_input_paths(artifacts_path: Path) -> tuple[Path, Path, Path]:
+    manifest_path = artifacts_path.with_name("manifest.json")
+    if not manifest_path.exists():
+        return DEFAULT_EVENTS_PATH, DEFAULT_FIX_SEQUENCES_PATH, DEFAULT_FIXES_CSV
+
+    with manifest_path.open("r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+
+    return (
+        _resolve_manifest_path(manifest.get("events_path"), DEFAULT_EVENTS_PATH),
+        _resolve_manifest_path(manifest.get("fix_sequences_path"), DEFAULT_FIX_SEQUENCES_PATH),
+        _resolve_manifest_path(manifest.get("fixes_csv"), DEFAULT_FIXES_CSV),
+    )
+
+
+def _route_tokens(fix_sequence: object, runway: object) -> list[str]:
+    tokens = [token.strip().upper() for token in str(fix_sequence).split(">") if token.strip()]
+    tokens = [token for token in tokens if token != "NAN"]
+    runway_token = f"RW{str(runway).strip().upper()}"
+    if runway_token not in tokens:
+        tokens.append(runway_token)
+    return tokens
+
+
+def _load_schedule_rows(
+    events_path: Path,
+    fix_sequences_path: Path,
+    key: FlightKey,
+) -> tuple[pd.Series, pd.Series]:
+    events = pd.read_csv(events_path)
+    sequences = pd.read_csv(fix_sequences_path)
+    events["flight_id"] = events["flight_id"].astype(str).str.strip()
+    sequences["flight_id"] = sequences["flight_id"].astype(str).str.strip()
+
+    event_rows = events.loc[
+        (events["flight_id"] == key.flight_id) & (events["operation"].astype(str).str.lower() == "arrival")
+    ].copy()
+    if event_rows.empty:
+        raise ValueError(f"No arrival schedule row found for {key.flight_id} in {events_path}")
+
+    sequence_rows = sequences.loc[sequences["flight_id"] == key.flight_id].copy()
+    if sequence_rows.empty:
+        raise ValueError(f"No fix-sequence row found for {key.flight_id} in {fix_sequences_path}")
+
+    return event_rows.iloc[0], sequence_rows.iloc[0]
+
+
+def _render_lateral_path_table(console: Console, *, raw_tokens: list[str], bundle: Any) -> None:
+    table = Table(title="Lateral path inputs and resolved coordinates", box=box.SIMPLE_HEAVY, expand=False)
+    table.add_column("#", justify="right")
+    table.add_column("raw token")
+    table.add_column("resolved id")
+    table.add_column("source")
+    table.add_column("lat [deg]", justify="right")
+    table.add_column("lon [deg]", justify="right")
+    table.add_column("elev [ft]", justify="right")
+
+    for index, (raw_token, waypoint) in enumerate(zip(raw_tokens, bundle.path.waypoints, strict=True), start=1):
+        table.add_row(
+            str(index),
+            raw_token,
+            waypoint.identifier,
+            waypoint.source,
+            f"{float(waypoint.lat_deg):.6f}",
+            f"{float(waypoint.lon_deg):.6f}",
+            "—" if waypoint.elevation_ft is None else f"{float(waypoint.elevation_ft):,.1f}",
+        )
+
+    console.print(table)
 
 
 def _set_marker(marker, sample: Sample, x_attr: str, y_attr: str) -> None:
@@ -367,12 +522,51 @@ def main() -> None:
     args = parser.parse_args()
     key = parse_flight_key(args.flight)
     payload = load_simap_payload(args.artifacts_path, key)
-    simap = trajectory_from_simap_payload(payload)
-    adsb = trajectory_from_adsb_track(load_adsb_track(args.raw_dir, key, args.split_gap_seconds))
+    events_path, fix_sequences_path, fixes_csv = _load_precompute_input_paths(args.artifacts_path)
+    event_row, sequence_row = _load_schedule_rows(events_path, fix_sequences_path, key)
+    raw_track = load_adsb_track(args.raw_dir, key, args.split_gap_seconds)
+    seed = _seed_for_flight(raw_track, int(sequence_row["first_time"]))
+    if seed is None:
+        raise ValueError(f"Unable to derive tactical seed for {key.flight_id} from raw ADS-B")
 
-    print(f"Loaded {key.flight_id}")
-    print(f"ADS-B: {len(adsb.time_s)} points, {format_unix_time(adsb.first_time_s)} to {format_unix_time(adsb.last_time_s)}")
-    print(f"SIMAP: {len(simap.time_s)} points, {format_unix_time(simap.first_time_s)} to {format_unix_time(simap.last_time_s)}")
+    route_tokens = _route_tokens(sequence_row["fix_sequence"], event_row["runway"])
+    h_m = max(float(seed.geoaltitude_m), 1.0)
+    cas_mps = float(aero.tas2cas(max(seed.ground_speed_mps, 1.0), h_m, dT=openap_dT(0.0)))
+    command = TacticalCommand(
+        lateral_path=route_tokens,
+        upstream=TacticalCondition(
+            fix_identifier=route_tokens[0],
+            cas_kts=max(80.0, mps_to_kts(cas_mps)),
+            altitude_ft=m_to_ft(h_m),
+        ),
+        altitude_constraints=(),
+    )
+    bundle = build_tactical_plan_request(command, fixes_csv=fixes_csv)
+    simap = trajectory_from_simap_payload(payload)
+    adsb = trajectory_from_adsb_track(raw_track)
+
+    console = Console()
+    console.rule("[bold cyan]SIMAP inputs reconstructed from precompute data[/bold cyan]")
+    console.print(
+        Panel.fit(
+            f"[bold]Flight[/bold]: {key.flight_id}\n"
+            f"[bold]Callsign[/bold]: {key.callsign_segment}\n"
+            f"[bold]ICAO24[/bold]: {key.icao24}\n"
+            f"[bold]Schedule runway[/bold]: {event_row['runway']}\n"
+            f"[bold]Fix sequence[/bold]: {sequence_row['fix_sequence'] if pd.notna(sequence_row['fix_sequence']) else ''}\n"
+            f"[bold]SIMAP lateral_path[/bold]: {' > '.join(route_tokens)}\n"
+            f"[bold]Upstream boundary[/bold]: {route_tokens[0]} / {_fmt_kt(cas_mps)} kt / {_fmt_ft(h_m)} ft\n"
+            f"[bold]Raw ADS-B seed time[/bold]: {int(sequence_row['first_time'])} ({format_unix_time(float(sequence_row['first_time']))})",
+            title="Precompute context",
+            border_style="cyan",
+        )
+    )
+    _render_lateral_path_table(console, raw_tokens=route_tokens, bundle=bundle)
+    render_tactical_setup(console, bundle=bundle)
+
+    console.rule("[bold cyan]Trajectory summary[/bold cyan]")
+    console.print(f"ADS-B: {len(adsb.time_s)} points, {format_unix_time(adsb.first_time_s)} to {format_unix_time(adsb.last_time_s)}")
+    console.print(f"SIMAP: {len(simap.time_s)} points, {format_unix_time(simap.first_time_s)} to {format_unix_time(simap.last_time_s)}")
     plot_cross_check(adsb, simap, payload, key)
 
 
