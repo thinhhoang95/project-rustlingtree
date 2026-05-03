@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 from simap import aero
@@ -83,6 +85,58 @@ class LateralDynamicsTests(unittest.TestCase):
 
         self.assertGreater(abs(tailwind.phi_req_rad), abs(calm.phi_req_rad))
         self.assertGreater(abs(calm.phi_req_rad), abs(headwind.phi_req_rad))
+
+    def test_bank_command_projects_to_nearest_path_sample_when_far_off_route(self) -> None:
+        fixture = a320_fixture()
+        cfg = fixture["cfg"]
+        reference_path = fixture["reference_path"]
+        h_m = fixture["upstream"].h_m
+        v_tas_mps = float(aero.cas2tas(140.0, h_m, dT=0.0))
+
+        anchor_idx = len(reference_path.s_m) // 2
+        anchor_s_m = float(reference_path.s_m[anchor_idx])
+        anchor_east_m, anchor_north_m = reference_path.position_ne(anchor_s_m)
+        normal_hat = reference_path.normal_hat(anchor_s_m)
+        east_m = float(anchor_east_m + 2_500.0 * float(normal_hat[0]))
+        north_m = float(anchor_north_m + 2_500.0 * float(normal_hat[1]))
+
+        far_s_m = float(reference_path.total_length_m)
+        mode = mode_for_s(cfg, far_s_m)
+        command = compute_lateral_command(
+            s_m=far_s_m,
+            east_m=east_m,
+            north_m=north_m,
+            h_m=h_m,
+            t_s=0.0,
+            psi_rad=float(reference_path.track_angle_rad(anchor_s_m)),
+            v_tas_mps=v_tas_mps,
+            cfg=cfg,
+            mode=mode,
+            reference_path=reference_path,
+            weather=ConstantWeather(),
+            guidance=LateralGuidanceConfig(),
+        )
+
+        delta_east_m = np.asarray(reference_path.east_m, dtype=float) - east_m
+        delta_north_m = np.asarray(reference_path.north_m, dtype=float) - north_m
+        nearest_idx = int(np.argmin(delta_east_m**2 + delta_north_m**2))
+        nearest_s_m = float(reference_path.s_m[nearest_idx])
+        nearest_ref_east_m, nearest_ref_north_m = reference_path.position_ne(nearest_s_m)
+        nearest_normal_hat = reference_path.normal_hat(nearest_s_m)
+        expected_cross_track_m = float(
+            (east_m - nearest_ref_east_m) * float(nearest_normal_hat[0])
+            + (north_m - nearest_ref_north_m) * float(nearest_normal_hat[1])
+        )
+
+        far_ref_east_m, far_ref_north_m = reference_path.position_ne(far_s_m)
+        far_normal_hat = reference_path.normal_hat(far_s_m)
+        far_cross_track_m = float(
+            (east_m - far_ref_east_m) * float(far_normal_hat[0])
+            + (north_m - far_ref_north_m) * float(far_normal_hat[1])
+        )
+
+        self.assertAlmostEqual(command.cross_track_m, expected_cross_track_m, delta=1e-6)
+        self.assertGreater(abs(command.cross_track_m - far_cross_track_m), 1_000.0)
 
 
 if __name__ == "__main__":

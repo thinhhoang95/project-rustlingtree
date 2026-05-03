@@ -17,10 +17,8 @@ if str(SRC_ROOT) not in sys.path:
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/project-rustlingtree-matplotlib")
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.widgets import Slider
 from openap import aero
 from rich import box
 from rich.console import Console
@@ -34,6 +32,7 @@ from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition, build_
 from simap.nlp_colloc.tactical.diagnostics import render_tactical_setup
 from simap.openap_adapter import openap_dT
 from simap.units import m_to_ft, mps_to_kts
+from x_check_simap_adsb.envelope_viz import plot_cross_check as plot_cross_check_envelope
 
 DEFAULT_ARTIFACTS_PATH = PROJECT_ROOT / "data" / "artifacts" / "flights.jsonl"
 DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "adsb" / "raw" / "2026-04-01"
@@ -422,101 +421,6 @@ def _set_marker(marker, sample: Sample, x_attr: str, y_attr: str) -> None:
     else:
         marker.set_visible(False)
 
-
-def plot_cross_check(adsb: Trajectory, simap: Trajectory, payload: dict[str, Any], key: FlightKey) -> None:
-    start_time = min(adsb.first_time_s, simap.first_time_s)
-    end_time = max(adsb.last_time_s, simap.last_time_s)
-    initial_time = max(adsb.first_time_s, simap.first_time_s)
-
-    fig = plt.figure(figsize=(15.0, 9.0))
-    grid = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 0.16], width_ratios=[1.1, 1.0])
-    trajectory_ax = fig.add_subplot(grid[0:2, 0])
-    altitude_ax = fig.add_subplot(grid[0, 1])
-    speed_ax = fig.add_subplot(grid[1, 1])
-    slider_ax = fig.add_subplot(grid[2, :])
-
-    trajectory_ax.plot(adsb.lon_deg, adsb.lat_deg, color=ADSB_COLOR, linewidth=2.0, label="ADS-B")
-    trajectory_ax.plot(simap.lon_deg, simap.lat_deg, color=SIMAP_COLOR, linewidth=2.0, label="SIMAP")
-    adsb_position_dot, = trajectory_ax.plot([], [], "o", color=ADSB_COLOR, markersize=8)
-    simap_position_dot, = trajectory_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=8)
-    trajectory_ax.set_title(f"{key.callsign_segment} / {key.icao24} trajectory")
-    trajectory_ax.set_xlabel("Longitude [deg]")
-    trajectory_ax.set_ylabel("Latitude [deg]")
-    trajectory_ax.grid(True, alpha=0.25)
-    trajectory_ax.legend(loc="best")
-    trajectory_ax.axis("equal")
-
-    altitude_ax.plot(adsb.time_s, adsb.altitude_m, color=ADSB_COLOR, linewidth=1.8, label="ADS-B")
-    altitude_ax.plot(simap.time_s, simap.altitude_m, color=SIMAP_COLOR, linewidth=1.8, label="SIMAP")
-    adsb_altitude_dot, = altitude_ax.plot([], [], "o", color=ADSB_COLOR, markersize=7)
-    simap_altitude_dot, = altitude_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=7)
-    altitude_ax.set_title("Altitude")
-    altitude_ax.set_ylabel("Altitude [m]")
-    altitude_ax.grid(True, alpha=0.25)
-    altitude_ax.legend(loc="best")
-
-    speed_ax.plot(adsb.time_s, adsb.speed_mps, color=ADSB_COLOR, linewidth=1.8, label="ADS-B")
-    speed_ax.plot(simap.time_s, simap.speed_mps, color=SIMAP_COLOR, linewidth=1.8, label="SIMAP")
-    adsb_speed_dot, = speed_ax.plot([], [], "o", color=ADSB_COLOR, markersize=7)
-    simap_speed_dot, = speed_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=7)
-    speed_ax.set_title("Ground Speed")
-    speed_ax.set_xlabel("Unix time [s]")
-    speed_ax.set_ylabel("Speed [m/s]")
-    speed_ax.grid(True, alpha=0.25)
-    speed_ax.legend(loc="best")
-
-    label = trajectory_ax.text(
-        0.02,
-        0.98,
-        "",
-        transform=trajectory_ax.transAxes,
-        va="top",
-        ha="left",
-        fontsize=10.0,
-        linespacing=1.35,
-        bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "#333333", "alpha": 0.92},
-    )
-
-    slider = Slider(
-        ax=slider_ax,
-        label="Time",
-        valmin=start_time,
-        valmax=end_time,
-        valinit=initial_time,
-        valstep=1.0,
-    )
-
-    simulation = payload.get("simulation", {})
-
-    def update(time_s: float) -> None:
-        adsb_sample = sample_trajectory(adsb, float(time_s))
-        simap_sample = sample_trajectory(simap, float(time_s))
-
-        _set_marker(adsb_position_dot, adsb_sample, "lon_deg", "lat_deg")
-        _set_marker(simap_position_dot, simap_sample, "lon_deg", "lat_deg")
-        _set_marker(adsb_altitude_dot, adsb_sample, "time_s", "altitude_m")
-        _set_marker(simap_altitude_dot, simap_sample, "time_s", "altitude_m")
-        _set_marker(adsb_speed_dot, adsb_sample, "time_s", "speed_mps")
-        _set_marker(simap_speed_dot, simap_sample, "time_s", "speed_mps")
-
-        label.set_text(
-            "\n".join(
-                [
-                    format_unix_time(float(time_s)),
-                    sample_label("ADS-B", adsb_sample),
-                    sample_label("SIMAP", simap_sample),
-                    f"SIMAP status: {simulation.get('message', UNAVAILABLE)}",
-                ]
-            )
-        )
-        fig.canvas.draw_idle()
-
-    slider.on_changed(update)
-    update(initial_time)
-    fig.tight_layout()
-    plt.show()
-
-
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -544,6 +448,7 @@ def main() -> None:
     bundle = build_tactical_plan_request(command, fixes_csv=fixes_csv)
     simap = trajectory_from_simap_payload(payload)
     adsb = trajectory_from_adsb_track(raw_track)
+    reference_path = bundle.request.reference_path
 
     console = Console()
     console.rule("[bold cyan]SIMAP inputs reconstructed from precompute data[/bold cyan]")
@@ -567,7 +472,7 @@ def main() -> None:
     console.rule("[bold cyan]Trajectory summary[/bold cyan]")
     console.print(f"ADS-B: {len(adsb.time_s)} points, {format_unix_time(adsb.first_time_s)} to {format_unix_time(adsb.last_time_s)}")
     console.print(f"SIMAP: {len(simap.time_s)} points, {format_unix_time(simap.first_time_s)} to {format_unix_time(simap.last_time_s)}")
-    plot_cross_check(adsb, simap, payload, key)
+    plot_cross_check_envelope(adsb, reference_path, key, bundle=bundle, seed=seed)
 
 
 if __name__ == "__main__":
