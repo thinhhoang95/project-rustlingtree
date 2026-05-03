@@ -94,5 +94,5 @@ def test_derive_speed_mps_uses_neighboring_positions() -> None:
     speeds = derive_speed_mps(times, lats, lons)
 
     assert np.isfinite(speeds).all()
-    assert speeds[0] == speeds[1]
-    assert speeds[2] > speeds[1]
+    assert speeds[1] == speeds[2]
+    assert speeds[1] > speeds[0]

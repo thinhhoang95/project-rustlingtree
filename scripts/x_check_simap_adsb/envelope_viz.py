@@ -8,11 +8,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.widgets import Slider
+from openap import aero
 
 from simap.config import planned_cas_bounds_mps
 from simap.fms import FMSRequest
 from simap.fms_bichannel import FMSBiChannelRequest, FMSBiChannelResult, FMSBiChannelState, plan_fms_bichannel
 from simap.lateral_dynamics import LateralGuidanceConfig, wrap_angle_rad
+from simap.openap_adapter import openap_dT
 from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
 from simap.units import m_to_ft, mps_to_kts
 
@@ -201,7 +203,6 @@ def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np
 def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest:
     reference_path = bundle.request.reference_path
 
-    h_m = max(float(seed.geoaltitude_m), 1.0)
     start_s_m = reference_path.total_length_m
     fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
     east_m, north_m = reference_path.position_ne(fms_request.start_s_m)
@@ -214,8 +215,8 @@ def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest
     initial_state = FMSBiChannelState(
         t_s=0.0,
         s_m=float(fms_request.start_s_m),
-        h_m=h_m,
-        v_tas_mps=float(fms_request.start_cas_mps),
+        h_m=float(fms_request.start_h_m),
+        v_tas_mps=float(aero.cas2tas(fms_request.start_cas_mps, fms_request.start_h_m, dT=openap_dT(0.0))),
         east_m=float(east_m),
         north_m=float(north_m),
         psi_rad=float(psi_rad),
@@ -491,7 +492,7 @@ def plot_cross_check(
     summary_text = "\n".join(
         [
             _fmt_unix_time(initial_time),
-            _fmt_sample("ADS-B", _sample_trajectory(adsb, initial_time), speed_label="ground speed"),
+            _fmt_sample("ADS-B", _sample_trajectory(adsb, initial_time), speed_label="CAS"),
             _fmt_sample("SIMAP", _sample_trajectory(_ResultTrajectoryAdapter(bichannel, seed), initial_time), speed_label="CAS"),
         ]
     )

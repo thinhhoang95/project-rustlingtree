@@ -28,6 +28,7 @@ from rich.table import Table
 from scenario.demand_opensky.adsb_catalog_common import haversine_distance_m
 from scenario.demand_opensky.adsb_catalog_io import normalize_callsign
 from scenario.trajectory_compressor.io import load_raw_adsb, split_tracks_by_gap
+from mcp_tools.scenario_manager import precompute_artifact
 from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition, build_tactical_plan_request
 from simap.nlp_colloc.tactical.diagnostics import render_tactical_setup
 from simap.openap_adapter import openap_dT
@@ -84,16 +85,6 @@ class Sample:
     lon_deg: float | None = None
     altitude_m: float | None = None
     speed_mps: float | None = None
-
-
-@dataclass(frozen=True)
-class SeedState:
-    time_s: int
-    lat_deg: float
-    lon_deg: float
-    geoaltitude_m: float
-    heading_deg: float | None
-    ground_speed_mps: float
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -183,48 +174,6 @@ def load_adsb_track(raw_dir: Path, key: FlightKey, split_gap_seconds: int) -> pd
     return selected.reset_index(drop=True)
 
 
-def _seed_for_flight(flight: pd.DataFrame, first_time: int) -> SeedState | None:
-    matches = flight.index[flight["time"].eq(first_time)].to_list()
-    if not matches:
-        return None
-
-    row_index = matches[0]
-    position = int(flight.index.get_loc(row_index))
-    if len(flight) < 2:
-        return None
-
-    if position + 1 < len(flight):
-        neighbor = flight.iloc[position + 1]
-        row = flight.loc[row_index]
-    else:
-        neighbor = flight.iloc[position - 1]
-        row = flight.loc[row_index]
-
-    dt_s = abs(float(neighbor["time"]) - float(row["time"]))
-    if dt_s <= 0.0:
-        return None
-
-    distance_m = haversine_distance_m(
-        float(row["lat"]),
-        float(row["lon"]),
-        float(neighbor["lat"]),
-        float(neighbor["lon"]),
-    )
-    ground_speed_mps = distance_m / dt_s
-    if not np.isfinite(ground_speed_mps) or ground_speed_mps <= 1.0:
-        return None
-
-    heading = float(row["heading"]) if pd.notna(row["heading"]) else None
-    return SeedState(
-        time_s=int(row["time"]),
-        lat_deg=float(row["lat"]),
-        lon_deg=float(row["lon"]),
-        geoaltitude_m=float(row["geoaltitude"]),
-        heading_deg=heading,
-        ground_speed_mps=float(ground_speed_mps),
-    )
-
-
 def trajectory_from_adsb_track(track: pd.DataFrame) -> Trajectory:
     required_columns = ["time", "lat", "lon", "geoaltitude"]
     valid = track.loc[track[required_columns].notna().all(axis=1), required_columns].copy()
@@ -236,13 +185,15 @@ def trajectory_from_adsb_track(track: pd.DataFrame) -> Trajectory:
     lats = valid["lat"].to_numpy(dtype=float)
     lons = valid["lon"].to_numpy(dtype=float)
     altitudes = valid["geoaltitude"].to_numpy(dtype=float)
+    ground_speed_mps = derive_speed_mps(times, lats, lons)
+    cas_mps = derive_cas_mps(ground_speed_mps, altitudes)
     return Trajectory(
         name="ADS-B",
         time_s=times,
         lat_deg=lats,
         lon_deg=lons,
         altitude_m=altitudes,
-        speed_mps=derive_speed_mps(times, lats, lons),
+        speed_mps=cas_mps,
     )
 
 
@@ -258,10 +209,17 @@ def derive_speed_mps(times_s: np.ndarray, lat_deg: np.ndarray, lon_deg: np.ndarr
         out=np.full(len(dts), np.nan, dtype=float),
         where=dts > 0.0,
     )
-    speeds[0] = segment_speeds[0]
-    if len(speeds) > 1:
-        speeds[1:] = segment_speeds
+    speeds[:-1] = segment_speeds
+    speeds[-1] = segment_speeds[-1]
     return speeds
+
+
+def derive_cas_mps(speed_mps: np.ndarray, altitude_m: np.ndarray) -> np.ndarray:
+    cas = np.full(len(speed_mps), np.nan, dtype=float)
+    for index, (speed, altitude) in enumerate(zip(speed_mps, altitude_m, strict=True)):
+        if np.isfinite(speed) and np.isfinite(altitude):
+            cas[index] = float(aero.tas2cas(max(float(speed), 1.0), max(float(altitude), 1.0), dT=openap_dT(0.0)))
+    return cas
 
 
 def sample_trajectory(trajectory: Trajectory, time_s: float) -> Sample:
@@ -429,11 +387,16 @@ def main() -> None:
     events_path, fix_sequences_path, fixes_csv = _load_precompute_input_paths(args.artifacts_path)
     event_row, sequence_row = _load_schedule_rows(events_path, fix_sequences_path, key)
     raw_track = load_adsb_track(args.raw_dir, key, args.split_gap_seconds)
-    seed = _seed_for_flight(raw_track, int(sequence_row["first_time"]))
+    route_tokens = _route_tokens(sequence_row["fix_sequence"], event_row["runway"])
+    first_fix_lat_deg, first_fix_lon_deg = precompute_artifact._first_route_fix_latlon(route_tokens, fixes_csv)
+    seed = precompute_artifact._seed_for_flight_at_fix(
+        raw_track,
+        fix_lat_deg=first_fix_lat_deg,
+        fix_lon_deg=first_fix_lon_deg,
+    )
     if seed is None:
         raise ValueError(f"Unable to derive tactical seed for {key.flight_id} from raw ADS-B")
 
-    route_tokens = _route_tokens(sequence_row["fix_sequence"], event_row["runway"])
     h_m = max(float(seed.geoaltitude_m), 1.0)
     cas_mps = float(aero.tas2cas(max(seed.ground_speed_mps, 1.0), h_m, dT=openap_dT(0.0)))
     command = TacticalCommand(
@@ -461,7 +424,7 @@ def main() -> None:
             f"[bold]Fix sequence[/bold]: {sequence_row['fix_sequence'] if pd.notna(sequence_row['fix_sequence']) else ''}\n"
             f"[bold]SIMAP lateral_path[/bold]: {' > '.join(route_tokens)}\n"
             f"[bold]Upstream boundary[/bold]: {route_tokens[0]} / {_fmt_kt(cas_mps)} kt / {_fmt_ft(h_m)} ft\n"
-            f"[bold]Raw ADS-B seed time[/bold]: {int(sequence_row['first_time'])} ({format_unix_time(float(sequence_row['first_time']))})",
+            f"[bold]Raw ADS-B seed time[/bold]: {seed.time_s} ({format_unix_time(float(seed.time_s))})",
             title="Precompute context",
             border_style="cyan",
         )

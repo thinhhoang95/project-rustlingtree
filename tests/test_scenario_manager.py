@@ -34,10 +34,10 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         "icao24": "arr001",
         "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         "breakpoint_mask_bits": {"lateral": 1, "altitude": 2},
-        "points": [[300, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]],
-        "lateral_breakpoint_times": [300, 500],
-        "altitude_breakpoint_times": [300, 500],
-        "first_time": 300,
+        "points": [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]],
+        "lateral_breakpoint_times": [310, 500],
+        "altitude_breakpoint_times": [310, 500],
+        "first_time": 310,
         "last_time": 500,
         "raw_point_count": 2,
         "compressed_point_count": 2,
@@ -75,7 +75,7 @@ def test_departure_schedule_returns_time_and_runway_sorted_by_departure_time(tmp
     }
 
 
-def test_arrival_schedule_uses_first_fix_time_and_preserves_compressed_points(tmp_path: Path) -> None:
+def test_arrival_schedule_uses_artifact_start_time_and_preserves_compressed_points(tmp_path: Path) -> None:
     manager = ScenarioManager(write_fixture_resources(tmp_path))
 
     schedule = manager.arrival_schedule()
@@ -83,13 +83,13 @@ def test_arrival_schedule_uses_first_fix_time_and_preserves_compressed_points(tm
     assert len(schedule) == 1
     arrival = schedule[0]
     assert arrival["flight_id"] == "ARR1"
-    assert arrival["arrival_time"] == 300
-    assert arrival["arrival_time_utc"] == "1970-01-01T00:05:00Z"
+    assert arrival["arrival_time"] == 310
+    assert arrival["arrival_time_utc"] == "1970-01-01T00:05:10Z"
     assert arrival["runway"] == "35C"
     assert arrival["original_fix_sequence"] == "FIXA>FIXB"
     assert arrival["original_fix_count"] == 2
     assert arrival["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
-    assert arrival["points"] == [[300, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrival["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
 
 
 def test_health_reports_missing_arrival_trajectories(tmp_path: Path) -> None:
@@ -119,5 +119,5 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert {"/health", "/departures", "/arrivals", "/diff"} <= route_paths
     assert manager.health()["arrivals_missing_trajectories_count"] == 1
     assert [item["flight_id"] for item in manager.departure_schedule()] == ["DEP1", "DEP2"]
-    assert manager.arrival_schedule()[0]["arrival_time"] == 300
+    assert manager.arrival_schedule()[0]["arrival_time"] == 310
     assert manager.intervention_diff() == []

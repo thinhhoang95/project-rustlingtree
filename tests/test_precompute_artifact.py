@@ -29,7 +29,16 @@ def _write_catalogs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     fixes_csv = tmp_path / "fixes.csv"
-    fixes_csv.write_text("identifier,latitude_deg,longitude_deg\n", encoding="utf-8")
+    fixes_csv.write_text(
+        "identifier,latitude_deg,longitude_deg\n"
+        "FIXA,32.0,-97.0\n"
+        "FIXB,32.1,-97.1\n"
+        "FIXC,33.0,-98.0\n"
+        "FIXD,33.1,-98.1\n"
+        "RW35C,32.9,-97.9\n"
+        "RW36L,33.9,-98.9\n",
+        encoding="utf-8",
+    )
     return events_path, fix_sequences_path, raw_dir, fixes_csv
 
 
@@ -48,11 +57,11 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
         ),
         "ARR2": pd.DataFrame(
             {
-                "time": [90, 110],
-                "lat": [32.0, 32.01],
-                "lon": [-97.0, -97.01],
-                "heading": [180.0, 181.0],
-                "geoaltitude": [1_000.0, 900.0],
+                "time": [90],
+                "lat": [32.0],
+                "lon": [-97.0],
+                "heading": [180.0],
+                "geoaltitude": [1_000.0],
             }
         ),
     }
@@ -93,3 +102,27 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
+
+
+def test_seed_for_flight_uses_adsb_point_closest_to_first_fix() -> None:
+    flight = pd.DataFrame(
+        {
+            "time": [100, 110, 120],
+            "lat": [32.0, 32.05, 32.2],
+            "lon": [-97.0, -97.05, -97.2],
+            "heading": [180.0, 181.0, 182.0],
+            "geoaltitude": [1_000.0, 900.0, 800.0],
+        }
+    )
+
+    seed = precompute_artifact._seed_for_flight_at_fix(
+        flight,
+        fix_lat_deg=32.049,
+        fix_lon_deg=-97.049,
+    )
+
+    assert seed is not None
+    assert seed.time_s == 110
+    assert seed.geoaltitude_m == 900.0
+    assert seed.heading_deg == 181.0
+    assert seed.ground_speed_mps > 1.0

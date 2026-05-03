@@ -32,6 +32,8 @@ from simap.fms_bichannel import FMSBiChannelRequest, FMSBiChannelState, plan_fms
 from simap.lateral_dynamics import LateralGuidanceConfig, wrap_angle_rad
 from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition
 from simap.nlp_colloc.tactical.builder import build_tactical_plan_request
+from simap.nlp_colloc.tactical.navdata import load_fix_catalog
+from simap.nlp_colloc.tactical.path import resolve_lateral_path
 from simap.openap_adapter import openap_dT
 from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
 from simap.units import m_to_ft, mps_to_kts
@@ -133,20 +135,38 @@ def _flight_raw_tracks(raw_adsb_dir: Path, *, processes: int, split_gap_seconds:
     return {str(flight_id): flight.copy() for flight_id, flight in tracks.groupby("flight_id", sort=False)}
 
 
-def _seed_for_flight(flight: pd.DataFrame, first_time: int) -> SeedState | None:
-    matches = flight.index[flight["time"].eq(first_time)].to_list()
-    if not matches:
+def _seed_for_flight_at_fix(
+    flight: pd.DataFrame, *, fix_lat_deg: float, fix_lon_deg: float
+) -> SeedState | None:
+    valid = flight.loc[
+        flight["time"].notna()
+        & flight["lat"].notna()
+        & flight["lon"].notna()
+        & flight["geoaltitude"].notna()
+    ].reset_index(drop=True)
+    if len(valid) < 2:
         return None
-    row_index = matches[0]
-    position = int(flight.index.get_loc(row_index))
-    if len(flight) < 2:
-        return None
-    if position + 1 < len(flight):
-        neighbor = flight.iloc[position + 1]
-        row = flight.loc[row_index]
+
+    distances_m = np.asarray(
+        [
+            _latlon_distance_m(
+                float(lat_deg),
+                float(lon_deg),
+                fix_lat_deg,
+                fix_lon_deg,
+            )
+            for lat_deg, lon_deg in valid[["lat", "lon"]].itertuples(
+                index=False, name=None
+            )
+        ],
+        dtype=float,
+    )
+    position = int(np.argmin(distances_m))
+    row = valid.iloc[position]
+    if position + 1 < len(valid):
+        neighbor = valid.iloc[position + 1]
     else:
-        neighbor = flight.iloc[position - 1]
-        row = flight.loc[row_index]
+        neighbor = valid.iloc[position - 1]
     dt_s = abs(float(neighbor["time"]) - float(row["time"]))
     if dt_s <= 0.0:
         return None
@@ -168,6 +188,13 @@ def _seed_for_flight(flight: pd.DataFrame, first_time: int) -> SeedState | None:
         heading_deg=heading,
         ground_speed_mps=float(ground_speed_mps),
     )
+
+
+def _first_route_fix_latlon(route: list[str], fixes_csv: Path) -> tuple[float, float]:
+    fix_catalog = load_fix_catalog(fixes_csv)
+    resolved_path = resolve_lateral_path(route, fix_catalog)
+    first_waypoint = resolved_path.waypoints[0]
+    return float(first_waypoint.lat_deg), float(first_waypoint.lon_deg)
 
 
 def _latlon_distance_m(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
@@ -222,7 +249,11 @@ def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FM
         t_s=0.0,
         s_m=fms_request.start_s_m,
         h_m=fms_request.start_h_m,
-        v_tas_mps=fms_request.start_cas_mps,
+        v_tas_mps=float(
+            aero.cas2tas(
+                fms_request.start_cas_mps, fms_request.start_h_m, dT=openap_dT(0.0)
+            )
+        ),
         east_m=east_m,
         north_m=north_m,
         psi_rad=psi_rad,
@@ -333,9 +364,15 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
     try:
         if task.raw_flight is None:
             return _skip_result(row, "missing raw ADS-B flight"), None
-        seed = _seed_for_flight(task.raw_flight, int(row["first_time"]))
+        route = _route_tokens(row["fix_sequence"], row["runway"])
+        first_fix_lat_deg, first_fix_lon_deg = _first_route_fix_latlon(route, task.fixes_csv)
+        seed = _seed_for_flight_at_fix(
+            task.raw_flight,
+            fix_lat_deg=first_fix_lat_deg,
+            fix_lon_deg=first_fix_lon_deg,
+        )
         if seed is None:
-            return _skip_result(row, "missing exact raw seed at first entry fix time"), None
+            return _skip_result(row, "missing raw seed near first entry fix"), None
         fms_request, initial_state = _build_request(row, seed, task.fixes_csv)
         result = plan_fms_bichannel(
             FMSBiChannelRequest(

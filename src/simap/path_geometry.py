@@ -3,13 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.interpolate import make_interp_spline
 
 EARTH_RADIUS_M = 6_371_000.0
 
 
 def _wrap_angle_rad(angle_rad: float) -> float:
     return float(np.arctan2(np.sin(angle_rad), np.cos(angle_rad)))
+
+
+def _mean_angle_rad(a_rad: float, b_rad: float) -> float:
+    return float(np.arctan2(np.sin(a_rad) + np.sin(b_rad), np.cos(a_rad) + np.cos(b_rad)))
 
 
 @dataclass(frozen=True)
@@ -82,49 +85,23 @@ class ReferencePath:
         chord_m = np.hypot(np.diff(east_m), np.diff(north_m))
         if np.any(chord_m <= 0.0):
             raise ValueError("waypoints must be unique and ordered")
-        u = np.concatenate(([0.0], np.cumsum(chord_m)))
+        waypoint_s_from_start_m = np.concatenate(([0.0], np.cumsum(chord_m)))
 
-        if len(lat) == 2:
-            sample_count = max(samples_per_segment + 1, 2)
-            u_sample = np.linspace(u[0], u[-1], sample_count, dtype=float)
-            east_sample = np.interp(u_sample, u, east_m)
-            north_sample = np.interp(u_sample, u, north_m)
-            dx_du = np.gradient(east_sample, u_sample, edge_order=1)
-            dy_du = np.gradient(north_sample, u_sample, edge_order=1)
-            ddx_du = np.zeros_like(dx_du)
-            ddy_du = np.zeros_like(dy_du)
-        else:
-            k = min(3, len(lat) - 1)
-            east_spline = make_interp_spline(u, east_m, k=k)
-            north_spline = make_interp_spline(u, north_m, k=k)
-            sample_count = max((len(lat) - 1) * samples_per_segment + 1, len(lat))
-            u_sample = np.linspace(u[0], u[-1], sample_count, dtype=float)
-            east_sample = east_spline(u_sample)
-            north_sample = north_spline(u_sample)
-            dx_du = east_spline(u_sample, 1)
-            dy_du = north_spline(u_sample, 1)
-            if k >= 2:
-                ddx_du = east_spline(u_sample, 2)
-                ddy_du = north_spline(u_sample, 2)
-            else:
-                ddx_du = np.zeros_like(dx_du)
-                ddy_du = np.zeros_like(dy_du)
+        segment_track_rad = np.arctan2(np.diff(north_m), np.diff(east_m))
+        waypoint_track_rad = np.empty(len(lat), dtype=float)
+        waypoint_track_rad[0] = float(segment_track_rad[0])
+        waypoint_track_rad[-1] = float(segment_track_rad[-1])
+        for index in range(1, len(lat) - 1):
+            waypoint_track_rad[index] = _mean_angle_rad(float(segment_track_rad[index - 1]), float(segment_track_rad[index]))
 
-        segment_m = np.hypot(np.diff(east_sample), np.diff(north_sample))
-        s_from_start_m = np.concatenate(([0.0], np.cumsum(segment_m)))
-        keep = np.concatenate(([True], np.diff(s_from_start_m) > 1e-6))
-        east_sample = east_sample[keep]
-        north_sample = north_sample[keep]
-        s_from_start_m = s_from_start_m[keep]
-        dx_du = dx_du[keep]
-        dy_du = dy_du[keep]
-        ddx_du = ddx_du[keep]
-        ddy_du = ddy_du[keep]
-
-        speed_du = np.clip(dx_du**2 + dy_du**2, 1e-9, None)
-        track_rad = np.unwrap(np.arctan2(dy_du, dx_du))
-        curvature_inv_m = (dx_du * ddy_du - dy_du * ddx_du) / np.power(speed_du, 1.5)
-        total_length_m = float(s_from_start_m[-1])
+        total_length_m = float(waypoint_s_from_start_m[-1])
+        sample_count = max((len(lat) - 1) * samples_per_segment + 1, len(lat))
+        s_from_start_m = np.linspace(0.0, total_length_m, sample_count, dtype=float)
+        east_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, east_m)
+        north_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, north_m)
+        track_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, np.unwrap(waypoint_track_rad))
+        curvature_inv_m = np.gradient(track_sample, s_from_start_m, edge_order=1)
+        track_rad = track_sample
         s_m = total_length_m - s_from_start_m
         lat_sample = origin_lat_deg + np.rad2deg(north_sample / EARTH_RADIUS_M)
         lon_sample = origin_lon_deg + np.rad2deg(east_sample / (EARTH_RADIUS_M * np.cos(lat0_rad)))

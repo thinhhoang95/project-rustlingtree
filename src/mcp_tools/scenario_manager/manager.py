@@ -65,10 +65,11 @@ class ScenarioManager:
                 continue
 
             payload = self._apply_diff(dict(trajectory))
+            arrival_time = int(payload.get("first_time", fix_sequence["first_time"]))
             payload.update(
                 {
-                    "arrival_time": int(fix_sequence["first_time"]),
-                    "arrival_time_utc": self._arrival_time_utc(payload, int(fix_sequence["first_time"])),
+                    "arrival_time": arrival_time,
+                    "arrival_time_utc": self._arrival_time_utc(payload, arrival_time),
                     "runway": str(event["runway"]),
                     "original_fix_sequence": str(fix_sequence["fix_sequence"]),
                     "original_fix_count": int(fix_sequence["fix_count"]),
