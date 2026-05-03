@@ -65,12 +65,6 @@ class LateralCommand:
     phi_max_rad: float
 
 
-def _nearest_path_sample_index(reference_path: ReferencePath, east_m: float, north_m: float) -> int:
-    delta_east_m = np.asarray(reference_path.east_m, dtype=float) - float(east_m)
-    delta_north_m = np.asarray(reference_path.north_m, dtype=float) - float(north_m)
-    return int(np.argmin(delta_east_m**2 + delta_north_m**2))
-
-
 def compute_lateral_command(
     *,
     s_m: float,
@@ -136,7 +130,7 @@ def compute_lateral_command(
 
     Notes
     -----
-    - The path geometry is evaluated at the nearest sampled point on the
+    - The path geometry is evaluated at the closest projected point on the
       reference path, not at the current longitudinal ``s_m``. This keeps the
       controller responsive when the aircraft drifts far from the scheduled
       descent station.
@@ -154,8 +148,7 @@ def compute_lateral_command(
     ground_speed_mps = float(np.hypot(east_dot_mps, north_dot_mps))
     ground_track_rad = wrap_angle_rad(np.arctan2(north_dot_mps, east_dot_mps))
 
-    nearest_idx = _nearest_path_sample_index(reference_path, east_m, north_m)
-    ref_s_m = float(reference_path.s_m[nearest_idx])
+    ref_s_m = reference_path.project_s_m(east_m, north_m)
     ref_east_m, ref_north_m = reference_path.position_ne(ref_s_m)
     tangent_hat = reference_path.tangent_hat(ref_s_m)
     normal_hat = reference_path.normal_hat(ref_s_m)

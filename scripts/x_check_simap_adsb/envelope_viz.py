@@ -200,10 +200,11 @@ def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np
 
 def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest:
     reference_path = bundle.request.reference_path
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=bundle.request.reference_path.total_length_m)
 
     h_m = max(float(seed.geoaltitude_m), 1.0)
-    east_m, north_m = _latlon_to_ne(reference_path, np.asarray([seed.lat_deg]), np.asarray([seed.lon_deg]))
+    start_s_m = reference_path.total_length_m
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    east_m, north_m = reference_path.position_ne(fms_request.start_s_m)
     heading_deg = getattr(seed, "heading_deg", None)
     if heading_deg is not None and np.isfinite(float(heading_deg)):
         psi_rad = wrap_angle_rad(np.deg2rad(90.0 - float(heading_deg)))
@@ -215,8 +216,8 @@ def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest
         s_m=float(fms_request.start_s_m),
         h_m=h_m,
         v_tas_mps=float(fms_request.start_cas_mps),
-        east_m=float(east_m[0]),
-        north_m=float(north_m[0]),
+        east_m=float(east_m),
+        north_m=float(north_m),
         psi_rad=float(psi_rad),
         phi_rad=0.0,
     )
@@ -259,6 +260,30 @@ def _hide_xticklabels(ax: Axes) -> None:
 
 def _current_title(label: str, time_s: float, value_text: str) -> str:
     return f"{label} @ {_fmt_unix_time(time_s)}: {value_text}"
+
+
+def _plot_fix_markers(ax: Axes, path: Any) -> None:
+    waypoints = getattr(path, "waypoints", ())
+    if not waypoints:
+        return
+
+    fix_lon = np.asarray([float(waypoint.lon_deg) for waypoint in waypoints], dtype=float)
+    fix_lat = np.asarray([float(waypoint.lat_deg) for waypoint in waypoints], dtype=float)
+    finite = np.isfinite(fix_lon) & np.isfinite(fix_lat)
+    if not np.any(finite):
+        return
+
+    ax.scatter(
+        fix_lon[finite],
+        fix_lat[finite],
+        s=42,
+        marker="o",
+        facecolors="#ffffff",
+        edgecolors="#111827",
+        linewidths=0.9,
+        zorder=4,
+        label="fixes",
+    )
 
 
 def plot_cross_check(
@@ -317,6 +342,7 @@ def plot_cross_check(
     )
     trajectory_ax.plot(adsb.lon_deg, adsb.lat_deg, color=ADSB_COLOR, linewidth=2.0, label="ADS-B", zorder=2)
     trajectory_ax.plot(bichannel.lon_deg, bichannel.lat_deg, color=SIMAP_COLOR, linewidth=2.0, label="SIMAP", zorder=3)
+    _plot_fix_markers(trajectory_ax, bundle.path)
 
     first_bank_position = _first_active_position(bichannel, bank_state)
     first_cas_position = _first_active_position(bichannel, cas_state)

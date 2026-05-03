@@ -164,6 +164,25 @@ class ReferencePath:
             ]
         )
 
+    def project_s_m(self, east_m: float, north_m: float) -> float:
+        """Return the remaining path distance for the closest point on the path."""
+        point = np.asarray([float(east_m), float(north_m)], dtype=float)
+        starts = np.column_stack([self.east_m[:-1], self.north_m[:-1]])
+        ends = np.column_stack([self.east_m[1:], self.north_m[1:]])
+        segments = ends - starts
+        segment_lengths_sq = np.einsum("ij,ij->i", segments, segments)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fractions = np.einsum("ij,ij->i", point - starts, segments) / segment_lengths_sq
+        fractions = np.clip(np.nan_to_num(fractions, nan=0.0), 0.0, 1.0)
+        closest = starts + fractions[:, np.newaxis] * segments
+        distances_sq = np.einsum("ij,ij->i", closest - point, closest - point)
+        index = int(np.argmin(distances_sq))
+        s_from_start = float(
+            self.s_from_start_m[index]
+            + fractions[index] * (self.s_from_start_m[index + 1] - self.s_from_start_m[index])
+        )
+        return float(np.clip(self.total_length_m - s_from_start, 0.0, self.total_length_m))
+
     def latlon(self, s_m: float) -> tuple[float, float]:
         return self._interp_for_s(self.lat_deg, s_m), self._interp_for_s(self.lon_deg, s_m)
 

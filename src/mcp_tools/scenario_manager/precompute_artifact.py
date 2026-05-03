@@ -10,6 +10,17 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from openap import aero
 
 from mcp_tools.scenario_manager.models import project_root
@@ -199,8 +210,9 @@ def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FM
         altitude_constraints=(),
     )
     bundle = build_tactical_plan_request(command, fixes_csv=fixes_csv)
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=bundle.request.reference_path.total_length_m)
-    east_m, north_m = _ne_from_latlon(bundle.request.reference_path, lat_deg=seed.lat_deg, lon_deg=seed.lon_deg)
+    start_s_m = bundle.request.reference_path.total_length_m
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    east_m, north_m = bundle.request.reference_path.position_ne(fms_request.start_s_m)
     psi_rad = (
         _heading_deg_to_psi_rad(seed.heading_deg)
         if seed.heading_deg is not None
@@ -344,14 +356,16 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
         return _skip_result(row, f"{type(exc).__name__}: {exc}"), None
 
 
-def _run_artifact_tasks(tasks: list[ArtifactTask], processes: int) -> list[tuple[ArtifactResult, dict[str, Any] | None]]:
+def _run_artifact_tasks(tasks: list[ArtifactTask], processes: int):
     if not tasks:
-        return []
+        return
     worker_count = max(1, min(int(processes), len(tasks)))
     if worker_count <= 1:
-        return [_process_arrival_task(task) for task in tasks]
+        for task in tasks:
+            yield _process_arrival_task(task)
+        return
     with Pool(processes=worker_count) as pool:
-        return list(pool.imap_unordered(_process_arrival_task, tasks, chunksize=1))
+        yield from pool.imap_unordered(_process_arrival_task, tasks, chunksize=1)
 
 
 def precompute_artifacts(
@@ -366,11 +380,16 @@ def precompute_artifacts(
     split_gap_seconds: int = DEFAULT_SPLIT_GAP_SECONDS,
     processes: int = 1,
     limit: int | None = None,
+    console: Console | None = None,
 ) -> dict[str, Any]:
     arrivals = _arrival_rows(events_path, fix_sequences_path)
     if limit is not None:
         arrivals = arrivals.head(limit).copy()
-    raw_by_flight = _flight_raw_tracks(raw_adsb_dir, processes=processes, split_gap_seconds=split_gap_seconds)
+    if console is not None:
+        with console.status("[bold]Loading raw ADS-B tracks...[/bold]"):
+            raw_by_flight = _flight_raw_tracks(raw_adsb_dir, processes=processes, split_gap_seconds=split_gap_seconds)
+    else:
+        raw_by_flight = _flight_raw_tracks(raw_adsb_dir, processes=processes, split_gap_seconds=split_gap_seconds)
 
     tasks: list[ArtifactTask] = []
     for _idx, row in arrivals.iterrows():
@@ -384,29 +403,70 @@ def precompute_artifacts(
                 altitude_tolerance_m=altitude_tolerance_m,
             )
         )
-    task_results = _run_artifact_tasks(tasks, processes=processes)
+    task_results: list[tuple[ArtifactResult, dict[str, Any] | None]] = []
+    if console is not None:
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        )
+        with progress:
+            progress_task = progress.add_task("[cyan]Computing artifact flights[/cyan]", total=len(tasks))
+            for task_result in _run_artifact_tasks(tasks, processes=processes) or ():
+                task_results.append(task_result)
+                progress.advance(progress_task)
+    else:
+        task_results = list(_run_artifact_tasks(tasks, processes=processes) or ())
     results = [result for result, _payload in task_results]
     payloads = [payload for _result, payload in task_results if payload is not None]
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    flights_path = output_dir / "flights.jsonl"
-    write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
-    manifest = _manifest(
-        results=results,
-        events_path=events_path,
-        fix_sequences_path=fix_sequences_path,
-        raw_adsb_dir=raw_adsb_dir,
-        fixes_csv=fixes_csv,
-        flights_path=flights_path,
-        lateral_tolerance_m=lateral_tolerance_m,
-        altitude_tolerance_m=altitude_tolerance_m,
-        processes=processes,
-        skipped_departure_count=_departure_count(events_path),
-    )
-    manifest_path = output_dir / "manifest.json"
-    with manifest_path.open("w", encoding="utf-8") as stream:
-        json.dump(manifest, stream, indent=2, allow_nan=False)
-        stream.write("\n")
+    if console is not None:
+        with console.status("[bold]Writing artifact outputs...[/bold]"):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            flights_path = output_dir / "flights.jsonl"
+            write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+            manifest = _manifest(
+                results=results,
+                events_path=events_path,
+                fix_sequences_path=fix_sequences_path,
+                raw_adsb_dir=raw_adsb_dir,
+                fixes_csv=fixes_csv,
+                flights_path=flights_path,
+                lateral_tolerance_m=lateral_tolerance_m,
+                altitude_tolerance_m=altitude_tolerance_m,
+                processes=processes,
+                skipped_departure_count=_departure_count(events_path),
+            )
+            manifest_path = output_dir / "manifest.json"
+            with manifest_path.open("w", encoding="utf-8") as stream:
+                json.dump(manifest, stream, indent=2, allow_nan=False)
+                stream.write("\n")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        flights_path = output_dir / "flights.jsonl"
+        write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+        manifest = _manifest(
+            results=results,
+            events_path=events_path,
+            fix_sequences_path=fix_sequences_path,
+            raw_adsb_dir=raw_adsb_dir,
+            fixes_csv=fixes_csv,
+            flights_path=flights_path,
+            lateral_tolerance_m=lateral_tolerance_m,
+            altitude_tolerance_m=altitude_tolerance_m,
+            processes=processes,
+            skipped_departure_count=_departure_count(events_path),
+        )
+        manifest_path = output_dir / "manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, indent=2, allow_nan=False)
+            stream.write("\n")
     return manifest
 
 
@@ -479,6 +539,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     root = project_root()
+    console = Console()
     manifest = precompute_artifacts(
         events_path=_abs_path(root, args.events_path),
         fix_sequences_path=_abs_path(root, args.fix_sequences_path),
@@ -490,8 +551,9 @@ def main() -> None:
         split_gap_seconds=args.split_gap_seconds,
         processes=args.processes,
         limit=args.limit,
+        console=console,
     )
-    print(
+    console.print(
         json.dumps(
             {
                 "generated_count": manifest["generated_count"],

@@ -86,7 +86,7 @@ class LateralDynamicsTests(unittest.TestCase):
         self.assertGreater(abs(tailwind.phi_req_rad), abs(calm.phi_req_rad))
         self.assertGreater(abs(calm.phi_req_rad), abs(headwind.phi_req_rad))
 
-    def test_bank_command_projects_to_nearest_path_sample_when_far_off_route(self) -> None:
+    def test_bank_command_projects_to_closest_path_point_when_far_off_route(self) -> None:
         fixture = a320_fixture()
         cfg = fixture["cfg"]
         reference_path = fixture["reference_path"]
@@ -117,12 +117,9 @@ class LateralDynamicsTests(unittest.TestCase):
             guidance=LateralGuidanceConfig(),
         )
 
-        delta_east_m = np.asarray(reference_path.east_m, dtype=float) - east_m
-        delta_north_m = np.asarray(reference_path.north_m, dtype=float) - north_m
-        nearest_idx = int(np.argmin(delta_east_m**2 + delta_north_m**2))
-        nearest_s_m = float(reference_path.s_m[nearest_idx])
-        nearest_ref_east_m, nearest_ref_north_m = reference_path.position_ne(nearest_s_m)
-        nearest_normal_hat = reference_path.normal_hat(nearest_s_m)
+        projected_s_m = reference_path.project_s_m(east_m, north_m)
+        nearest_ref_east_m, nearest_ref_north_m = reference_path.position_ne(projected_s_m)
+        nearest_normal_hat = reference_path.normal_hat(projected_s_m)
         expected_cross_track_m = float(
             (east_m - nearest_ref_east_m) * float(nearest_normal_hat[0])
             + (north_m - nearest_ref_north_m) * float(nearest_normal_hat[1])
