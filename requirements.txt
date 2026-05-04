@@ -19,3 +19,6 @@ cartopy
 pdf2image
 arinc424
 pytest 
+pydantic
+fastapi
+uvicorn

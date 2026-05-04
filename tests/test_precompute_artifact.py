@@ -90,7 +90,7 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
         processes=1,
     )
 
-    flights_path = output_dir / "flights.jsonl"
+    flights_path = output_dir / "simap_arrival_flights.jsonl"
     stored_manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     payloads = [json.loads(line) for line in flights_path.read_text(encoding="utf-8").splitlines()]
 

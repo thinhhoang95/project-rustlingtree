@@ -1,0 +1,11 @@
+{
+  "2026-04-01": {
+    "landings_and_departures": "data/adsb/catalogs/2026-04-01_landings_and_departures.csv",
+    "fix_sequences": "data/adsb/catalogs/2026-04-01_fix_sequences.csv",
+    "simap_arrival_trajectories": "data/artifacts/simap_arrival_flights.jsonl",
+    "simap_arrival_artifact_manifest": "data/artifacts/manifest.json",
+    "adsb_compressed_trajectories": "data/adsb/compressed/adsb_compressed_flights.jsonl",
+    "adsb_compressed_metadata": "data/adsb/compressed/metadata.json",
+    "default": true
+  }
+}

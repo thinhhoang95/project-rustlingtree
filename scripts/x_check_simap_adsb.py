@@ -35,7 +35,7 @@ from simap.openap_adapter import openap_dT
 from simap.units import m_to_ft, mps_to_kts
 from x_check_simap_adsb.envelope_viz import plot_cross_check as plot_cross_check_envelope
 
-DEFAULT_ARTIFACTS_PATH = PROJECT_ROOT / "data" / "artifacts" / "flights.jsonl"
+DEFAULT_ARTIFACTS_PATH = PROJECT_ROOT / "data" / "artifacts" / "simap_arrival_flights.jsonl"
 DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "adsb" / "raw" / "2026-04-01"
 DEFAULT_EVENTS_PATH = PROJECT_ROOT / "data" / "adsb" / "catalogs" / "2026-04-01_landings_and_departures.csv"
 DEFAULT_FIX_SEQUENCES_PATH = PROJECT_ROOT / "data" / "adsb" / "catalogs" / "2026-04-01_fix_sequences.csv"

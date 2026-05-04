@@ -44,6 +44,7 @@ DEFAULT_FIX_SEQUENCES_PATH = Path("data/adsb/catalogs/2026-04-01_fix_sequences.c
 DEFAULT_RAW_ADSB_DIR = Path("data/adsb/raw")
 DEFAULT_FIXES_CSV = Path("data/kdfw_procs/airport_related_fixes.csv")
 DEFAULT_OUTPUT_DIR = Path("data/artifacts")
+OUTPUT_FLIGHTS_FILENAME = "simap_arrival_flights.jsonl"
 DEFAULT_LATERAL_TOLERANCE_M = 100.0
 DEFAULT_ALTITUDE_TOLERANCE_M = 50.0
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
@@ -466,7 +467,7 @@ def precompute_artifacts(
     if console is not None:
         with console.status("[bold]Writing artifact outputs...[/bold]"):
             output_dir.mkdir(parents=True, exist_ok=True)
-            flights_path = output_dir / "flights.jsonl"
+            flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
             write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
             manifest = _manifest(
                 results=results,
@@ -486,7 +487,7 @@ def precompute_artifacts(
                 stream.write("\n")
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
-        flights_path = output_dir / "flights.jsonl"
+        flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
         write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
         manifest = _manifest(
             results=results,
