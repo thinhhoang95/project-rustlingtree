@@ -32,6 +32,9 @@ UNAVAILABLE = "N/A"
 CAS_STATE_ATOL_MPS = 0.25
 GAMMA_STATE_ATOL_RAD = np.deg2rad(0.2)
 BANK_STATE_ATOL_RAD = np.deg2rad(0.25)
+KDFW_CENTER_LAT_DEG = 32.8971023790
+KDFW_CENTER_LON_DEG = -97.0365477817
+KDFW_TRAJECTORY_VIEW_RADIUS_M = 120_000.0
 
 
 class TrajectoryLike(Protocol):
@@ -287,6 +290,14 @@ def _plot_fix_markers(ax: Axes, path: Any) -> None:
     )
 
 
+def _set_kdfw_airport_area_limits(ax: Axes) -> None:
+    lat_delta_deg = np.rad2deg(KDFW_TRAJECTORY_VIEW_RADIUS_M / EARTH_RADIUS_M)
+    lon_delta_deg = lat_delta_deg / np.cos(np.deg2rad(KDFW_CENTER_LAT_DEG))
+    ax.set_xlim(KDFW_CENTER_LON_DEG - lon_delta_deg, KDFW_CENTER_LON_DEG + lon_delta_deg)
+    ax.set_ylim(KDFW_CENTER_LAT_DEG - lat_delta_deg, KDFW_CENTER_LAT_DEG + lat_delta_deg)
+    ax.set_aspect("equal", adjustable="box")
+
+
 def plot_cross_check(
     adsb: TrajectoryLike,
     reference_path: ReferencePath,
@@ -371,7 +382,7 @@ def plot_cross_check(
     trajectory_ax.set_ylabel("Latitude [deg]")
     trajectory_ax.grid(True, alpha=0.25)
     trajectory_ax.legend(loc="best", fontsize=8.5)
-    trajectory_ax.axis("equal")
+    _set_kdfw_airport_area_limits(trajectory_ax)
 
     cross_track_ax.plot(adsb_time_s, adsb_cross_track_m, color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
     cross_track_ax.plot(sim_time_s, sim_cross_track_m, color=SIMAP_COLOR, linewidth=1.8, label="SIMAP")
