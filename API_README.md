@@ -165,6 +165,21 @@ The trajectory payload remains compatible with the ADS-B compressed trajectory f
 - `compressed_point_count`
 - tolerance metadata
 
+Arrival artifacts also include `wait_atc_point`, a metadata object identifying the point where the aircraft should wait for ATC instruction. This point is near the last downwind-leg fix when one is available in the 40-50 NM airport annulus; otherwise it is a generated ghost coordinate at 40 NM. It does not change the compressed trajectory points.
+
+`wait_atc_point` fields:
+
+- `source`: `"fix"` when a route fix was selected, or `"ghost"` when a generated coordinate was used
+- `identifier`: selected fix identifier, or `"WAIT_ATC_GHOST"`
+- `lat`
+- `lon`
+- `lateral_path_token`: selected fix identifier, or a coordinate token like `"33.123456,-97.123456"`
+- `distance_nm`
+- `route_index`: zero-based route index for a selected fix, or `null` for a ghost point
+- `matched_course_deg`: matched route-segment course for a selected fix, or `null` for a ghost point
+- `final_course_deg`
+- `downwind_course_deg`
+
 Example:
 
 ```bash
@@ -184,6 +199,30 @@ Example response shape:
       [1743465659, 34.45838928222656, -95.25550063775512, 11170.920000000002, 3],
       [1743465839, 34.20744323730469, -95.51782724808676, 11148.06, 2]
     ],
+    "breakpoint_mask_bits": {
+      "lateral": 1,
+      "altitude": 2
+    },
+    "lateral_breakpoint_times": [1743465659, 1743465839],
+    "altitude_breakpoint_times": [1743465659, 1743465839],
+    "wait_atc_point": {
+      "source": "fix",
+      "identifier": "BIRLE",
+      "lat": 33.62801388888889,
+      "lon": -97.20365555555555,
+      "lateral_path_token": "BIRLE",
+      "distance_nm": 45.2,
+      "route_index": 1,
+      "matched_course_deg": 169.8,
+      "final_course_deg": 350.0,
+      "downwind_course_deg": 170.0
+    },
+    "first_time": 1743465659,
+    "last_time": 1743465839,
+    "raw_point_count": 181,
+    "compressed_point_count": 42,
+    "lateral_tolerance_m": 100.0,
+    "altitude_tolerance_m": 50.0,
     "time_at_first_fix": 1743465659,
     "time_at_first_fix_utc": "2025-04-01T00:00:59Z",
     "time_at_last_event": 1743465839,

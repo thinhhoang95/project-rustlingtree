@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 
+from scripts.x_check_simap_adsb.envelope_viz import _wait_atc_point_coordinates
 from scripts.x_check_simap_adsb import (
     derive_speed_mps,
     load_simap_payload,
@@ -96,3 +97,11 @@ def test_derive_speed_mps_uses_neighboring_positions() -> None:
     assert np.isfinite(speeds).all()
     assert speeds[1] == speeds[2]
     assert speeds[1] > speeds[0]
+
+
+def test_wait_atc_point_coordinates_accepts_valid_payload_and_rejects_invalid_payload() -> None:
+    point = {"lat": 32.123456, "lon": -97.654321}
+
+    assert _wait_atc_point_coordinates(point) == (-97.654321, 32.123456)
+    assert _wait_atc_point_coordinates(None) is None
+    assert _wait_atc_point_coordinates({"lat": "nan", "lon": -97.0}) is None

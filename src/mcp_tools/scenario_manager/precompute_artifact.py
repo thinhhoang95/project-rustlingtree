@@ -38,6 +38,7 @@ from simap.openap_adapter import openap_dT
 from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
 from simap.units import m_to_ft, mps_to_kts
 
+from mcp_tools.scenario_manager.wait_atc_point import detect_wait_atc_point
 
 DEFAULT_EVENTS_PATH = Path("data/adsb/catalogs/2026-04-01_landings_and_departures.csv")
 DEFAULT_FIX_SEQUENCES_PATH = Path("data/adsb/catalogs/2026-04-01_fix_sequences.csv")
@@ -191,11 +192,14 @@ def _seed_for_flight_at_fix(
     )
 
 
-def _first_route_fix_latlon(route: list[str], fixes_csv: Path) -> tuple[float, float]:
-    fix_catalog = load_fix_catalog(fixes_csv)
+def _first_route_fix_latlon_from_catalog(route: list[str], fix_catalog) -> tuple[float, float]:
     resolved_path = resolve_lateral_path(route, fix_catalog)
     first_waypoint = resolved_path.waypoints[0]
     return float(first_waypoint.lat_deg), float(first_waypoint.lon_deg)
+
+
+def _first_route_fix_latlon(route: list[str], fixes_csv: Path) -> tuple[float, float]:
+    return _first_route_fix_latlon_from_catalog(route, load_fix_catalog(fixes_csv))
 
 
 def _latlon_distance_m(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
@@ -267,6 +271,7 @@ def _payload_from_result(
     *,
     row: pd.Series,
     seed_time_s: int,
+    wait_atc_point: dict[str, Any],
     result,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
@@ -315,6 +320,7 @@ def _payload_from_result(
         "points": points,
         "lateral_breakpoint_times": [int(times[index]) for index in breakpoints.lateral_indices],
         "altitude_breakpoint_times": [int(times[index]) for index in breakpoints.altitude_indices],
+        "wait_atc_point": wait_atc_point,
         "first_time": int(times[0]),
         "last_time": int(times[-1]),
         "raw_point_count": len(times),
@@ -366,7 +372,9 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
         if task.raw_flight is None:
             return _skip_result(row, "missing raw ADS-B flight"), None
         route = _route_tokens(row["fix_sequence"], row["runway"])
-        first_fix_lat_deg, first_fix_lon_deg = _first_route_fix_latlon(route, task.fixes_csv)
+        fix_catalog = load_fix_catalog(task.fixes_csv)
+        wait_atc_point = detect_wait_atc_point(route, fix_catalog, runway=str(row["runway"]))
+        first_fix_lat_deg, first_fix_lon_deg = _first_route_fix_latlon_from_catalog(route, fix_catalog)
         seed = _seed_for_flight_at_fix(
             task.raw_flight,
             fix_lat_deg=first_fix_lat_deg,
@@ -385,6 +393,7 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
         artifact, payload = _payload_from_result(
             row=row,
             seed_time_s=seed.time_s,
+            wait_atc_point=wait_atc_point,
             result=result,
             lateral_tolerance_m=task.lateral_tolerance_m,
             altitude_tolerance_m=task.altitude_tolerance_m,

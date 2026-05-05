@@ -370,6 +370,24 @@ def _render_lateral_path_table(console: Console, *, raw_tokens: list[str], bundl
     console.print(table)
 
 
+def _format_wait_atc_point(wait_atc_point: object) -> str:
+    if not isinstance(wait_atc_point, dict):
+        return UNAVAILABLE
+    identifier = str(wait_atc_point.get("identifier", "")).strip() or UNAVAILABLE
+    source = str(wait_atc_point.get("source", "")).strip() or UNAVAILABLE
+    token = str(wait_atc_point.get("lateral_path_token", "")).strip() or UNAVAILABLE
+    lat = wait_atc_point.get("lat")
+    lon = wait_atc_point.get("lon")
+    distance_nm = wait_atc_point.get("distance_nm")
+    return (
+        f"{identifier} ({source}) / "
+        f"lat {format_value(float(lat), '', 6) if lat is not None else UNAVAILABLE}, "
+        f"lon {format_value(float(lon), '', 6) if lon is not None else UNAVAILABLE}, "
+        f"distance {format_value(float(distance_nm), ' NM') if distance_nm is not None else UNAVAILABLE}, "
+        f"token {token}"
+    )
+
+
 def _set_marker(marker, sample: Sample, x_attr: str, y_attr: str) -> None:
     x_value = getattr(sample, x_attr)
     y_value = getattr(sample, y_attr)
@@ -412,6 +430,8 @@ def main() -> None:
     simap = trajectory_from_simap_payload(payload)
     adsb = trajectory_from_adsb_track(raw_track)
     reference_path = bundle.request.reference_path
+    wait_atc_point = payload.get("wait_atc_point")
+    wait_atc_point_for_plot = wait_atc_point if isinstance(wait_atc_point, dict) else None
 
     console = Console()
     console.rule("[bold cyan]SIMAP inputs reconstructed from precompute data[/bold cyan]")
@@ -424,6 +444,7 @@ def main() -> None:
             f"[bold]Fix sequence[/bold]: {sequence_row['fix_sequence'] if pd.notna(sequence_row['fix_sequence']) else ''}\n"
             f"[bold]SIMAP lateral_path[/bold]: {' > '.join(route_tokens)}\n"
             f"[bold]Upstream boundary[/bold]: {route_tokens[0]} / {_fmt_kt(cas_mps)} kt / {_fmt_ft(h_m)} ft\n"
+            f"[bold]Wait ATC point[/bold]: {_format_wait_atc_point(wait_atc_point)}\n"
             f"[bold]Raw ADS-B seed time[/bold]: {seed.time_s} ({format_unix_time(float(seed.time_s))})",
             title="Precompute context",
             border_style="cyan",
@@ -435,7 +456,7 @@ def main() -> None:
     console.rule("[bold cyan]Trajectory summary[/bold cyan]")
     console.print(f"ADS-B: {len(adsb.time_s)} points, {format_unix_time(adsb.first_time_s)} to {format_unix_time(adsb.last_time_s)}")
     console.print(f"SIMAP: {len(simap.time_s)} points, {format_unix_time(simap.first_time_s)} to {format_unix_time(simap.last_time_s)}")
-    plot_cross_check_envelope(adsb, reference_path, key, bundle=bundle, seed=seed)
+    plot_cross_check_envelope(adsb, reference_path, key, bundle=bundle, seed=seed, wait_atc_point=wait_atc_point_for_plot)
 
 
 if __name__ == "__main__":

@@ -158,6 +158,7 @@ class ArrivalScheduleItem(BaseModel):
     compressed_point_count: int | None = None
     lateral_tolerance_m: float | None = None
     altitude_tolerance_m: float | None = None
+    wait_atc_point: dict[str, Any] | None = None
 
 
 class HealthResponse(BaseModel):

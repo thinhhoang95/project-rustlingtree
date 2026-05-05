@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -290,6 +291,41 @@ def _plot_fix_markers(ax: Axes, path: Any) -> None:
     )
 
 
+def _wait_atc_point_coordinates(wait_atc_point: Mapping[str, Any] | None) -> tuple[float, float] | None:
+    if wait_atc_point is None:
+        return None
+    try:
+        lat_deg = float(wait_atc_point["lat"])
+        lon_deg = float(wait_atc_point["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not np.isfinite(lat_deg) or not np.isfinite(lon_deg):
+        return None
+    return lon_deg, lat_deg
+
+
+def _plot_wait_atc_point(ax: Axes, wait_atc_point: Mapping[str, Any] | None) -> None:
+    coordinates = _wait_atc_point_coordinates(wait_atc_point)
+    if coordinates is None:
+        return
+    lon_deg, lat_deg = coordinates
+    label = "wait ATC point"
+    identifier = str(wait_atc_point.get("identifier", "")).strip() if wait_atc_point is not None else ""
+    if identifier:
+        label = f"{label}: {identifier}"
+    ax.scatter(
+        [lon_deg],
+        [lat_deg],
+        s=115,
+        marker="X",
+        color="#be123c",
+        edgecolors="white",
+        linewidths=1.0,
+        zorder=8,
+        label=label,
+    )
+
+
 def _set_kdfw_airport_area_limits(ax: Axes) -> None:
     lat_delta_deg = np.rad2deg(KDFW_TRAJECTORY_VIEW_RADIUS_M / EARTH_RADIUS_M)
     lon_delta_deg = lat_delta_deg / np.cos(np.deg2rad(KDFW_CENTER_LAT_DEG))
@@ -305,6 +341,7 @@ def plot_cross_check(
     *,
     bundle: Any,
     seed: SeedLike,
+    wait_atc_point: Mapping[str, Any] | None = None,
 ) -> None:
     bichannel = build_bichannel_result(bundle, seed)
     sim_time_s = float(seed.time_s) + np.asarray(bichannel.t_s, dtype=float)
@@ -355,6 +392,7 @@ def plot_cross_check(
     trajectory_ax.plot(adsb.lon_deg, adsb.lat_deg, color=ADSB_COLOR, linewidth=2.0, label="ADS-B", zorder=2)
     trajectory_ax.plot(bichannel.lon_deg, bichannel.lat_deg, color=SIMAP_COLOR, linewidth=2.0, label="SIMAP", zorder=3)
     _plot_fix_markers(trajectory_ax, bundle.path)
+    _plot_wait_atc_point(trajectory_ax, wait_atc_point)
 
     first_bank_position = _first_active_position(bichannel, bank_state)
     first_cas_position = _first_active_position(bichannel, cas_state)

@@ -102,6 +102,9 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
+    assert payloads[0]["wait_atc_point"]["source"] == "ghost"
+    assert payloads[0]["wait_atc_point"]["identifier"] == "WAIT_ATC_GHOST"
+    assert payloads[0]["wait_atc_point"]["lateral_path_token"]
 
 
 def test_seed_for_flight_uses_adsb_point_closest_to_first_fix() -> None:
