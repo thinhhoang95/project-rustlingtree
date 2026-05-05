@@ -271,7 +271,7 @@ def _payload_from_result(
     *,
     row: pd.Series,
     seed_time_s: int,
-    wait_atc_point: dict[str, Any],
+    wait_atc_point: dict[str, Any] | None,
     result,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
