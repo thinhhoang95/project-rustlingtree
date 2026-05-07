@@ -45,6 +45,17 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         "compressed_point_count": 2,
         "lateral_tolerance_m": 100.0,
         "altitude_tolerance_m": 50.0,
+        "wait_atc_point": {
+            "source": "fix",
+            "identifier": "FIXB",
+            "lat": 32.1,
+            "lon": -97.1,
+            "lateral_path_token": "FIXB",
+            "route_index": 1,
+            "distance_nm": 37.0,
+            "ring_inner_nm": 35.0,
+            "ring_outer_nm": 40.0,
+        },
     }
     simap_arrival_trajectories_path.write_text(json.dumps(simap_arrival_payload) + "\n", encoding="utf-8")
 
@@ -165,6 +176,17 @@ def test_arrival_schedule_uses_artifact_start_time_and_preserves_compressed_poin
     assert arrival["original_fix_count"] == 2
     assert arrival["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert arrival["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrival["wait_atc_point"] == {
+        "source": "fix",
+        "identifier": "FIXB",
+        "lat": 32.1,
+        "lon": -97.1,
+        "lateral_path_token": "FIXB",
+        "route_index": 1,
+        "distance_nm": 37.0,
+        "ring_inner_nm": 35.0,
+        "ring_outer_nm": 40.0,
+    }
 
 
 def test_health_reports_missing_arrival_trajectories(tmp_path: Path) -> None:
@@ -209,3 +231,4 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert arrivals.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrivals.json()[0]["wait_atc_point"]["identifier"] == "FIXB"

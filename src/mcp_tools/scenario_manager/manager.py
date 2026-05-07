@@ -93,6 +93,7 @@ class ScenarioManager:
                     "runway": str(event["runway"]),
                     "original_fix_sequence": str(fix_sequence["fix_sequence"]),
                     "original_fix_count": int(fix_sequence["fix_count"]),
+                    "wait_atc_point": payload.get("wait_atc_point"),
                 }
             )
             arrivals.append(payload)

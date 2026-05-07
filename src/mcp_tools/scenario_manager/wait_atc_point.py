@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -9,19 +8,11 @@ from simap.nlp_colloc.tactical.models import PathWaypoint
 from simap.nlp_colloc.tactical.path import resolve_lateral_path
 
 
-DEFAULT_HEADING_TOLERANCE_DEG = 10.0
+DEFAULT_RING_INNER_NM = 35.0
+DEFAULT_RING_OUTER_NM = 40.0
 
-_RUNWAY_RE = re.compile(r"^(?:RW)?(?P<number>[0-9]{2})(?:[LCR])?$", re.IGNORECASE)
-
-
-def parse_runway_final_course_deg(runway: str) -> float:
-    match = _RUNWAY_RE.fullmatch(str(runway).strip().upper())
-    if match is None:
-        raise ValueError(f"invalid runway designator: {runway!r}")
-    number = int(match.group("number"))
-    if number < 1 or number > 36:
-        raise ValueError(f"invalid runway designator: {runway!r}")
-    return float((number * 10) % 360)
+EARTH_RADIUS_M = 6_371_000.0
+METERS_PER_NM = 1_852.0
 
 
 def detect_wait_atc_point(
@@ -29,40 +20,66 @@ def detect_wait_atc_point(
     fix_catalog: Mapping[str, PathWaypoint],
     *,
     runway: str,
-    heading_tolerance_deg: float = DEFAULT_HEADING_TOLERANCE_DEG,
+    ring_inner_nm: float = DEFAULT_RING_INNER_NM,
+    ring_outer_nm: float = DEFAULT_RING_OUTER_NM,
 ) -> dict[str, Any] | None:
     resolved_path = resolve_lateral_path(route, fix_catalog)
-    final_course_deg = parse_runway_final_course_deg(runway)
-    downwind_course_deg = _normalize_course_deg(final_course_deg + 180.0)
+    runway_waypoint = _runway_waypoint(resolved_path.waypoints, fix_catalog, runway)
+    if runway_waypoint is None:
+        return None
+
+    inner_nm = float(ring_inner_nm)
+    outer_nm = float(ring_outer_nm)
+    if inner_nm > outer_nm:
+        raise ValueError("ring_inner_nm must be less than or equal to ring_outer_nm")
+
     waypoints = resolved_path.waypoints
 
-    for index in range(len(waypoints) - 2, -1, -1):
-        waypoint = waypoints[index]
-        next_waypoint = waypoints[index + 1]
-        matched_course_deg = _initial_bearing_deg(
+    for index, waypoint in enumerate(waypoints):
+        if not _is_route_fix_candidate(waypoint):
+            continue
+        distance_nm = _distance_nm(
             waypoint.lat_deg,
             waypoint.lon_deg,
-            next_waypoint.lat_deg,
-            next_waypoint.lon_deg,
+            runway_waypoint.lat_deg,
+            runway_waypoint.lon_deg,
         )
-        if _course_delta_deg(matched_course_deg, downwind_course_deg) > float(heading_tolerance_deg):
-            continue
-        if not _is_route_fix_candidate(next_waypoint):
+        if not inner_nm <= distance_nm <= outer_nm:
             continue
 
+        identifier = waypoint.identifier
         return {
             "source": "fix",
-            "identifier": next_waypoint.identifier,
-            "lat": float(next_waypoint.lat_deg),
-            "lon": float(next_waypoint.lon_deg),
-            "lateral_path_token": next_waypoint.identifier,
-            "route_index": index + 1,
-            "matched_course_deg": float(matched_course_deg),
-            "final_course_deg": float(final_course_deg),
-            "downwind_course_deg": float(downwind_course_deg),
+            "identifier": identifier,
+            "lat": float(waypoint.lat_deg),
+            "lon": float(waypoint.lon_deg),
+            "lateral_path_token": identifier,
+            "route_index": index,
+            "distance_nm": float(distance_nm),
+            "ring_inner_nm": inner_nm,
+            "ring_outer_nm": outer_nm,
         }
 
     return None
+
+
+def _runway_waypoint(
+    waypoints: Sequence[PathWaypoint],
+    fix_catalog: Mapping[str, PathWaypoint],
+    runway: str,
+) -> PathWaypoint | None:
+    runway_identifier = _normalize_runway_identifier(runway)
+    for waypoint in waypoints:
+        if waypoint.identifier.upper() == runway_identifier:
+            return waypoint
+    return fix_catalog.get(runway_identifier)
+
+
+def _normalize_runway_identifier(runway: str) -> str:
+    runway_identifier = str(runway).strip().upper()
+    if not runway_identifier.startswith("RW"):
+        runway_identifier = f"RW{runway_identifier}"
+    return runway_identifier
 
 
 def _is_route_fix_candidate(waypoint: PathWaypoint) -> bool:
@@ -71,18 +88,20 @@ def _is_route_fix_candidate(waypoint: PathWaypoint) -> bool:
     return waypoint.source.lower() != "coordinate"
 
 
-def _normalize_course_deg(course_deg: float) -> float:
-    return float(course_deg % 360.0)
-
-
-def _course_delta_deg(a_deg: float, b_deg: float) -> float:
-    return float(abs((float(a_deg) - float(b_deg) + 180.0) % 360.0 - 180.0))
-
-
-def _initial_bearing_deg(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
+def _distance_nm(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
     lat_a_rad = math.radians(float(lat_a_deg))
+    lon_a_rad = math.radians(float(lon_a_deg))
     lat_b_rad = math.radians(float(lat_b_deg))
-    dlon_rad = math.radians(float(lon_b_deg) - float(lon_a_deg))
-    y = math.sin(dlon_rad) * math.cos(lat_b_rad)
-    x = math.cos(lat_a_rad) * math.sin(lat_b_rad) - math.sin(lat_a_rad) * math.cos(lat_b_rad) * math.cos(dlon_rad)
-    return _normalize_course_deg(math.degrees(math.atan2(y, x)))
+    lon_b_rad = math.radians(float(lon_b_deg))
+    dlat_rad = lat_b_rad - lat_a_rad
+    dlon_rad = lon_b_rad - lon_a_rad
+    haversine = (
+        math.sin(dlat_rad / 2.0) ** 2
+        + math.cos(lat_a_rad) * math.cos(lat_b_rad) * math.sin(dlon_rad / 2.0) ** 2
+    )
+    haversine = min(1.0, max(0.0, haversine))
+    distance_m = EARTH_RADIUS_M * 2.0 * math.atan2(
+        math.sqrt(haversine),
+        math.sqrt(1.0 - haversine),
+    )
+    return float(distance_m / METERS_PER_NM)
