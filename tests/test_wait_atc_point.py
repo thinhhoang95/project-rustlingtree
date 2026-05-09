@@ -10,87 +10,116 @@ def _waypoint(identifier: str, lat_deg: float, lon_deg: float, source: str = "fi
     return PathWaypoint(identifier=identifier, lat_deg=lat_deg, lon_deg=lon_deg, source=source)
 
 
-def test_detect_wait_atc_point_chooses_earliest_fix_inside_default_ring() -> None:
-    catalog = {
-        "RW36L": _waypoint("RW36L", 0.0, 0.0, source="runway"),
-        "BEFORE": _waypoint("BEFORE", 0.75, 0.0),
-        "FIRST": _waypoint("FIRST", 0.65, 0.0),
-        "SECOND": _waypoint("SECOND", 0.60, 0.0),
+def _catalog() -> dict[str, PathWaypoint]:
+    return {
+        "RW35C": _waypoint("RW35C", 32.87887777777778, -97.02617222222221, source="runway"),
+        "FAR_NE": _waypoint("FAR_NE", 33.75, -96.10),
+        "BRDJE": _waypoint("BRDJE", 33.32655277777778, -96.42285555555556),
+        "COVIE": _waypoint("COVIE", 33.275, -96.49514722222223),
+        "FAR_NW": _waypoint("FAR_NW", 33.75, -98.20),
+        "VKTRY": _waypoint("VKTRY", 33.3839, -97.64171111111112),
+        "GREGS": _waypoint("GREGS", 33.450608333333335, -97.46605555555556),
+        "FAR_SW": _waypoint("FAR_SW", 31.90, -98.00),
+        "HODAX": _waypoint("HODAX", 32.97505833333334, -97.15059166666667),
+        "BEMMR": _waypoint("BEMMR", 33.00171944444445, -97.27038611111111),
+        "FAR_SE": _waypoint("FAR_SE", 32.20, -96.20),
+        "BORDD": _waypoint("BORDD", 33.013780555555556, -96.92275277777779),
+        "PITHY": _waypoint("PITHY", 33.07370277777778, -96.76625833333334),
+        "OUTSIDE": _waypoint("OUTSIDE", 32.4, -97.7),
     }
 
-    point = wait_atc_point.detect_wait_atc_point(
-        ["BEFORE", "FIRST", "SECOND", "RW36L"],
-        catalog,
-        runway="36L",
-    )
+
+@pytest.mark.parametrize(
+    ("route", "cluster", "identifier"),
+    [
+        (["FAR_NE", "BRDJE", "COVIE", "RW35C"], "NE", "COVIE"),
+        (["FAR_NW", "VKTRY", "GREGS", "RW35C"], "NW", "GREGS"),
+        (["FAR_SW", "HODAX", "BEMMR", "RW35C"], "SW", "BEMMR"),
+        (["FAR_SE", "BORDD", "PITHY", "RW35C"], "SE", "PITHY"),
+    ],
+)
+def test_detect_wait_atc_point_classifies_by_gate_and_chooses_last_fix_inside_capture(
+    route: list[str],
+    cluster: str,
+    identifier: str,
+) -> None:
+    point = wait_atc_point.detect_wait_atc_point(route, _catalog(), runway="35C")
 
     assert point is not None
     assert point["source"] == "fix"
-    assert point["identifier"] == "FIRST"
-    assert point["lateral_path_token"] == "FIRST"
-    assert point["route_index"] == 1
-    assert point["ring_inner_nm"] == 35.0
-    assert point["ring_outer_nm"] == 40.0
-    assert 35.0 <= point["distance_nm"] <= 40.0
+    assert point["identifier"] == identifier
+    assert point["lateral_path_token"] == identifier
+    assert point["selection_method"] == "cluster_capture_polygon"
+    assert point["arrival_cluster"] == cluster
+    assert point["gate_cluster"] == cluster
+    assert point["gate_radius_nm"] == 50.0
+    assert point["ring_inner_nm"] == 50.0
+    assert point["ring_outer_nm"] == 50.0
+    assert point["capture_margin_nm"] == 3.0
+    assert point["gate_classification_fallback"] is False
 
 
-def test_detect_wait_atc_point_returns_none_when_no_fix_is_inside_ring() -> None:
-    catalog = {
-        "RW36L": _waypoint("RW36L", 0.0, 0.0, source="runway"),
-        "TOO_FAR": _waypoint("TOO_FAR", 0.75, 0.0),
-        "TOO_CLOSE": _waypoint("TOO_CLOSE", 0.50, 0.0),
-    }
-
-    point = wait_atc_point.detect_wait_atc_point(["TOO_FAR", "TOO_CLOSE", "RW36L"], catalog, runway="36L")
-
-    assert point is None
-
-
-def test_detect_wait_atc_point_skips_coordinate_waypoints_in_ring() -> None:
-    catalog = {
-        "RW36L": _waypoint("RW36L", 0.0, 0.0, source="runway"),
-        "WAIT": _waypoint("WAIT", 0.62, 0.0),
-    }
-
-    point = wait_atc_point.detect_wait_atc_point([(0.60, 0.0), "WAIT", "RW36L"], catalog, runway="36L")
-
-    assert point is not None
-    assert point["identifier"] == "WAIT"
-    assert point["route_index"] == 1
-
-
-def test_detect_wait_atc_point_can_use_custom_ring_bounds() -> None:
-    catalog = {
-        "RW36L": _waypoint("RW36L", 0.0, 0.0, source="runway"),
-        "NEAR": _waypoint("NEAR", 0.50, 0.0),
-        "DEFAULT": _waypoint("DEFAULT", 0.60, 0.0),
-    }
-
+def test_detect_wait_atc_point_skips_coordinates_and_runways_as_selected_point() -> None:
     point = wait_atc_point.detect_wait_atc_point(
-        ["NEAR", "DEFAULT", "RW36L"],
-        catalog,
-        runway="36L",
-        ring_inner_nm=29.0,
-        ring_outer_nm=31.0,
+        ["FAR_SE", (33.02, -96.80), "PITHY", "RW35C"],
+        _catalog(),
+        runway="35C",
     )
 
     assert point is not None
-    assert point["identifier"] == "NEAR"
-    assert point["ring_inner_nm"] == 29.0
-    assert point["ring_outer_nm"] == 31.0
+    assert point["identifier"] == "PITHY"
+    assert point["route_index"] == 2
+
+
+def test_detect_wait_atc_point_accepts_boundary_fix_inside_capture_polygon() -> None:
+    catalog = _catalog()
+    catalog["NE_BOUNDARY"] = _waypoint("NE_BOUNDARY", 33.395008, -96.733883)
+
+    point = wait_atc_point.detect_wait_atc_point(
+        ["FAR_NE", "NE_BOUNDARY", "RW35C"],
+        catalog,
+        runway="35C",
+    )
+
+    assert point is not None
+    assert point["identifier"] == "NE_BOUNDARY"
+    assert point["arrival_cluster"] == "NE"
+
+
+def test_detect_wait_atc_point_returns_none_and_reports_diagnostic_when_no_fix_is_inside_capture() -> None:
+    diagnostics: list[str] = []
+
+    point = wait_atc_point.detect_wait_atc_point(
+        ["FAR_NW", "OUTSIDE", "RW35C"],
+        _catalog(),
+        runway="35C",
+        diagnostics=diagnostics,
+        trace_label="ARR1/CALL",
+    )
+
+    assert point is None
+    assert diagnostics == [
+        "ARR1/CALL: gate classified NW, but no route fix was inside the NW capture polygon: "
+        "FAR_NW > OUTSIDE > RW35C"
+    ]
 
 
 def test_detect_wait_atc_point_rejects_inverted_ring_bounds() -> None:
-    catalog = {
-        "RW36L": _waypoint("RW36L", 0.0, 0.0, source="runway"),
-        "WAIT": _waypoint("WAIT", 0.60, 0.0),
-    }
-
     with pytest.raises(ValueError, match="ring_inner_nm"):
         wait_atc_point.detect_wait_atc_point(
-            ["WAIT", "RW36L"],
-            catalog,
-            runway="36L",
-            ring_inner_nm=40.0,
-            ring_outer_nm=35.0,
+            ["FAR_NE", "BRDJE", "RW35C"],
+            _catalog(),
+            runway="35C",
+            ring_inner_nm=51.0,
+            ring_outer_nm=50.0,
+        )
+
+
+def test_detect_wait_atc_point_rejects_non_positive_gate_radius() -> None:
+    with pytest.raises(ValueError, match="gate_radius_nm"):
+        wait_atc_point.detect_wait_atc_point(
+            ["FAR_NE", "BRDJE", "RW35C"],
+            _catalog(),
+            runway="35C",
+            gate_radius_nm=0.0,
         )

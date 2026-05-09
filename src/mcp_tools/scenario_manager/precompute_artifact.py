@@ -74,6 +74,8 @@ class ArtifactResult:
     altitude_breakpoint_count: int
     status: str
     reason: str | None = None
+    wait_atc_point_found: bool = False
+    wait_atc_cluster: str | None = None
 
     @property
     def compression_ratio(self) -> float:
@@ -346,6 +348,8 @@ def _payload_from_result(
         lateral_breakpoint_count=len(breakpoints.lateral_indices),
         altitude_breakpoint_count=len(breakpoints.altitude_indices),
         status="generated",
+        wait_atc_point_found=wait_atc_point is not None,
+        wait_atc_cluster=str(wait_atc_point["arrival_cluster"]) if wait_atc_point is not None else None,
     )
     return artifact, payload
 
@@ -366,14 +370,21 @@ def _skip_result(row: pd.Series, reason: str) -> ArtifactResult:
     )
 
 
-def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str, Any] | None]:
+def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str, Any] | None, list[str]]:
     row = pd.Series(task.row)
+    diagnostics: list[str] = []
     try:
         if task.raw_flight is None:
-            return _skip_result(row, "missing raw ADS-B flight"), None
+            return _skip_result(row, "missing raw ADS-B flight"), None, diagnostics
         route = _route_tokens(row["fix_sequence"], row["runway"])
         fix_catalog = load_fix_catalog(task.fixes_csv)
-        wait_atc_point = detect_wait_atc_point(route, fix_catalog, runway=str(row["runway"]))
+        wait_atc_point = detect_wait_atc_point(
+            route,
+            fix_catalog,
+            runway=str(row["runway"]),
+            diagnostics=diagnostics,
+            trace_label=f'{row["flight_id"]}/{row["callsign"]}',
+        )
         first_fix_lat_deg, first_fix_lon_deg = _first_route_fix_latlon_from_catalog(route, fix_catalog)
         seed = _seed_for_flight_at_fix(
             task.raw_flight,
@@ -381,7 +392,7 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             fix_lon_deg=first_fix_lon_deg,
         )
         if seed is None:
-            return _skip_result(row, "missing raw seed near first entry fix"), None
+            return _skip_result(row, "missing raw seed near first entry fix"), None, diagnostics
         fms_request, initial_state = _build_request(row, seed, task.fixes_csv)
         result = plan_fms_bichannel(
             FMSBiChannelRequest(
@@ -398,9 +409,9 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             lateral_tolerance_m=task.lateral_tolerance_m,
             altitude_tolerance_m=task.altitude_tolerance_m,
         )
-        return artifact, payload
+        return artifact, payload, diagnostics
     except Exception as exc:
-        return _skip_result(row, f"{type(exc).__name__}: {exc}"), None
+        return _skip_result(row, f"{type(exc).__name__}: {exc}"), None, diagnostics
 
 
 def _run_artifact_tasks(tasks: list[ArtifactTask], processes: int):
@@ -450,7 +461,7 @@ def precompute_artifacts(
                 altitude_tolerance_m=altitude_tolerance_m,
             )
         )
-    task_results: list[tuple[ArtifactResult, dict[str, Any] | None]] = []
+    task_results: list[tuple[ArtifactResult, dict[str, Any] | None, list[str]]] = []
     if console is not None:
         progress = Progress(
             SpinnerColumn(),
@@ -470,8 +481,16 @@ def precompute_artifacts(
                 progress.advance(progress_task)
     else:
         task_results = list(_run_artifact_tasks(tasks, processes=processes) or ())
-    results = [result for result, _payload in task_results]
-    payloads = [payload for _result, payload in task_results if payload is not None]
+    results = [result for result, _payload, _diagnostics in task_results]
+    payloads = [payload for _result, payload, _diagnostics in task_results if payload is not None]
+    diagnostics = [message for _result, _payload, messages in task_results for message in messages]
+    if console is not None and diagnostics:
+        for message in diagnostics[:100]:
+            console.print(f"[yellow]wait_atc_point:[/yellow] {message}")
+        if len(diagnostics) > 100:
+            console.print(
+                f"[yellow]wait_atc_point:[/yellow] {len(diagnostics) - 100} additional diagnostics suppressed"
+            )
 
     if console is not None:
         with console.status("[bold]Writing artifact outputs...[/bold]"):
@@ -537,6 +556,11 @@ def _manifest(
 ) -> dict[str, Any]:
     generated = [result for result in results if result.status == "generated"]
     skipped = [result for result in results if result.status == "skipped"]
+    wait_atc_point_count = sum(1 for result in generated if result.wait_atc_point_found)
+    wait_atc_cluster_counts = {
+        cluster: sum(1 for result in generated if result.wait_atc_cluster == cluster)
+        for cluster in ("NE", "NW", "SW", "SE")
+    }
     return {
         "created_at_utc": datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "artifact_type": "simap_fms_bichannel_arrivals",
@@ -549,6 +573,11 @@ def _manifest(
         "generated_count": len(generated),
         "skipped_arrival_count": len(skipped),
         "skipped_departure_count": skipped_departure_count,
+        "wait_atc_point_count": wait_atc_point_count,
+        "wait_atc_point_success_rate": (
+            float(wait_atc_point_count / len(generated)) if generated else 0.0
+        ),
+        "wait_atc_cluster_counts": wait_atc_cluster_counts,
         "raw_point_count": sum(result.raw_point_count for result in generated),
         "compressed_point_count": sum(result.compressed_point_count for result in generated),
         "lateral_tolerance_m": lateral_tolerance_m,
@@ -576,6 +605,8 @@ def _manifest(
                 "altitude_breakpoint_count": result.altitude_breakpoint_count,
                 "status": result.status,
                 "reason": result.reason,
+                "wait_atc_point_found": result.wait_atc_point_found,
+                "wait_atc_cluster": result.wait_atc_cluster,
             }
             for result in sorted(results, key=lambda item: (item.status, item.first_time or 0, item.flight_id))
         ],
@@ -606,6 +637,8 @@ def main() -> None:
                 "generated_count": manifest["generated_count"],
                 "skipped_arrival_count": manifest["skipped_arrival_count"],
                 "skipped_departure_count": manifest["skipped_departure_count"],
+                "wait_atc_point_count": manifest["wait_atc_point_count"],
+                "wait_atc_point_success_rate": manifest["wait_atc_point_success_rate"],
                 "flights_path": manifest["flights_path"],
             },
             indent=2,
