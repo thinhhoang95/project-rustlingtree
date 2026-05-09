@@ -32,6 +32,17 @@ class ReferencePathTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(path.curvature_inv_m)))
         self.assertLess(np.max(np.abs(np.diff(path.track_rad))), 0.2)
 
+    def test_project_s_m_returns_closest_along_path_station(self) -> None:
+        path = ReferencePath.from_geographic(
+            lat_deg=np.asarray([0.0, 0.0, 0.0], dtype=float),
+            lon_deg=np.asarray([0.0, 0.01, 0.02], dtype=float),
+        )
+
+        east_m, north_m = path.position_ne(0.5 * path.total_length_m)
+        projected_s_m = path.project_s_m(east_m, north_m + 250.0)
+
+        self.assertAlmostEqual(projected_s_m, 0.5 * path.total_length_m, delta=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

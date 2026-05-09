@@ -12,6 +12,7 @@ from rich.table import Table
 
 DEFAULT_INPUT_DIR = Path("data/adsb/raw")
 DEFAULT_OUTPUT_DIR = Path("data/adsb/compressed")
+OUTPUT_FLIGHTS_FILENAME = "adsb_compressed_flights.jsonl"
 DEFAULT_LATERAL_TOLERANCE_M = 100.0
 DEFAULT_ALTITUDE_TOLERANCE_M = 50.0
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
@@ -77,7 +78,7 @@ def write_metadata(
         "catalog_arrival_departure_flight_count": catalog_flight_count,
         "layout": {
             "manifest": "manifest.csv",
-            "flights": "flights.jsonl",
+            "flights": OUTPUT_FLIGHTS_FILENAME,
             "point_columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         },
         "breakpoint_mask_bits": {
@@ -174,7 +175,7 @@ def main() -> None:
     results = [item[0] for item in results_and_payloads]
     payloads = [item[1] for item in results_and_payloads]
 
-    flights_path = args.output_dir / "flights.jsonl"
+    flights_path = args.output_dir / OUTPUT_FLIGHTS_FILENAME
     write_jsonl(flights_path, payloads)
     manifest_path = args.output_dir / "manifest.csv"
     write_manifest(manifest_path, results, flights_path)

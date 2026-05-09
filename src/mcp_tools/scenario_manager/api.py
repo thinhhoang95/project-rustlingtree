@@ -10,12 +10,13 @@ from mcp_tools.scenario_manager.models import (
     ArrivalScheduleItem,
     DepartureScheduleItem,
     HealthResponse,
+    ScenarioResourceConfig,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.scenario_manager = ScenarioManager()
+    app.state.scenario_manager = ScenarioManager(ScenarioResourceConfig.default())
     yield
 
 

@@ -31,3 +31,5 @@ This step writes the derived landings/departures catalog, the fix-sequence catal
 
 ### Compress the Data
 python src/scenario/trajectory_compressor/cli.py --landings-departures-catalog
+
+This writes the full ADS-B compressed trajectory file used for departures at `data/adsb/compressed/adsb_compressed_flights.jsonl`. SIMAP arrival artifacts are written separately by `scenario-manager-precompute-artifact` to `data/artifacts/simap_arrival_flights.jsonl`.

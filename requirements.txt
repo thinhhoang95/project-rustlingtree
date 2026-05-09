@@ -18,3 +18,7 @@ uvicorn>=0.35.0
 cartopy
 pdf2image
 arinc424
+pytest 
+pydantic
+fastapi
+uvicorn
