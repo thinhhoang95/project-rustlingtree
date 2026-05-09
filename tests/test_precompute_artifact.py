@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from mcp_tools.scenario_manager import precompute_artifact
+from simap.nlp_colloc.tactical.models import PathWaypoint
 
 
 def _write_catalogs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -35,6 +36,8 @@ def _write_catalogs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "FIXB,32.1,-97.1\n"
         "FIXC,33.0,-98.0\n"
         "FIXD,33.1,-98.1\n"
+        "DAYZZ,32.78,-97.9\n"
+        "RW17C,33.1,-97.9\n"
         "RW35C,32.9,-97.9\n"
         "RW36L,33.9,-98.9\n",
         encoding="utf-8",
@@ -80,6 +83,20 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     monkeypatch.setattr(precompute_artifact, "_flight_raw_tracks", lambda *args, **kwargs: raw_tracks)
     monkeypatch.setattr(precompute_artifact, "_build_request", lambda *args, **kwargs: (object(), None))
     monkeypatch.setattr(precompute_artifact, "plan_fms_bichannel", lambda _request: fake_result)
+    monkeypatch.setattr(
+        precompute_artifact,
+        "detect_wait_atc_point",
+        lambda *args, **kwargs: {
+            "source": "fix",
+            "identifier": "FIXA",
+            "lat": 32.0,
+            "lon": -97.0,
+            "lateral_path_token": "FIXA",
+            "route_index": 0,
+            "distance_nm": 45.0,
+            "arrival_cluster": "SE",
+        },
+    )
 
     manifest = precompute_artifact.precompute_artifacts(
         events_path=events_path,
@@ -102,7 +119,10 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
-    assert payloads[0]["wait_atc_point"] is None
+    assert payloads[0]["wait_atc_point"]["identifier"] == "FIXA"
+    assert payloads[0]["base_route"]["type"] == "base-route"
+    assert payloads[0]["base_route"]["lateral_path"] == ["FIXA", "DAYZZ", "RW35C"]
+    assert payloads[0]["base_route"]["final_fix"]["identifier"] == "DAYZZ"
 
 
 def test_seed_for_flight_uses_adsb_point_closest_to_first_fix() -> None:
@@ -127,3 +147,31 @@ def test_seed_for_flight_uses_adsb_point_closest_to_first_fix() -> None:
     assert seed.geoaltitude_m == 900.0
     assert seed.heading_deg == 181.0
     assert seed.ground_speed_mps > 1.0
+
+
+def test_final_fix_selection_uses_extended_runway_alignment_for_parallel_runways() -> None:
+    catalog = {
+        "RW17C": PathWaypoint("RW17C", 33.10, -97.00, source="runway"),
+        "RW35C": PathWaypoint("RW35C", 32.90, -97.00, source="runway"),
+        "RW17L": PathWaypoint("RW17L", 33.10, -97.02, source="runway"),
+        "RW35R": PathWaypoint("RW35R", 32.90, -97.02, source="runway"),
+        "CENTER_FINAL": PathWaypoint("CENTER_FINAL", 32.7834, -97.00),
+        "RIGHT_FINAL": PathWaypoint("RIGHT_FINAL", 32.7834, -97.02),
+        "MISALIGNED": PathWaypoint("MISALIGNED", 32.7834, -97.04),
+    }
+
+    center = precompute_artifact._select_final_fix(
+        runway_identifier="RW35C",
+        fix_catalog=catalog,
+        target_distance_nm=7.0,
+        cross_track_tolerance_nm=0.15,
+    )
+    right = precompute_artifact._select_final_fix(
+        runway_identifier="RW35R",
+        fix_catalog=catalog,
+        target_distance_nm=7.0,
+        cross_track_tolerance_nm=0.15,
+    )
+
+    assert center.waypoint.identifier == "CENTER_FINAL"
+    assert right.waypoint.identifier == "RIGHT_FINAL"
