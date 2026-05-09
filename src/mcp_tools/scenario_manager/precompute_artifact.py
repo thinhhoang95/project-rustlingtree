@@ -123,14 +123,17 @@ class BaseRoute:
     target_final_fix_distance_nm: float
     final_fix_cross_track_tolerance_nm: float
 
+    @property
+    def fix_sequence(self) -> str:
+        return ">".join(_route_token_text(token) for token in self.lateral_path)
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "type": "base-route",
             "selection_method": "atc_direct_to_runway_aligned_final_fix",
-            "lateral_path": [
-                list(token) if isinstance(token, tuple) else token
-                for token in self.lateral_path
-            ],
+            "fix_sequence": self.fix_sequence,
+            "fix_count": len(self.lateral_path),
+            "lateral_path": [_route_token_payload(token) for token in self.lateral_path],
             "upstream_identifier": self.upstream_identifier,
             "runway": self.runway_identifier,
             "atc_point": self.atc_point,
@@ -208,6 +211,18 @@ def _normalize_runway_identifier(runway: object) -> str:
     if number < 1 or number > 36:
         raise ValueError(f"invalid runway number: {runway!r}")
     return f"RW{number:02d}{match.group('suffix')}"
+
+
+def _route_token_text(token: str | tuple[float, float]) -> str:
+    if isinstance(token, tuple):
+        return f"{float(token[0]):.8f},{float(token[1]):.8f}"
+    return str(token).upper()
+
+
+def _route_token_payload(token: str | tuple[float, float]) -> str | list[float]:
+    if isinstance(token, tuple):
+        return [float(token[0]), float(token[1])]
+    return str(token).upper()
 
 
 def _reciprocal_runway_identifier(runway_identifier: str) -> str:
@@ -563,6 +578,9 @@ def _payload_from_result(
         "flight_id": str(row["flight_id"]),
         "callsign": str(row["callsign"]),
         "icao24": str(row["icao24"]),
+        "route_type": "base-route",
+        "fix_sequence": base_route.fix_sequence,
+        "fix_count": len(base_route.lateral_path),
         "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         "breakpoint_mask_bits": {
             "lateral": LATERAL_BREAKPOINT_MASK,
@@ -659,7 +677,7 @@ def _print_precompute_summary(
 
     simulation_failure_counts = manifest.get("simulation_failure_message_counts", {})
     if simulation_failure_counts:
-        console.print("[bold yellow]Generated artifacts with failed SIMAP simulation[/bold yellow]")
+        console.print("[bold yellow]Generated base routes with vertically infeasible SIMAP profile[/bold yellow]")
         for message, count in simulation_failure_counts.items():
             console.print(f"  {count:>4}  {message}")
 
@@ -1016,7 +1034,7 @@ def main() -> None:
                 "skipped_arrival_count": manifest["skipped_arrival_count"],
                 "skipped_departure_count": manifest["skipped_departure_count"],
                 "simulation_success_count": manifest["simulation_success_count"],
-                "simulation_failure_count": manifest["simulation_failure_count"],
+                "vertical_profile_infeasible_count": manifest["simulation_failure_count"],
                 "skipped_arrival_reason_counts": manifest["skipped_arrival_reason_counts"],
                 "simulation_failure_message_counts": manifest["simulation_failure_message_counts"],
                 "wait_atc_point_count": manifest["wait_atc_point_count"],

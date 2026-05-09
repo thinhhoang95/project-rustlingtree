@@ -34,6 +34,9 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         "flight_id": "ARR1",
         "callsign": "CALLARR1",
         "icao24": "arr001",
+        "route_type": "base-route",
+        "fix_sequence": "FIXB>FINAL35C>RW35C",
+        "fix_count": 3,
         "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         "breakpoint_mask_bits": {"lateral": 1, "altitude": 2},
         "points": [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]],
@@ -55,6 +58,12 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
             "distance_nm": 37.0,
             "ring_inner_nm": 35.0,
             "ring_outer_nm": 40.0,
+        },
+        "base_route": {
+            "type": "base-route",
+            "fix_sequence": "FIXB>FINAL35C>RW35C",
+            "fix_count": 3,
+            "lateral_path": ["FIXB", "FINAL35C", "RW35C"],
         },
     }
     simap_arrival_trajectories_path.write_text(json.dumps(simap_arrival_payload) + "\n", encoding="utf-8")
@@ -172,8 +181,12 @@ def test_arrival_schedule_uses_artifact_start_time_and_preserves_compressed_poin
     assert arrival["time_at_last_event"] == 500
     assert arrival["time_at_last_event_utc"] == "1970-01-01T00:08:20Z"
     assert arrival["runway"] == "35C"
+    assert arrival["route_type"] == "base-route"
+    assert arrival["fix_sequence"] == "FIXB>FINAL35C>RW35C"
+    assert arrival["fix_count"] == 3
     assert arrival["original_fix_sequence"] == "FIXA>FIXB"
     assert arrival["original_fix_count"] == 2
+    assert arrival["base_route"]["lateral_path"] == ["FIXB", "FINAL35C", "RW35C"]
     assert arrival["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert arrival["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
     assert arrival["wait_atc_point"] == {
@@ -231,4 +244,5 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert arrivals.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrivals.json()[0]["fix_sequence"] == "FIXB>FINAL35C>RW35C"
     assert arrivals.json()[0]["wait_atc_point"]["identifier"] == "FIXB"

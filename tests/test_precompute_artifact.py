@@ -119,8 +119,13 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
+    assert payloads[0]["route_type"] == "base-route"
+    assert payloads[0]["fix_sequence"] == "FIXA>DAYZZ>RW35C"
+    assert payloads[0]["fix_count"] == 3
     assert payloads[0]["wait_atc_point"]["identifier"] == "FIXA"
     assert payloads[0]["base_route"]["type"] == "base-route"
+    assert payloads[0]["base_route"]["fix_sequence"] == "FIXA>DAYZZ>RW35C"
+    assert payloads[0]["base_route"]["fix_count"] == 3
     assert payloads[0]["base_route"]["lateral_path"] == ["FIXA", "DAYZZ", "RW35C"]
     assert payloads[0]["base_route"]["final_fix"]["identifier"] == "DAYZZ"
 

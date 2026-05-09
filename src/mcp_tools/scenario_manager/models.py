@@ -147,6 +147,9 @@ class ArrivalScheduleItem(BaseModel):
     time_at_last_event: int
     time_at_last_event_utc: str | None = None
     runway: str
+    route_type: str | None = None
+    fix_sequence: str | None = None
+    fix_count: int | None = None
     original_fix_sequence: str
     original_fix_count: int
     breakpoint_mask_bits: dict[str, int] | None = None
@@ -158,6 +161,7 @@ class ArrivalScheduleItem(BaseModel):
     compressed_point_count: int | None = None
     lateral_tolerance_m: float | None = None
     altitude_tolerance_m: float | None = None
+    base_route: dict[str, Any] | None = None
     wait_atc_point: dict[str, Any] | None = None
 
 

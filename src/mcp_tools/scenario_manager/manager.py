@@ -91,8 +91,12 @@ class ScenarioManager:
                     "time_at_last_event": time_at_last_event,
                     "time_at_last_event_utc": self._arrival_time_utc(payload, time_at_last_event),
                     "runway": str(event["runway"]),
+                    "route_type": payload.get("route_type", "base-route"),
+                    "fix_sequence": payload.get("fix_sequence", str(fix_sequence["fix_sequence"])),
+                    "fix_count": int(payload.get("fix_count", fix_sequence["fix_count"])),
                     "original_fix_sequence": str(fix_sequence["fix_sequence"]),
                     "original_fix_count": int(fix_sequence["fix_count"]),
+                    "base_route": payload.get("base_route"),
                     "wait_atc_point": payload.get("wait_atc_point"),
                 }
             )
