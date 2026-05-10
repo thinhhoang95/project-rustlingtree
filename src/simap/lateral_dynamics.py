@@ -49,6 +49,9 @@ class LateralGuidanceConfig:
     lookahead_m: float = 1_500.0
     cross_track_gain: float = 1.0
     track_error_gain: float = 2.0
+    min_lookahead_m: float = 150.0
+    max_los_angle_rad: float = float(np.deg2rad(89.0))
+    integration_step_s: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -82,65 +85,14 @@ def compute_lateral_command(
 ) -> LateralCommand:
     """Compute the instantaneous lateral guidance command for the aircraft.
 
-    This is the main path-following function in the module. It combines:
-
-    - the current aircraft state ``(east_m, north_m, h_m, psi_rad, v_tas_mps)``
-    - the reference path geometry at the path coordinate ``s_m``
-    - the local wind and atmosphere from ``weather``
-    - the bank-limits and phase-dependent limits from ``cfg`` and ``mode``
-
-    The result is a dataclass containing the estimated ground velocity, cross
-    track error, track error, commanded curvature, requested bank angle, and
-    the bank limit that was applied. In practice this is the lateral guidance
-    output consumed by a downstream roll / heading-rate controller.
-
-    Parameters
-    ----------
-    s_m, east_m, north_m, h_m, t_s, psi_rad, v_tas_mps:
-        Current aircraft state and simulation time.
-    cfg, mode:
-        Aircraft and phase configuration used to compute the allowable bank
-        angle.
-    reference_path:
-        The path being tracked.
-    weather:
-        Provider for wind and ISA deviation.
-    guidance:
-        Lookahead and feedback gains for the lateral controller.
-
-    Returns
-    -------
-    LateralCommand
-        A summary of the current lateral control request.
-
-    Examples
-    --------
-    A straight eastbound path with zero wind and the aircraft 10 m north of
-    the path is the simplest "turn back to centerline" case. With
-    ``s_m = 500 m``, ``psi_rad = 0``, and ``v_tas_mps = 70``, the returned
-    command is approximately:
-
-    - ``ground_speed_mps = 70.0``
-    - ``cross_track_m = 10.0``
-    - ``track_error_rad = 0.0``
-    - ``phi_req_rad = -0.0022`` rad
-
-    The exact ``phi_max_rad`` value depends on the supplied aircraft and mode
-    limits, so it is not fixed by the guidance law itself.
-
-    Notes
-    -----
-    - The path geometry is evaluated at the closest projected point on the
-      reference path, not at the current longitudinal ``s_m``. This keeps the
-      controller responsive when the aircraft drifts far from the scheduled
-      descent station.
-    - ``cross_track_m`` is measured using the path normal, so its sign depends
-      on the path orientation.
-    - ``track_error_rad`` compares the ground-track angle to the local path
-      tangent, not the aircraft heading. A crosswind can therefore create a
-      track error even when the heading is aligned with the path.
-    - ``phi_req_rad`` is clipped to the current bank limit, so the returned
-      value is always commandable for the current phase and speed.
+    The controller uses a nonlinear lookahead guidance law. It measures
+    cross-track and track-angle error at the closest tangent point on the
+    reference path, selects a target point farther along the active path, then
+    commands curvature from the line-of-sight angle between the current ground
+    track and that target point. This behaves like the path-capture part of a
+    transport LNAV law: cross-track error changes the desired intercept
+    geometry, while curved-path feed-forward naturally appears because the
+    lookahead point lies on the curved reference path.
     """
     wind_east_mps, wind_north_mps = weather.wind_ne_mps(s_m, h_m, t_s)
     east_dot_mps = float(v_tas_mps * np.cos(psi_rad) + wind_east_mps)
@@ -153,19 +105,30 @@ def compute_lateral_command(
     tangent_hat = reference_path.tangent_hat(ref_s_m)
     normal_hat = reference_path.normal_hat(ref_s_m)
     ref_track_rad = reference_path.track_angle_rad(ref_s_m)
-    ref_curvature_inv_m = reference_path.curvature(ref_s_m)
 
     error_vector = np.asarray([east_m - ref_east_m, north_m - ref_north_m], dtype=float)
     cross_track_m = float(np.dot(error_vector, normal_hat))
     track_error_rad = wrap_angle_rad(ground_track_rad - ref_track_rad)
     alongtrack_speed_mps = float(max(0.0, np.dot(np.asarray([east_dot_mps, north_dot_mps]), tangent_hat)))
+    along_path_offset_m = float(np.dot(error_vector, tangent_hat))
 
-    lookahead_m = max(1.0, guidance.lookahead_m)
-    curvature_feedback = (
-        -(guidance.cross_track_gain * cross_track_m) / (lookahead_m**2)
-        - (guidance.track_error_gain * track_error_rad) / lookahead_m
-    )
-    curvature_cmd_inv_m = ref_curvature_inv_m + curvature_feedback
+    base_lookahead_m = max(1.0, float(guidance.lookahead_m))
+    min_lookahead_m = float(np.clip(guidance.min_lookahead_m, 1.0, base_lookahead_m))
+    lookahead_m = float(max(min_lookahead_m, min(base_lookahead_m, max(min_lookahead_m, ref_s_m))))
+    if ref_s_m <= min_lookahead_m and along_path_offset_m > 0.0:
+        lookahead_m = base_lookahead_m
+        target_east_m = float(ref_east_m + (along_path_offset_m + lookahead_m) * tangent_hat[0])
+        target_north_m = float(ref_north_m + (along_path_offset_m + lookahead_m) * tangent_hat[1])
+    else:
+        target_s_m = float(max(0.0, ref_s_m - lookahead_m))
+        target_east_m, target_north_m = reference_path.position_ne(target_s_m)
+    los_track_rad = wrap_angle_rad(np.arctan2(target_north_m - north_m, target_east_m - east_m))
+    los_error_rad = wrap_angle_rad(los_track_rad - ground_track_rad)
+    los_limit_rad = float(np.clip(guidance.max_los_angle_rad, np.deg2rad(5.0), np.deg2rad(120.0)))
+    los_error_rad = float(np.clip(los_error_rad, -los_limit_rad, los_limit_rad))
+
+    l1_gain = max(0.05, float(guidance.track_error_gain) * np.sqrt(max(0.05, float(guidance.cross_track_gain))))
+    curvature_cmd_inv_m = float(l1_gain * np.sin(los_error_rad) / lookahead_m)
     phi_req_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / aero.g0))
     delta_isa_K = weather.delta_isa_K(s_m, h_m, t_s)
     v_cas_mps = float(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(delta_isa_K)))

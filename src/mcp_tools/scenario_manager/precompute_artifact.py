@@ -61,6 +61,21 @@ METERS_PER_NM = 1_852.0
 _RUNWAY_RE = re.compile(r"^RW?(?P<number>\d{1,2})(?P<suffix>[LCR]?)$")
 
 
+def _default_lateral_guidance() -> LateralGuidanceConfig:
+    return LateralGuidanceConfig()
+
+
+def _lateral_guidance_payload(guidance: LateralGuidanceConfig) -> dict[str, float]:
+    return {
+        "lookahead_m": float(guidance.lookahead_m),
+        "cross_track_gain": float(guidance.cross_track_gain),
+        "track_error_gain": float(guidance.track_error_gain),
+        "min_lookahead_m": float(guidance.min_lookahead_m),
+        "max_los_angle_rad": float(guidance.max_los_angle_rad),
+        "integration_step_s": float(guidance.integration_step_s),
+    }
+
+
 @dataclass(frozen=True)
 class SeedState:
     time_s: int
@@ -574,11 +589,15 @@ def _payload_from_result(
     base_route: BaseRoute,
     result,
     reference_path: Any | None = None,
+    guidance: LateralGuidanceConfig | None = None,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
 ) -> tuple[ArtifactResult, dict[str, Any]]:
     times = np.rint(seed.time_s + result.t_s).astype(np.int64)
-    if reference_path is not None and hasattr(result, "s_m"):
+    if hasattr(result, "lat_deg") and hasattr(result, "lon_deg"):
+        latitudes = np.asarray(result.lat_deg, dtype=float)
+        longitudes = np.asarray(result.lon_deg, dtype=float)
+    elif reference_path is not None and hasattr(result, "s_m"):
         path_s_m = np.asarray(result.s_m, dtype=float).copy()
         if len(path_s_m):
             path_s_m[-1] = 0.0
@@ -650,6 +669,7 @@ def _payload_from_result(
             "max_abs_cross_track_m": float(result.max_abs_cross_track_m),
             "max_abs_track_error_rad": float(result.max_abs_track_error_rad),
             "final_threshold_error_m": float(result.final_threshold_error_m),
+            "lateral_guidance": _lateral_guidance_payload(guidance or _default_lateral_guidance()),
         },
     }
     artifact = ArtifactResult(
@@ -773,10 +793,11 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             fixes_csv=task.fixes_csv,
             fms_dt_s=task.fms_dt_s,
         )
+        guidance = _default_lateral_guidance()
         result = plan_fms_bichannel(
             FMSBiChannelRequest(
                 base_request=fms_request,
-                guidance=LateralGuidanceConfig(),
+                guidance=guidance,
                 initial_state=initial_state,
             ),
             tod_tolerance_m=task.tod_tolerance_m,
@@ -789,6 +810,7 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             base_route=base_route,
             result=result,
             reference_path=getattr(fms_request, "reference_path", None),
+            guidance=guidance,
             lateral_tolerance_m=task.lateral_tolerance_m,
             altitude_tolerance_m=task.altitude_tolerance_m,
         )
@@ -1042,6 +1064,7 @@ def _manifest(
         "fms_dt_s": fms_dt_s,
         "tod_tolerance_m": tod_tolerance_m,
         "max_tod_iterations": int(max_tod_iterations),
+        "lateral_guidance": _lateral_guidance_payload(_default_lateral_guidance()),
         "base_route": {
             "type": "base-route",
             "final_fix_target_distance_nm": final_fix_distance_nm,
