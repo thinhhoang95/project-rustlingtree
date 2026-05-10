@@ -190,12 +190,12 @@ def _state_summary(time_s: np.ndarray, state: np.ndarray) -> tuple[int, float | 
     return int(active.size), float(time_s[int(active[0])])
 
 
-def _first_active_position(trajectory: FMSBiChannelResult, state: np.ndarray) -> tuple[float, float] | None:
+def _first_active_position(lon_deg: np.ndarray, lat_deg: np.ndarray, state: np.ndarray) -> tuple[float, float] | None:
     active = np.flatnonzero(state != 0)
     if active.size == 0:
         return None
     idx = int(active[0])
-    return float(trajectory.lon_deg[idx]), float(trajectory.lat_deg[idx])
+    return float(lon_deg[idx]), float(lat_deg[idx])
 
 
 def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -204,11 +204,11 @@ def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np
     return np.maximum(route_lower_mps, mode_bounds[:, 0]), np.minimum(route_upper_mps, mode_bounds[:, 1])
 
 
-def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest:
+def _build_bichannel_request(bundle: Any, seed: SeedLike, *, fms_dt_s: float) -> FMSBiChannelRequest:
     reference_path = bundle.request.reference_path
 
     start_s_m = reference_path.total_length_m
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m, dt_s=fms_dt_s)
     east_m, north_m = reference_path.position_ne(fms_request.start_s_m)
     heading_deg = getattr(seed, "heading_deg", None)
     if heading_deg is not None and np.isfinite(float(heading_deg)):
@@ -233,9 +233,20 @@ def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest
     )
 
 
-def build_bichannel_result(bundle: Any, seed: SeedLike) -> FMSBiChannelResult:
-    request = _build_bichannel_request(bundle, seed)
-    return plan_fms_bichannel(request)
+def build_bichannel_result(
+    bundle: Any,
+    seed: SeedLike,
+    *,
+    fms_dt_s: float = 0.5,
+    tod_tolerance_m: float = 5.0,
+    max_tod_iterations: int = 40,
+) -> FMSBiChannelResult:
+    request = _build_bichannel_request(bundle, seed, fms_dt_s=fms_dt_s)
+    return plan_fms_bichannel(
+        request,
+        tod_tolerance_m=tod_tolerance_m,
+        max_tod_iterations=max_tod_iterations,
+    )
 
 
 def _plot_state_axis(ax: Axes, time_s: np.ndarray, state: np.ndarray, *, title: str, first_active_time_s: float | None, current_time_s: float | None = None) -> None:
@@ -342,16 +353,30 @@ def plot_cross_check(
     bundle: Any,
     seed: SeedLike,
     wait_atc_point: Mapping[str, Any] | None = None,
+    bichannel: FMSBiChannelResult | None = None,
+    fms_dt_s: float = 0.5,
+    tod_tolerance_m: float = 5.0,
+    max_tod_iterations: int = 40,
 ) -> None:
-    bichannel = build_bichannel_result(bundle, seed)
+    if bichannel is None:
+        bichannel = build_bichannel_result(
+            bundle,
+            seed,
+            fms_dt_s=fms_dt_s,
+            tod_tolerance_m=tod_tolerance_m,
+            max_tod_iterations=max_tod_iterations,
+        )
+    simap_display = _BichannelTrajectoryAdapter(bichannel, seed)
     sim_time_s = float(seed.time_s) + np.asarray(bichannel.t_s, dtype=float)
     adsb_time_s = np.asarray(adsb.time_s, dtype=float)
     adsb_cross_track_m = _signed_cross_track(reference_path, adsb)
     sim_cross_track_m = np.asarray(bichannel.cross_track_m, dtype=float)
     sim_track_error_deg = np.rad2deg(np.asarray(bichannel.track_error_rad, dtype=float))
     sim_gamma_deg = np.rad2deg(np.asarray(bichannel.longitudinal.gamma_rad, dtype=float))
-    sim_phi_deg = np.rad2deg(np.asarray(bichannel.phi_rad, dtype=float))
-    sim_phi_req_deg = np.rad2deg(np.asarray(bichannel.phi_req_rad, dtype=float))
+    sim_phi_rad = np.asarray(bichannel.phi_rad, dtype=float)
+    sim_phi_req_rad = np.asarray(bichannel.phi_req_rad, dtype=float)
+    sim_phi_deg = np.rad2deg(sim_phi_rad)
+    sim_phi_req_deg = np.rad2deg(sim_phi_req_rad)
     sim_phi_max_deg = np.rad2deg(np.asarray(bichannel.phi_max_rad, dtype=float))
 
     cas_lower_mps, cas_upper_mps = _effective_cas_bounds(bundle.request, bichannel.s_m)
@@ -361,7 +386,7 @@ def plot_cross_check(
 
     cas_state = _state_from_bounds(bichannel.longitudinal.v_cas_mps, cas_lower_mps, cas_upper_mps, atol=CAS_STATE_ATOL_MPS)
     gamma_state = _state_from_bounds(bichannel.longitudinal.gamma_rad, gamma_lower_rad, gamma_upper_rad, atol=GAMMA_STATE_ATOL_RAD)
-    bank_state = _state_from_bounds(bichannel.phi_req_rad, -bichannel.phi_max_rad, bichannel.phi_max_rad, atol=BANK_STATE_ATOL_RAD)
+    bank_state = _state_from_bounds(sim_phi_req_rad, -bichannel.phi_max_rad, bichannel.phi_max_rad, atol=BANK_STATE_ATOL_RAD)
 
     cas_active_count, cas_first_active = _state_summary(sim_time_s, cas_state)
     gamma_active_count, gamma_first_active = _state_summary(sim_time_s, gamma_state)
@@ -390,13 +415,20 @@ def plot_cross_check(
         zorder=1,
     )
     trajectory_ax.plot(adsb.lon_deg, adsb.lat_deg, color=ADSB_COLOR, linewidth=2.0, label="ADS-B", zorder=2)
-    trajectory_ax.plot(bichannel.lon_deg, bichannel.lat_deg, color=SIMAP_COLOR, linewidth=2.0, label="SIMAP", zorder=3)
+    trajectory_ax.plot(
+        simap_display.lon_deg,
+        simap_display.lat_deg,
+        color=SIMAP_COLOR,
+        linewidth=2.6,
+        label="SIMAP",
+        zorder=5,
+    )
     _plot_fix_markers(trajectory_ax, bundle.path)
     _plot_wait_atc_point(trajectory_ax, wait_atc_point)
 
-    first_bank_position = _first_active_position(bichannel, bank_state)
-    first_cas_position = _first_active_position(bichannel, cas_state)
-    first_gamma_position = _first_active_position(bichannel, gamma_state)
+    first_bank_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, bank_state)
+    first_cas_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, cas_state)
+    first_gamma_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, gamma_state)
     for position, marker, color, label in (
         (first_bank_position, "*", UPPER_STATE_COLOR, "first bank limit"),
         (first_cas_position, "D", CAS_COLOR, "first CAS limit"),
@@ -423,7 +455,13 @@ def plot_cross_check(
     _set_kdfw_airport_area_limits(trajectory_ax)
 
     cross_track_ax.plot(adsb_time_s, adsb_cross_track_m, color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
-    cross_track_ax.plot(sim_time_s, sim_cross_track_m, color=SIMAP_COLOR, linewidth=1.8, label="SIMAP")
+    cross_track_ax.plot(
+        sim_time_s,
+        sim_cross_track_m,
+        color=SIMAP_COLOR,
+        linewidth=2.0,
+        label="SIMAP",
+    )
     if bank_first_active is not None:
         cross_track_ax.axvline(bank_first_active, color=UPPER_STATE_COLOR, linestyle="--", linewidth=1.0, alpha=0.75)
     if bank_active_count > 0:
@@ -542,7 +580,7 @@ def plot_cross_check(
         [
             _fmt_unix_time(initial_time),
             _fmt_sample("ADS-B", _sample_trajectory(adsb, initial_time), speed_label="CAS"),
-            _fmt_sample("SIMAP", _sample_trajectory(_ResultTrajectoryAdapter(bichannel, seed), initial_time), speed_label="CAS"),
+            _fmt_sample("SIMAP", _sample_trajectory(simap_display, initial_time), speed_label="CAS"),
         ]
     )
     trajectory_ax.text(
@@ -587,7 +625,7 @@ def plot_cross_check(
     def update(time_s: float) -> None:
         time_s = float(time_s)
         adsb_sample = _sample_trajectory(adsb, time_s)
-        simap_sample = _sample_trajectory(_ResultTrajectoryAdapter(bichannel, seed), time_s)
+        simap_sample = _sample_trajectory(simap_display, time_s)
         cross_track_sim_m = _interp_value(time_s, sim_time_s, sim_cross_track_m)
         track_error_deg = _interp_value(time_s, sim_time_s, sim_track_error_deg)
         cas_sim_mps = _interp_value(time_s, sim_time_s, bichannel.v_cas_mps)
@@ -610,7 +648,9 @@ def plot_cross_check(
             _current_title(
                 "Cross-track deviation",
                 time_s,
-                f"SIMAP {UNAVAILABLE if cross_track_sim_m is None else f'{cross_track_sim_m:+.1f} m'}",
+                (
+                    f"SIMAP {UNAVAILABLE if cross_track_sim_m is None else f'{cross_track_sim_m:+.1f} m'}"
+                ),
             )
         )
         track_error_ax.set_title(
@@ -657,7 +697,7 @@ def plot_cross_check(
 
 
 @dataclass(frozen=True)
-class _ResultTrajectoryAdapter:
+class _BichannelTrajectoryAdapter:
     result: FMSBiChannelResult
     seed: SeedLike
 

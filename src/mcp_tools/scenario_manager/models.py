@@ -150,8 +150,6 @@ class ArrivalScheduleItem(BaseModel):
     route_type: str | None = None
     fix_sequence: str | None = None
     fix_count: int | None = None
-    original_fix_sequence: str
-    original_fix_count: int
     breakpoint_mask_bits: dict[str, int] | None = None
     lateral_breakpoint_times: list[int] = Field(default_factory=list)
     altitude_breakpoint_times: list[int] = Field(default_factory=list)
@@ -161,7 +159,10 @@ class ArrivalScheduleItem(BaseModel):
     compressed_point_count: int | None = None
     lateral_tolerance_m: float | None = None
     altitude_tolerance_m: float | None = None
+    final_fix: dict[str, Any] | None = None
+    baseline_final_fix: dict[str, Any] | None = None
     base_route: dict[str, Any] | None = None
+    atc_wait_point: dict[str, Any] | None = None
     wait_atc_point: dict[str, Any] | None = None
 
 

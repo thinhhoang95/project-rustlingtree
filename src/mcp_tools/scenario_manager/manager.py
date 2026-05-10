@@ -84,26 +84,69 @@ class ScenarioManager:
             payload = self._apply_diff(dict(trajectory))
             time_at_first_fix = int(payload.get("first_time", fix_sequence["first_time"]))
             time_at_last_event = int(payload.get("last_time", fix_sequence["last_time"]))
+            base_route = payload.get("base_route") if isinstance(payload.get("base_route"), dict) else {}
+            route_fix_sequence = self._route_fix_sequence(payload, fix_sequence, base_route)
+            route_fix_count = self._route_fix_count(payload, fix_sequence, base_route, route_fix_sequence)
+            atc_wait_point = payload.get("atc_wait_point") or payload.get("wait_atc_point") or base_route.get("atc_point")
+            final_fix = payload.get("final_fix") or payload.get("baseline_final_fix") or base_route.get("final_fix")
             payload.update(
                 {
                     "time_at_first_fix": time_at_first_fix,
                     "time_at_first_fix_utc": self._arrival_time_utc(payload, time_at_first_fix),
                     "time_at_last_event": time_at_last_event,
                     "time_at_last_event_utc": self._arrival_time_utc(payload, time_at_last_event),
-                    "runway": str(event["runway"]),
-                    "route_type": payload.get("route_type", "base-route"),
-                    "fix_sequence": payload.get("fix_sequence", str(fix_sequence["fix_sequence"])),
-                    "fix_count": int(payload.get("fix_count", fix_sequence["fix_count"])),
-                    "original_fix_sequence": str(fix_sequence["fix_sequence"]),
-                    "original_fix_count": int(fix_sequence["fix_count"]),
-                    "base_route": payload.get("base_route"),
-                    "wait_atc_point": payload.get("wait_atc_point"),
+                    "runway": str(payload.get("runway") or base_route.get("runway") or event["runway"]),
+                    "route_type": payload.get("route_type") or base_route.get("type") or "base-route",
+                    "fix_sequence": route_fix_sequence,
+                    "fix_count": route_fix_count,
+                    "final_fix": final_fix,
+                    "baseline_final_fix": final_fix,
+                    "base_route": base_route or None,
+                    "atc_wait_point": atc_wait_point,
+                    "wait_atc_point": atc_wait_point,
                 }
             )
             arrivals.append(payload)
 
         arrivals.sort(key=lambda item: (int(item["time_at_first_fix"]), str(item["flight_id"])))
         return arrivals
+
+    @classmethod
+    def _route_fix_sequence(
+        cls,
+        payload: dict[str, Any],
+        catalog_fix_sequence: dict[str, Any],
+        base_route: dict[str, Any],
+    ) -> str:
+        route_sequence = base_route.get("fix_sequence") or payload.get("fix_sequence")
+        if isinstance(route_sequence, str) and route_sequence.strip():
+            return route_sequence
+
+        lateral_path = base_route.get("lateral_path")
+        if isinstance(lateral_path, list) and lateral_path:
+            return ">".join(cls._route_token_text(token) for token in lateral_path)
+
+        return str(catalog_fix_sequence["fix_sequence"])
+
+    @staticmethod
+    def _route_fix_count(
+        payload: dict[str, Any],
+        catalog_fix_sequence: dict[str, Any],
+        base_route: dict[str, Any],
+        route_fix_sequence: str,
+    ) -> int:
+        route_count = base_route.get("fix_count") or payload.get("fix_count")
+        if route_count is not None:
+            return int(route_count)
+        if route_fix_sequence:
+            return len([token for token in route_fix_sequence.split(">") if token])
+        return int(catalog_fix_sequence["fix_count"])
+
+    @staticmethod
+    def _route_token_text(token: Any) -> str:
+        if isinstance(token, list):
+            return ",".join(str(value) for value in token)
+        return str(token)
 
     def _apply_diff(self, payload: dict[str, Any]) -> dict[str, Any]:
         # Intervention patching will be implemented later. Keep the hook wired

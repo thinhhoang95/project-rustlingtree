@@ -46,20 +46,21 @@ Example response:
 ```json
 {
   "status": "ok",
-  "events_count": 506,
-  "arrivals_count": 364,
-  "departures_count": 142,
-  "fix_sequences_count": 11829,
-  "compressed_flights_count": 2046,
-  "artifact_flights_count": 988,
-  "simap_arrival_flights_count": 988,
-  "adsb_compressed_flights_count": 2046,
+  "events_count": 2046,
+  "arrivals_count": 1026,
+  "departures_count": 1020,
+  "fix_sequences_count": 12048,
+  "compressed_flights_count": 2017,
+  "artifact_flights_count": 787,
+  "simap_arrival_flights_count": 787,
+  "adsb_compressed_flights_count": 2017,
   "arrivals_missing_fix_sequences_count": 0,
-  "arrivals_missing_trajectories_count": 2,
-  "arrivals_missing_artifacts_count": 2,
-  "arrivals_missing_simap_trajectories_count": 2,
-  "departures_missing_trajectories_count": 2,
-  "departures_missing_adsb_trajectories_count": 2,
+  "arrivals_missing_trajectories_count": 239,
+  "arrivals_missing_artifacts_count": 239,
+  "arrivals_missing_simap_trajectories_count": 239,
+  "departures_missing_trajectories_count": 15,
+  "departures_missing_adsb_trajectories_count": 15,
+  "skipped_departures_count": 1020,
   "resource_paths": {
     "data_manifest": "data_manifest.json",
     "data_date": "2026-04-01",
@@ -140,7 +141,7 @@ Example response shape:
 
 ### `GET /arrivals`
 
-Returns the arrival schedule sorted by the first-fix handoff time. Arrivals use SIMAP-generated compressed trajectories.
+Returns the arrival schedule sorted by the first-fix handoff time. Arrivals use SIMAP-generated compressed trajectories for the base route from the first route fix through the ATC wait point, selected final fix, and runway threshold.
 
 Each item keeps the original compressed trajectory payload shape and adds:
 
@@ -149,8 +150,14 @@ Each item keeps the original compressed trajectory payload shape and adds:
 - `time_at_last_event`
 - `time_at_last_event_utc`
 - `runway`
-- `original_fix_sequence`
-- `original_fix_count`
+- `route_type`: currently `"base-route"` for generated arrival artifacts
+- `fix_sequence`: the base-route sequence from the first fix through runway threshold
+- `fix_count`
+- `base_route`
+- `atc_wait_point`
+- `wait_atc_point`: compatibility alias for `atc_wait_point`
+- `final_fix`
+- `baseline_final_fix`: compatibility alias for `final_fix`
 
 The trajectory payload remains compatible with the ADS-B compressed trajectory format:
 
@@ -165,20 +172,53 @@ The trajectory payload remains compatible with the ADS-B compressed trajectory f
 - `compressed_point_count`
 - tolerance metadata
 
-Arrival artifacts also include `wait_atc_point`, a metadata object identifying the point where the aircraft should wait for ATC instruction. This point is near the last downwind-leg fix when one is available in the 40-50 NM airport annulus; otherwise it is a generated ghost coordinate at 40 NM. It does not change the compressed trajectory points.
+The `fix_sequence` is not the original catalog sequence. It is the unique base-route sequence SIMAP used: original fixes up to and including the ATC wait point, then the runway-aligned final fix, then the runway threshold.
 
-`wait_atc_point` fields:
+`base_route` fields:
 
-- `source`: `"fix"` when a route fix was selected, or `"ghost"` when a generated coordinate was used
-- `identifier`: selected fix identifier, or `"WAIT_ATC_GHOST"`
+- `type`: `"base-route"`
+- `selection_method`
+- `fix_sequence`
+- `fix_count`
+- `lateral_path`: route tokens in order
+- `upstream_identifier`: first route fix used as the SIMAP upstream condition
+- `runway`
+- `atc_point`
+- `final_fix`
+- `runway_true_heading_deg`
+
+Arrival artifacts include `atc_wait_point`, a metadata object identifying the fix where the aircraft waits for ATC instruction before being routed direct to the selected final fix. `wait_atc_point` is returned with the same object for backward compatibility.
+
+`atc_wait_point` fields:
+
+- `source`: currently `"fix"` for generated base-route artifacts
+- `identifier`: selected fix identifier
 - `lat`
 - `lon`
-- `lateral_path_token`: selected fix identifier, or a coordinate token like `"33.123456,-97.123456"`
+- `lateral_path_token`: selected fix identifier
+- `route_index`: zero-based index in the original route used to build the base-route prefix
 - `distance_nm`
-- `route_index`: zero-based route index for a selected fix, or `null` for a ghost point
-- `matched_course_deg`: matched route-segment course for a selected fix, or `null` for a ghost point
-- `final_course_deg`
-- `downwind_course_deg`
+- `ring_inner_nm`
+- `ring_outer_nm`
+- `selection_method`
+- `arrival_cluster`
+- `gate_cluster`
+- `gate_radius_nm`
+- `gate_lat`
+- `gate_lon`
+- `gate_classification_fallback`
+- `capture_margin_nm`
+
+`final_fix` fields:
+
+- `identifier`
+- `lat`
+- `lon`
+- `distance_nm`
+- `along_track_nm`
+- `cross_track_nm`
+- `target_distance_nm`
+- `cross_track_tolerance_nm`
 
 Example:
 
@@ -191,45 +231,87 @@ Example response shape:
 ```json
 [
   {
-    "flight_id": "AAL1111M1ab2c04",
-    "callsign": "AAL1111M1",
-    "icao24": "ab2c04",
+    "flight_id": "NKS220M1a91e6e",
+    "callsign": "NKS220M1",
+    "icao24": "a91e6e",
     "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
     "points": [
-      [1743465659, 34.45838928222656, -95.25550063775512, 11170.920000000002, 3],
-      [1743465839, 34.20744323730469, -95.51782724808676, 11148.06, 2]
+      [1775020679, 31.909439086914062, -95.5360107421875, 10972.800000000001, 3],
+      [1775021708, 32.89953642491388, -97.0298451398072, 159.7152, 3]
     ],
     "breakpoint_mask_bits": {
       "lateral": 1,
       "altitude": 2
     },
-    "lateral_breakpoint_times": [1743465659, 1743465839],
-    "altitude_breakpoint_times": [1743465659, 1743465839],
+    "lateral_breakpoint_times": [1775020679, 1775021708],
+    "altitude_breakpoint_times": [1775020679, 1775021708],
+    "route_type": "base-route",
+    "fix_sequence": "MUZZY>BEREE>TACKE>PAXTN>FIVIS>STONZ>LEGRE>RW18R",
+    "fix_count": 8,
+    "atc_wait_point": {
+      "source": "fix",
+      "identifier": "STONZ",
+      "lat": 32.97284722222222,
+      "lon": -96.90284444444445,
+      "lateral_path_token": "STONZ",
+      "route_index": 5,
+      "distance_nm": 8.380134836797653,
+      "selection_method": "cluster_capture_polygon",
+      "arrival_cluster": "SE",
+      "gate_cluster": "SE"
+    },
+    "final_fix": {
+      "identifier": "LEGRE",
+      "lat": 33.04105833333333,
+      "lon": -97.05399444444444,
+      "distance_nm": 7.519805065979901,
+      "along_track_nm": 7.519805056162219,
+      "cross_track_nm": 0.000384257868011151,
+      "target_distance_nm": 7.0,
+      "cross_track_tolerance_nm": 0.15
+    },
+    "base_route": {
+      "type": "base-route",
+      "selection_method": "atc_direct_to_runway_aligned_final_fix",
+      "fix_sequence": "MUZZY>BEREE>TACKE>PAXTN>FIVIS>STONZ>LEGRE>RW18R",
+      "fix_count": 8,
+      "lateral_path": ["MUZZY", "BEREE", "TACKE", "PAXTN", "FIVIS", "STONZ", "LEGRE", "RW18R"],
+      "upstream_identifier": "MUZZY",
+      "runway": "RW18R"
+    },
     "wait_atc_point": {
       "source": "fix",
-      "identifier": "BIRLE",
-      "lat": 33.62801388888889,
-      "lon": -97.20365555555555,
-      "lateral_path_token": "BIRLE",
-      "distance_nm": 45.2,
-      "route_index": 1,
-      "matched_course_deg": 169.8,
-      "final_course_deg": 350.0,
-      "downwind_course_deg": 170.0
+      "identifier": "STONZ",
+      "lat": 32.97284722222222,
+      "lon": -96.90284444444445,
+      "lateral_path_token": "STONZ",
+      "route_index": 5,
+      "distance_nm": 8.380134836797653,
+      "selection_method": "cluster_capture_polygon",
+      "arrival_cluster": "SE",
+      "gate_cluster": "SE"
     },
-    "first_time": 1743465659,
-    "last_time": 1743465839,
-    "raw_point_count": 181,
-    "compressed_point_count": 42,
+    "baseline_final_fix": {
+      "identifier": "LEGRE",
+      "lat": 33.04105833333333,
+      "lon": -97.05399444444444,
+      "distance_nm": 7.519805065979901,
+      "along_track_nm": 7.519805056162219,
+      "cross_track_nm": 0.000384257868011151,
+      "target_distance_nm": 7.0,
+      "cross_track_tolerance_nm": 0.15
+    },
+    "first_time": 1775020679,
+    "last_time": 1775021708,
+    "raw_point_count": 516,
+    "compressed_point_count": 45,
     "lateral_tolerance_m": 100.0,
     "altitude_tolerance_m": 50.0,
-    "time_at_first_fix": 1743465659,
-    "time_at_first_fix_utc": "2025-04-01T00:00:59Z",
-    "time_at_last_event": 1743465839,
-    "time_at_last_event_utc": "2025-04-01T00:02:19Z",
-    "runway": "35C",
-    "original_fix_sequence": "PLEZE>BIRLE>CHMLI>...",
-    "original_fix_count": 14
+    "time_at_first_fix": 1775020679,
+    "time_at_first_fix_utc": "2026-04-01T05:17:59Z",
+    "time_at_last_event": 1775021708,
+    "time_at_last_event_utc": "2026-04-01T05:35:08Z",
+    "runway": "RW18R"
   }
 ]
 ```

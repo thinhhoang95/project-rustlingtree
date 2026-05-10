@@ -51,11 +51,11 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     raw_tracks = {
         "ARR1": pd.DataFrame(
             {
-                "time": [100, 110],
-                "lat": [32.0, 32.01],
-                "lon": [-97.0, -97.01],
-                "heading": [180.0, 181.0],
-                "geoaltitude": [1_000.0, 900.0],
+                "time": [90, 100, 110],
+                "lat": [31.5, 32.0, 32.01],
+                "lon": [-96.5, -97.0, -97.01],
+                "heading": [179.0, 180.0, 181.0],
+                "geoaltitude": [1_200.0, 1_000.0, 900.0],
             }
         ),
         "ARR2": pd.DataFrame(
@@ -82,17 +82,17 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
 
     monkeypatch.setattr(precompute_artifact, "_flight_raw_tracks", lambda *args, **kwargs: raw_tracks)
     monkeypatch.setattr(precompute_artifact, "_build_request", lambda *args, **kwargs: (object(), None))
-    monkeypatch.setattr(precompute_artifact, "plan_fms_bichannel", lambda _request: fake_result)
+    monkeypatch.setattr(precompute_artifact, "plan_fms_bichannel", lambda _request, **_kwargs: fake_result)
     monkeypatch.setattr(
         precompute_artifact,
         "detect_wait_atc_point",
         lambda *args, **kwargs: {
             "source": "fix",
-            "identifier": "FIXA",
-            "lat": 32.0,
-            "lon": -97.0,
-            "lateral_path_token": "FIXA",
-            "route_index": 0,
+            "identifier": "FIXB",
+            "lat": 32.1,
+            "lon": -97.1,
+            "lateral_path_token": "FIXB",
+            "route_index": 1,
             "distance_nm": 45.0,
             "arrival_cluster": "SE",
         },
@@ -120,13 +120,15 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
     assert payloads[0]["route_type"] == "base-route"
-    assert payloads[0]["fix_sequence"] == "FIXA>DAYZZ>RW35C"
-    assert payloads[0]["fix_count"] == 3
-    assert payloads[0]["wait_atc_point"]["identifier"] == "FIXA"
+    assert payloads[0]["runway"] == "RW35C"
+    assert payloads[0]["fix_sequence"] == "FIXA>FIXB>DAYZZ>RW35C"
+    assert payloads[0]["fix_count"] == 4
+    assert payloads[0]["wait_atc_point"]["identifier"] == "FIXB"
+    assert payloads[0]["baseline_final_fix"]["identifier"] == "DAYZZ"
     assert payloads[0]["base_route"]["type"] == "base-route"
-    assert payloads[0]["base_route"]["fix_sequence"] == "FIXA>DAYZZ>RW35C"
-    assert payloads[0]["base_route"]["fix_count"] == 3
-    assert payloads[0]["base_route"]["lateral_path"] == ["FIXA", "DAYZZ", "RW35C"]
+    assert payloads[0]["base_route"]["fix_sequence"] == "FIXA>FIXB>DAYZZ>RW35C"
+    assert payloads[0]["base_route"]["fix_count"] == 4
+    assert payloads[0]["base_route"]["lateral_path"] == ["FIXA", "FIXB", "DAYZZ", "RW35C"]
     assert payloads[0]["base_route"]["final_fix"]["identifier"] == "DAYZZ"
 
 

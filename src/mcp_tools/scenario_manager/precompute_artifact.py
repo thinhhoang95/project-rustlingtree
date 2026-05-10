@@ -54,6 +54,9 @@ DEFAULT_ALTITUDE_TOLERANCE_M = 50.0
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
 DEFAULT_FINAL_FIX_DISTANCE_NM = 7.0
 DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM = 0.15
+DEFAULT_FMS_DT_S = 2.0
+DEFAULT_TOD_TOLERANCE_M = 25.0
+DEFAULT_MAX_TOD_ITERATIONS = 24
 METERS_PER_NM = 1_852.0
 _RUNWAY_RE = re.compile(r"^RW?(?P<number>\d{1,2})(?P<suffix>[LCR]?)$")
 
@@ -102,6 +105,9 @@ class ArtifactTask:
     altitude_tolerance_m: float
     final_fix_distance_nm: float
     final_fix_cross_track_tolerance_nm: float
+    fms_dt_s: float
+    tod_tolerance_m: float
+    max_tod_iterations: int
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM,
     )
+    parser.add_argument("--fms-dt-s", type=float, default=DEFAULT_FMS_DT_S)
+    parser.add_argument("--tod-tolerance-m", type=float, default=DEFAULT_TOD_TOLERANCE_M)
+    parser.add_argument("--max-tod-iterations", type=int, default=DEFAULT_MAX_TOD_ITERATIONS)
     parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
     parser.add_argument("--processes", type=int, default=cpu_count())
     parser.add_argument("--limit", type=int, default=None)
@@ -349,14 +358,14 @@ def _select_final_fix(
     return min(candidates, key=lambda item: item[:3])[3]
 
 
-def _wait_atc_route_token(
-    wait_atc_point: dict[str, Any],
+def _route_token_latlon(
+    token: str | tuple[float, float],
     fix_catalog: dict[str, PathWaypoint],
-) -> str | tuple[float, float]:
-    token = str(wait_atc_point.get("lateral_path_token") or wait_atc_point.get("identifier") or "").strip().upper()
-    if token and token in fix_catalog:
-        return token
-    return float(wait_atc_point["lat"]), float(wait_atc_point["lon"])
+) -> tuple[float, float]:
+    if isinstance(token, tuple):
+        return float(token[0]), float(token[1])
+    waypoint = fix_catalog[str(token).upper()]
+    return float(waypoint.lat_deg), float(waypoint.lon_deg)
 
 
 def _dedupe_consecutive_route_tokens(
@@ -386,15 +395,19 @@ def _build_base_route(
     final_fix_cross_track_tolerance_nm: float,
 ) -> BaseRoute:
     runway_identifier = _normalize_runway_identifier(row["runway"])
+    original_route = _route_tokens(row["fix_sequence"], runway_identifier)
+    route_index = int(wait_atc_point["route_index"])
+    route_prefix = original_route[: route_index + 1]
+    if not route_prefix:
+        raise ValueError("base route requires at least one fix before the ATC decision point")
     final_fix = _select_final_fix(
         runway_identifier=runway_identifier,
         fix_catalog=fix_catalog,
         target_distance_nm=final_fix_distance_nm,
         cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
     )
-    atc_token = _wait_atc_route_token(wait_atc_point, fix_catalog)
     lateral_path = _dedupe_consecutive_route_tokens(
-        [atc_token, final_fix.waypoint.identifier, runway_identifier]
+        [*route_prefix, final_fix.waypoint.identifier, runway_identifier]
     )
     if len(lateral_path) < 2:
         raise ValueError("base route must contain at least two unique waypoints")
@@ -486,9 +499,30 @@ def _build_request(
     upstream_identifier: str,
     seed: SeedState,
     fixes_csv: Path,
+    fms_dt_s: float,
 ) -> tuple[FMSRequest, FMSBiChannelState]:
+    _, fms_request, initial_state = _build_request_bundle(
+        route=route,
+        upstream_identifier=upstream_identifier,
+        seed=seed,
+        fixes_csv=fixes_csv,
+        fms_dt_s=fms_dt_s,
+    )
+    return fms_request, initial_state
+
+
+def _build_request_bundle(
+    *,
+    route: list[str | tuple[float, float]],
+    upstream_identifier: str,
+    seed: SeedState,
+    fixes_csv: Path,
+    fms_dt_s: float,
+) -> tuple[Any, FMSRequest, FMSBiChannelState]:
     if len(route) < 2:
         raise ValueError("route must contain at least one upstream waypoint and a runway")
+    if fms_dt_s <= 0.0:
+        raise ValueError("fms_dt_s must be positive")
     h_m = max(float(seed.geoaltitude_m), 1.0)
     cas_mps = float(
         aero.tas2cas(
@@ -508,7 +542,7 @@ def _build_request(
     )
     bundle = build_tactical_plan_request(command, fixes_csv=fixes_csv)
     start_s_m = bundle.request.reference_path.total_length_m
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m, dt_s=fms_dt_s)
     east_m, north_m = bundle.request.reference_path.position_ne(fms_request.start_s_m)
     psi_rad = (
         _heading_deg_to_psi_rad(seed.heading_deg)
@@ -529,22 +563,32 @@ def _build_request(
         psi_rad=psi_rad,
         phi_rad=0.0,
     )
-    return fms_request, initial_state
+    return bundle, fms_request, initial_state
 
 
 def _payload_from_result(
     *,
     row: pd.Series,
-    seed_time_s: int,
+    seed: SeedState,
     wait_atc_point: dict[str, Any] | None,
     base_route: BaseRoute,
     result,
+    reference_path: Any | None = None,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
 ) -> tuple[ArtifactResult, dict[str, Any]]:
-    times = np.rint(seed_time_s + result.t_s).astype(np.int64)
-    latitudes = np.asarray(result.lat_deg, dtype=float)
-    longitudes = np.asarray(result.lon_deg, dtype=float)
+    times = np.rint(seed.time_s + result.t_s).astype(np.int64)
+    if reference_path is not None and hasattr(result, "s_m"):
+        path_s_m = np.asarray(result.s_m, dtype=float).copy()
+        if len(path_s_m):
+            path_s_m[-1] = 0.0
+        positions_ne = reference_path.position_ne_many(path_s_m)
+        latlon = reference_path.latlon_from_ne_many(positions_ne[:, 0], positions_ne[:, 1])
+        latitudes = np.asarray(latlon[:, 0], dtype=float)
+        longitudes = np.asarray(latlon[:, 1], dtype=float)
+    else:
+        latitudes = np.asarray(result.lat_deg, dtype=float)
+        longitudes = np.asarray(result.lon_deg, dtype=float)
     geoaltitudes = np.asarray(result.h_m, dtype=float)
     breakpoints = compress_breakpoints(
         times=times,
@@ -556,6 +600,7 @@ def _payload_from_result(
     )
     lateral_indices = set(int(index) for index in breakpoints.lateral_indices)
     altitude_indices = set(int(index) for index in breakpoints.altitude_indices)
+    base_route_payload = base_route.to_payload()
     points: list[list[int | float]] = []
     for index in breakpoints.minimal_indices:
         int_index = int(index)
@@ -578,6 +623,7 @@ def _payload_from_result(
         "flight_id": str(row["flight_id"]),
         "callsign": str(row["callsign"]),
         "icao24": str(row["icao24"]),
+        "runway": _normalize_runway_identifier(row["runway"]),
         "route_type": "base-route",
         "fix_sequence": base_route.fix_sequence,
         "fix_count": len(base_route.lateral_path),
@@ -590,7 +636,8 @@ def _payload_from_result(
         "lateral_breakpoint_times": [int(times[index]) for index in breakpoints.lateral_indices],
         "altitude_breakpoint_times": [int(times[index]) for index in breakpoints.altitude_indices],
         "wait_atc_point": wait_atc_point,
-        "base_route": base_route.to_payload(),
+        "baseline_final_fix": base_route_payload["final_fix"],
+        "base_route": base_route_payload,
         "first_time": int(times[0]),
         "last_time": int(times[-1]),
         "raw_point_count": len(times),
@@ -711,32 +758,37 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             final_fix_distance_nm=task.final_fix_distance_nm,
             final_fix_cross_track_tolerance_nm=task.final_fix_cross_track_tolerance_nm,
         )
+        first_fix_lat_deg, first_fix_lon_deg = _route_token_latlon(base_route.lateral_path[0], fix_catalog)
         seed = _seed_for_flight_at_fix(
             task.raw_flight,
-            fix_lat_deg=float(wait_atc_point["lat"]),
-            fix_lon_deg=float(wait_atc_point["lon"]),
+            fix_lat_deg=first_fix_lat_deg,
+            fix_lon_deg=first_fix_lon_deg,
         )
         if seed is None:
-            return _skip_result(row, "missing raw seed near ATC decision point"), None, diagnostics
+            return _skip_result(row, "missing raw seed near first route fix"), None, diagnostics
         fms_request, initial_state = _build_request(
             route=base_route.lateral_path,
             upstream_identifier=base_route.upstream_identifier,
             seed=seed,
             fixes_csv=task.fixes_csv,
+            fms_dt_s=task.fms_dt_s,
         )
         result = plan_fms_bichannel(
             FMSBiChannelRequest(
                 base_request=fms_request,
                 guidance=LateralGuidanceConfig(),
                 initial_state=initial_state,
-            )
+            ),
+            tod_tolerance_m=task.tod_tolerance_m,
+            max_tod_iterations=task.max_tod_iterations,
         )
         artifact, payload = _payload_from_result(
             row=row,
-            seed_time_s=seed.time_s,
+            seed=seed,
             wait_atc_point=wait_atc_point,
             base_route=base_route,
             result=result,
+            reference_path=getattr(fms_request, "reference_path", None),
             lateral_tolerance_m=task.lateral_tolerance_m,
             altitude_tolerance_m=task.altitude_tolerance_m,
         )
@@ -768,6 +820,9 @@ def precompute_artifacts(
     altitude_tolerance_m: float = DEFAULT_ALTITUDE_TOLERANCE_M,
     final_fix_distance_nm: float = DEFAULT_FINAL_FIX_DISTANCE_NM,
     final_fix_cross_track_tolerance_nm: float = DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM,
+    fms_dt_s: float = DEFAULT_FMS_DT_S,
+    tod_tolerance_m: float = DEFAULT_TOD_TOLERANCE_M,
+    max_tod_iterations: int = DEFAULT_MAX_TOD_ITERATIONS,
     split_gap_seconds: int = DEFAULT_SPLIT_GAP_SECONDS,
     processes: int = 1,
     limit: int | None = None,
@@ -782,6 +837,9 @@ def precompute_artifacts(
             f"arrivals={len(arrivals)} "
             f"final_fix_target={final_fix_distance_nm:.1f}NM "
             f"centerline_tolerance={final_fix_cross_track_tolerance_nm:.2f}NM "
+            f"fms_dt={fms_dt_s:.1f}s "
+            f"tod_tolerance={tod_tolerance_m:.1f}m "
+            f"max_tod_iterations={max_tod_iterations} "
             f"processes={processes}"
         )
         console.print(
@@ -811,6 +869,9 @@ def precompute_artifacts(
                 altitude_tolerance_m=altitude_tolerance_m,
                 final_fix_distance_nm=final_fix_distance_nm,
                 final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+                fms_dt_s=fms_dt_s,
+                tod_tolerance_m=tod_tolerance_m,
+                max_tod_iterations=max_tod_iterations,
             )
         )
     if console is not None:
@@ -878,6 +939,9 @@ def precompute_artifacts(
                 altitude_tolerance_m=altitude_tolerance_m,
                 final_fix_distance_nm=final_fix_distance_nm,
                 final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+                fms_dt_s=fms_dt_s,
+                tod_tolerance_m=tod_tolerance_m,
+                max_tod_iterations=max_tod_iterations,
                 processes=processes,
                 skipped_departure_count=_departure_count(events_path),
             )
@@ -901,6 +965,9 @@ def precompute_artifacts(
             altitude_tolerance_m=altitude_tolerance_m,
             final_fix_distance_nm=final_fix_distance_nm,
             final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+            fms_dt_s=fms_dt_s,
+            tod_tolerance_m=tod_tolerance_m,
+            max_tod_iterations=max_tod_iterations,
             processes=processes,
             skipped_departure_count=_departure_count(events_path),
         )
@@ -928,6 +995,9 @@ def _manifest(
     altitude_tolerance_m: float,
     final_fix_distance_nm: float,
     final_fix_cross_track_tolerance_nm: float,
+    fms_dt_s: float,
+    tod_tolerance_m: float,
+    max_tod_iterations: int,
     processes: int,
     skipped_departure_count: int,
 ) -> dict[str, Any]:
@@ -969,6 +1039,9 @@ def _manifest(
         "compressed_point_count": sum(result.compressed_point_count for result in generated),
         "lateral_tolerance_m": lateral_tolerance_m,
         "altitude_tolerance_m": altitude_tolerance_m,
+        "fms_dt_s": fms_dt_s,
+        "tod_tolerance_m": tod_tolerance_m,
+        "max_tod_iterations": int(max_tod_iterations),
         "base_route": {
             "type": "base-route",
             "final_fix_target_distance_nm": final_fix_distance_nm,
@@ -1022,6 +1095,9 @@ def main() -> None:
         altitude_tolerance_m=args.altitude_tolerance_m,
         final_fix_distance_nm=args.final_fix_distance_nm,
         final_fix_cross_track_tolerance_nm=args.final_fix_cross_track_tolerance_nm,
+        fms_dt_s=args.fms_dt_s,
+        tod_tolerance_m=args.tod_tolerance_m,
+        max_tod_iterations=args.max_tod_iterations,
         split_gap_seconds=args.split_gap_seconds,
         processes=args.processes,
         limit=args.limit,

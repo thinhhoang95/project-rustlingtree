@@ -8,6 +8,7 @@ import pandas as pd
 
 from scenario.demand_opensky.adsb_catalog_common import (
     DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M,
+    EARTH_RADIUS_M,
     FIX_SEQUENCE_DELIMITER,
     GROUND_RELEVANT_ALTITUDE_M,
     ISO_DATE_FORMAT,
@@ -83,9 +84,70 @@ def is_better_candidate(candidate: ThresholdCandidate, current_best: ThresholdCa
     if current_best is None:
         return True
 
-    candidate_score = (abs(candidate.distance_delta_m), -candidate.event_distance_m)
-    current_score = (abs(current_best.distance_delta_m), -current_best.event_distance_m)
+    candidate_heading_error = (
+        360.0 if candidate.heading_error_deg is None else float(candidate.heading_error_deg)
+    )
+    current_heading_error = (
+        360.0 if current_best.heading_error_deg is None else float(current_best.heading_error_deg)
+    )
+    candidate_score = (
+        -candidate_heading_error,
+        -candidate.event_distance_m,
+        abs(candidate.distance_delta_m),
+    )
+    current_score = (
+        -current_heading_error,
+        -current_best.event_distance_m,
+        abs(current_best.distance_delta_m),
+    )
     return candidate_score > current_score
+
+
+def _wrap_heading_error_deg(heading_a_deg: float, heading_b_deg: float) -> float:
+    return float(abs((heading_a_deg - heading_b_deg + 180.0) % 360.0 - 180.0))
+
+
+def _bearing_deg(
+    lat_a_deg: float,
+    lon_a_deg: float,
+    lat_b_deg: float,
+    lon_b_deg: float,
+) -> float:
+    lat0_rad = np.deg2rad(0.5 * (float(lat_a_deg) + float(lat_b_deg)))
+    east_m = EARTH_RADIUS_M * np.cos(lat0_rad) * np.deg2rad(float(lon_b_deg) - float(lon_a_deg))
+    north_m = EARTH_RADIUS_M * np.deg2rad(float(lat_b_deg) - float(lat_a_deg))
+    return float((np.rad2deg(np.arctan2(east_m, north_m)) + 360.0) % 360.0)
+
+
+def _runway_heading_by_identifier(thresholds: pd.DataFrame) -> dict[str, float]:
+    heading_by_runway: dict[str, float] = {}
+    for _pair, pair_rows in thresholds.groupby("runway_pair", sort=False):
+        if len(pair_rows) != 2:
+            continue
+        rows = list(pair_rows.to_dict("records"))
+        first, second = rows[0], rows[1]
+        heading_by_runway[str(first["runway"])] = _bearing_deg(
+            float(first["threshold_lat"]),
+            float(first["threshold_lon"]),
+            float(second["threshold_lat"]),
+            float(second["threshold_lon"]),
+        )
+        heading_by_runway[str(second["runway"])] = _bearing_deg(
+            float(second["threshold_lat"]),
+            float(second["threshold_lon"]),
+            float(first["threshold_lat"]),
+            float(first["threshold_lon"]),
+        )
+    return heading_by_runway
+
+
+def _nearest_valid_heading(positions: pd.DataFrame, event_index: int) -> float | None:
+    headings = pd.to_numeric(positions["heading"], errors="coerce").to_numpy(dtype=float)
+    valid_indices = np.flatnonzero(np.isfinite(headings))
+    if len(valid_indices) == 0:
+        return None
+    nearest = int(valid_indices[np.abs(valid_indices - event_index).argmin()])
+    return float(headings[nearest])
 
 
 def classify_flight_track(
@@ -116,6 +178,7 @@ def classify_flight_track(
     saw_proximity_threshold = False
 
     threshold_rows = cast(list[RunwayThresholdRecord], thresholds.to_dict("records"))
+    runway_heading_deg = _runway_heading_by_identifier(thresholds)
     for threshold_row in threshold_rows:
         distances = haversine_distance_m(
             lats,
@@ -130,6 +193,7 @@ def classify_flight_track(
         saw_proximity_threshold = True
         matching_indices = np.flatnonzero(proximity_indices)
         event_index = int(matching_indices[0])
+        heading_index = int(matching_indices[np.argmin(distances[matching_indices])])
         event_distance = float(distances[event_index])
         approach_evidence_m = float(distances[0] - event_distance)
         departure_evidence_m = float(distances[-1] - event_distance)
@@ -147,6 +211,13 @@ def classify_flight_track(
             comparison_index = len(positions) - 1
             distance_delta = departure_evidence_m
             altitude_delta = float(altitudes[comparison_index] - altitudes[event_index])
+        heading = _nearest_valid_heading(positions, heading_index)
+        runway_heading = runway_heading_deg.get(str(threshold_row["runway"]))
+        heading_error = (
+            None
+            if heading is None or runway_heading is None
+            else _wrap_heading_error_deg(heading, runway_heading)
+        )
 
         candidate = ThresholdCandidate(
             operation=operation,
@@ -156,6 +227,7 @@ def classify_flight_track(
             event_distance_m=event_distance,
             altitude_delta_m=altitude_delta,
             distance_delta_m=distance_delta,
+            heading_error_deg=heading_error,
         )
         if is_better_candidate(candidate, best_candidate):
             best_candidate = candidate
