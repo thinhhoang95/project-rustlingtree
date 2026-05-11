@@ -25,7 +25,6 @@ SIMAP_COLOR = "#c2410c"
 CAS_COLOR = "#f59e0b"
 GAMMA_COLOR = "#7c3aed"
 BANK_COLOR = "#2563eb"
-LOWER_STATE_COLOR = "#2563eb"
 UPPER_STATE_COLOR = "#dc2626"
 FREE_STATE_COLOR = "#6b7280"
 UNAVAILABLE = "N/A"
@@ -249,27 +248,6 @@ def build_bichannel_result(
     )
 
 
-def _plot_state_axis(ax: Axes, time_s: np.ndarray, state: np.ndarray, *, title: str, first_active_time_s: float | None, current_time_s: float | None = None) -> None:
-    ax.step(time_s, state, where="mid", color="#111827", linewidth=1.2)
-    if np.any(state == -1):
-        ax.scatter(time_s[state == -1], state[state == -1], color=LOWER_STATE_COLOR, s=12, zorder=3, label="lower")
-    if np.any(state == 1):
-        ax.scatter(time_s[state == 1], state[state == 1], color=UPPER_STATE_COLOR, s=12, zorder=3, label="upper")
-    if current_time_s is not None:
-        current_value = _interp_value(current_time_s, time_s, state.astype(float))
-        if current_value is not None:
-            ax.plot([current_time_s], [current_value], "o", color="#111827", markersize=6, zorder=4)
-    if first_active_time_s is not None:
-        ax.axvline(first_active_time_s, color=UPPER_STATE_COLOR, linestyle="--", linewidth=1.0, alpha=0.75)
-    ax.axhline(0.0, color=FREE_STATE_COLOR, linestyle=":", linewidth=1.0)
-    ax.set_ylim(-1.25, 1.25)
-    ax.set_yticks([-1, 0, 1])
-    ax.set_yticklabels(["lower", "free", "upper"])
-    ax.set_title(title)
-    ax.set_ylabel("state")
-    ax.grid(True, alpha=0.25)
-
-
 def _hide_xticklabels(ax: Axes) -> None:
     ax.tick_params(labelbottom=False)
 
@@ -393,16 +371,14 @@ def plot_cross_check(
     bank_active_count, bank_first_active = _state_summary(sim_time_s, bank_state)
 
     fig = plt.figure(figsize=(18.0, 18.5))
-    grid = fig.add_gridspec(6, 2, height_ratios=[1.22, 0.92, 0.92, 0.92, 0.92, 0.16])
+    grid = fig.add_gridspec(6, 2, height_ratios=[1.22, 0.9, 0.82, 0.82, 0.82, 0.16])
     trajectory_ax = fig.add_subplot(grid[0, :])
-    cross_track_ax = fig.add_subplot(grid[1, 0])
-    track_error_ax = fig.add_subplot(grid[1, 1])
-    cas_ax = fig.add_subplot(grid[2, 0])
-    cas_state_ax = fig.add_subplot(grid[2, 1])
-    gamma_ax = fig.add_subplot(grid[3, 0])
-    gamma_state_ax = fig.add_subplot(grid[3, 1])
-    bank_ax = fig.add_subplot(grid[4, 0])
-    bank_state_ax = fig.add_subplot(grid[4, 1])
+    altitude_ax = fig.add_subplot(grid[1, :])
+    cross_track_ax = fig.add_subplot(grid[2, 0])
+    track_error_ax = fig.add_subplot(grid[2, 1])
+    cas_ax = fig.add_subplot(grid[3, 0])
+    gamma_ax = fig.add_subplot(grid[3, 1])
+    bank_ax = fig.add_subplot(grid[4, :])
     slider_ax = fig.add_subplot(grid[5, :])
 
     trajectory_ax.plot(
@@ -453,6 +429,20 @@ def plot_cross_check(
     trajectory_ax.grid(True, alpha=0.25)
     trajectory_ax.legend(loc="best", fontsize=8.5)
     _set_kdfw_airport_area_limits(trajectory_ax)
+
+    altitude_ax.plot(adsb_time_s, m_to_ft(adsb.altitude_m), color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
+    altitude_ax.plot(
+        sim_time_s,
+        m_to_ft(bichannel.h_m),
+        color=SIMAP_COLOR,
+        linewidth=1.8,
+        label="SIMAP",
+    )
+    altitude_ax.set_title("Altitude")
+    altitude_ax.set_ylabel("altitude [ft]")
+    altitude_ax.grid(True, alpha=0.25)
+    altitude_ax.legend(loc="best", fontsize=8.5)
+    _hide_xticklabels(altitude_ax)
 
     cross_track_ax.plot(adsb_time_s, adsb_cross_track_m, color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
     cross_track_ax.plot(
@@ -505,15 +495,6 @@ def plot_cross_check(
     cas_ax.legend(loc="best", fontsize=8.5)
     _hide_xticklabels(cas_ax)
 
-    _plot_state_axis(
-        cas_state_ax,
-        sim_time_s,
-        cas_state,
-        title="CAS envelope enforcement",
-        first_active_time_s=cas_first_active,
-    )
-    _hide_xticklabels(cas_state_ax)
-
     gamma_ax.plot(sim_time_s, sim_gamma_deg, color=GAMMA_COLOR, linewidth=1.8, label="SIMAP")
     if gamma_lower_deg is not None and gamma_upper_deg is not None:
         gamma_ax.fill_between(
@@ -535,15 +516,6 @@ def plot_cross_check(
     gamma_ax.legend(loc="best", fontsize=8.5)
     _hide_xticklabels(gamma_ax)
 
-    _plot_state_axis(
-        gamma_state_ax,
-        sim_time_s,
-        gamma_state,
-        title="Gamma envelope enforcement",
-        first_active_time_s=gamma_first_active,
-    )
-    _hide_xticklabels(gamma_state_ax)
-
     bank_ax.plot(sim_time_s, sim_phi_deg, color=SIMAP_COLOR, linewidth=1.8, label="actual bank")
     bank_ax.plot(sim_time_s, sim_phi_req_deg, color=BANK_COLOR, linewidth=1.4, linestyle="--", label="requested bank")
     bank_ax.fill_between(
@@ -563,14 +535,6 @@ def plot_cross_check(
     bank_ax.set_ylabel("bank [deg]")
     bank_ax.grid(True, alpha=0.25)
     bank_ax.legend(loc="best", fontsize=8.5)
-
-    _plot_state_axis(
-        bank_state_ax,
-        sim_time_s,
-        bank_state,
-        title="Bank-angle envelope enforcement",
-        first_active_time_s=bank_first_active,
-    )
 
     start_time = min(float(adsb_time_s[0]), float(sim_time_s[0]))
     end_time = max(float(adsb_time_s[-1]), float(sim_time_s[-1]))
@@ -606,6 +570,8 @@ def plot_cross_check(
 
     current_adsb_point, = trajectory_ax.plot([], [], "o", color=ADSB_COLOR, markersize=7.5, zorder=7)
     current_simap_point, = trajectory_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=7.5, zorder=7)
+    current_altitude_adsb_point, = altitude_ax.plot([], [], "o", color=ADSB_COLOR, markersize=6.0, zorder=7)
+    current_altitude_simap_point, = altitude_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=6.0, zorder=7)
     current_cross_track_adsb_point, = cross_track_ax.plot([], [], "o", color=ADSB_COLOR, markersize=6.0, zorder=7)
     current_cross_track_simap_point, = cross_track_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=6.0, zorder=7)
     current_track_error_point, = track_error_ax.plot([], [], "o", color="#0f766e", markersize=6.0, zorder=7)
@@ -628,6 +594,8 @@ def plot_cross_check(
         simap_sample = _sample_trajectory(simap_display, time_s)
         cross_track_sim_m = _interp_value(time_s, sim_time_s, sim_cross_track_m)
         track_error_deg = _interp_value(time_s, sim_time_s, sim_track_error_deg)
+        altitude_adsb_ft = None if adsb_sample.altitude_m is None else m_to_ft(adsb_sample.altitude_m)
+        altitude_simap_ft = None if simap_sample.altitude_m is None else m_to_ft(simap_sample.altitude_m)
         cas_sim_mps = _interp_value(time_s, sim_time_s, bichannel.v_cas_mps)
         gamma_deg = _interp_value(time_s, sim_time_s, sim_gamma_deg)
         bank_actual_deg = _interp_value(time_s, sim_time_s, sim_phi_deg)
@@ -635,6 +603,8 @@ def plot_cross_check(
 
         _set_marker(current_adsb_point, adsb_sample.lon_deg, adsb_sample.lat_deg)
         _set_marker(current_simap_point, simap_sample.lon_deg, simap_sample.lat_deg)
+        _set_marker(current_altitude_adsb_point, adsb_sample.time_s, altitude_adsb_ft)
+        _set_marker(current_altitude_simap_point, simap_sample.time_s, altitude_simap_ft)
         _set_marker(current_cross_track_adsb_point, adsb_sample.time_s, _interp_value(time_s, adsb_time_s, adsb_cross_track_m))
         _set_marker(current_cross_track_simap_point, time_s, cross_track_sim_m)
         _set_marker(current_track_error_point, time_s, track_error_deg)
@@ -658,6 +628,16 @@ def plot_cross_check(
                 "Track error",
                 time_s,
                 f"SIMAP {UNAVAILABLE if track_error_deg is None else f'{track_error_deg:+.2f} deg'}",
+            )
+        )
+        altitude_ax.set_title(
+            _current_title(
+                "Altitude",
+                time_s,
+                (
+                    f"ADS-B {UNAVAILABLE if altitude_adsb_ft is None else f'{altitude_adsb_ft:,.1f} ft'}, "
+                    f"SIMAP {UNAVAILABLE if altitude_simap_ft is None else f'{altitude_simap_ft:,.1f} ft'}"
+                ),
             )
         )
         cas_ax.set_title(
