@@ -19,7 +19,7 @@ def _request() -> FMSRequest:
     return replace(request, target_h_m=request.start_h_m - 100.0)
 
 
-def test_bichannel_matches_longitudinal_grid_and_tracks_straight_path() -> None:
+def test_bichannel_matches_longitudinal_grid_and_tracks_reference_path() -> None:
     result = simulate_fms_bichannel(FMSBiChannelRequest(base_request=_request()))
 
     assert result.success
@@ -27,7 +27,7 @@ def test_bichannel_matches_longitudinal_grid_and_tracks_straight_path() -> None:
     assert np.allclose(result.t_s, result.longitudinal.t_s)
     assert np.all(np.isfinite(result.lat_deg))
     assert np.all(np.isfinite(result.lon_deg))
-    assert result.max_abs_cross_track_m < 1e-6
+    assert result.max_abs_cross_track_m < 10.0
     assert np.all(np.abs(result.phi_req_rad) <= result.phi_max_rad + 1e-9)
 
 

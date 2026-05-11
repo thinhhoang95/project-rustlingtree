@@ -7,7 +7,7 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
-from simap.path_geometry import ReferencePath
+from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
 
 
 class ReferencePathTests(unittest.TestCase):
@@ -42,6 +42,21 @@ class ReferencePathTests(unittest.TestCase):
         projected_s_m = path.project_s_m(east_m, north_m + 250.0)
 
         self.assertAlmostEqual(projected_s_m, 0.5 * path.total_length_m, delta=1.0)
+
+    def test_flyby_path_anticipates_waypoint_turn(self) -> None:
+        path = ReferencePath.from_geographic(
+            lat_deg=np.asarray([0.0, 0.0, 0.05], dtype=float),
+            lon_deg=np.asarray([-0.05, 0.0, 0.0], dtype=float),
+        )
+
+        fix_east_m = EARTH_RADIUS_M * np.cos(np.deg2rad(0.05)) * np.deg2rad(0.0)
+        fix_north_m = EARTH_RADIUS_M * np.deg2rad(0.0 - 0.05)
+        distance_to_fix_m = np.hypot(path.east_m - fix_east_m, path.north_m - fix_north_m)
+        fix_s_m = path.project_s_m(fix_east_m, fix_north_m)
+
+        self.assertGreater(float(np.min(distance_to_fix_m)), 250.0)
+        self.assertGreater(np.rad2deg(path.track_angle_rad(fix_s_m + 1_000.0)), 5.0)
+        self.assertLess(np.rad2deg(path.track_angle_rad(fix_s_m + 1_000.0)), 85.0)
 
 
 if __name__ == "__main__":

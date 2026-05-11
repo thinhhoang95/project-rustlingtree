@@ -220,6 +220,41 @@ Arrival artifacts include `atc_wait_point`, a metadata object identifying the fi
 - `target_distance_nm`
 - `cross_track_tolerance_nm`
 
+### RNAV/PBN Fly-By Turn Example
+
+Arrival lateral paths are treated as RNAV-style fly-by paths, not as a sequence of fly-over corner points. Public FAA RNAV/PBN guidance distinguishes fly-by waypoints from fly-over waypoints: at a fly-by waypoint, the aircraft anticipates the turn and begins banking before reaching the fix so it can roll out on the next course. The turn anticipation distance is driven mainly by course change, groundspeed, and bank capability.
+
+For example, an arrival may expose this base route:
+
+```json
+{
+  "fix_sequence": "KIILO>SHMPP>ZROBA>CURLE>TANNO>DELMO>SILER>ZINGG>RW17C",
+  "base_route": {
+    "lateral_path": ["KIILO", "SHMPP", "ZROBA", "CURLE", "TANNO", "DELMO", "SILER", "ZINGG", "RW17C"],
+    "atc_point": {
+      "identifier": "SILER"
+    },
+    "final_fix": {
+      "identifier": "ZINGG"
+    },
+    "runway": "RW17C"
+  }
+}
+```
+
+SIMAP constructs a continuous line-LNAV path through that route:
+
+1. It follows the inbound line toward each interior fix.
+2. For eligible course changes, it computes a tangent circular turn before the fix.
+3. It exits the turn on the outbound line toward the next fix.
+
+In the `SILER > ZINGG > RW17C` segment, this means the simulated aircraft should begin banking before `ZINGG`, then roll out aligned with the runway course toward `RW17C`. The compressed trajectory `points` therefore may not pass exactly through every intermediate fix coordinate. That is expected for fly-by RNAV behavior; use `base_route.lateral_path` for the route intent and the trajectory `points` for the flown path.
+
+FAA references:
+
+- [FAA AIP ENR 1.16, RNAV routes and waypoints](https://www.faa.gov/air_traffic/publications/atpubs/aip_html/part2_enr_section_1.16.html)
+- [FAA ATBARC RNAV flight behavior and turn anticipation](https://www.faa.gov/air_traffic/publications/atpubs/atbarc/03-5.htm)
+
 Example:
 
 ```bash

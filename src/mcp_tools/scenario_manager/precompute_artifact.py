@@ -70,6 +70,7 @@ def _lateral_guidance_payload(guidance: LateralGuidanceConfig) -> dict[str, floa
         "lookahead_m": float(guidance.lookahead_m),
         "cross_track_gain": float(guidance.cross_track_gain),
         "track_error_gain": float(guidance.track_error_gain),
+        "curvature_feedforward_gain": float(guidance.curvature_feedforward_gain),
         "min_lookahead_m": float(guidance.min_lookahead_m),
         "max_los_angle_rad": float(guidance.max_los_angle_rad),
         "integration_step_s": float(guidance.integration_step_s),

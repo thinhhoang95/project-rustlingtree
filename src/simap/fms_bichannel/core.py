@@ -223,17 +223,28 @@ def _advance_lateral_state(
 
         next_elapsed_s = elapsed_s + dt_s
         next_fraction = min(1.0, next_elapsed_s / step_dt_s)
+        next_scheduled_s_m = _lerp(float(longitudinal.s_m[idx]), float(longitudinal.s_m[idx + 1]), next_fraction)
+        scheduled_east_m, scheduled_north_m = base.reference_path.position_ne(scheduled_s_m)
+        next_scheduled_east_m, next_scheduled_north_m = base.reference_path.position_ne(next_scheduled_s_m)
+        scheduled_path_speed_mps = float(
+            np.hypot(next_scheduled_east_m - scheduled_east_m, next_scheduled_north_m - scheduled_north_m) / dt_s
+        )
+        velocity_scale = (
+            float(np.clip(scheduled_path_speed_mps / command.ground_speed_mps, 0.0, 2.0))
+            if command.ground_speed_mps > 1e-6 and scheduled_path_speed_mps > 0.0
+            else 1.0
+        )
         integrated = FMSBiChannelState(
             t_s=_lerp(float(longitudinal.t_s[idx]), float(longitudinal.t_s[idx + 1]), next_fraction),
-            s_m=_lerp(float(longitudinal.s_m[idx]), float(longitudinal.s_m[idx + 1]), next_fraction),
+            s_m=next_scheduled_s_m,
             h_m=_lerp(float(longitudinal.h_m[idx]), float(longitudinal.h_m[idx + 1]), next_fraction),
             v_tas_mps=_lerp(
                 float(longitudinal.v_tas_mps[idx]),
                 float(longitudinal.v_tas_mps[idx + 1]),
                 next_fraction,
             ),
-            east_m=float(integrated.east_m + command.east_dot_mps * dt_s),
-            north_m=float(integrated.north_m + command.north_dot_mps * dt_s),
+            east_m=float(integrated.east_m + command.east_dot_mps * velocity_scale * dt_s),
+            north_m=float(integrated.north_m + command.north_dot_mps * velocity_scale * dt_s),
             psi_rad=wrap_angle_rad(integrated.psi_rad + psi_dot_rps * dt_s),
             phi_rad=next_phi_rad,
         )

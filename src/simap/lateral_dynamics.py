@@ -49,6 +49,7 @@ class LateralGuidanceConfig:
     lookahead_m: float = 1_500.0
     cross_track_gain: float = 1.0
     track_error_gain: float = 2.0
+    curvature_feedforward_gain: float = 0.25
     min_lookahead_m: float = 150.0
     max_los_angle_rad: float = float(np.deg2rad(89.0))
     integration_step_s: float = 0.5
@@ -117,6 +118,7 @@ def compute_lateral_command(
     lookahead_m = float(max(min_lookahead_m, min(base_lookahead_m, max(min_lookahead_m, ref_s_m))))
     if ref_s_m <= min_lookahead_m and along_path_offset_m > 0.0:
         lookahead_m = base_lookahead_m
+        target_s_m = None
         target_east_m = float(ref_east_m + (along_path_offset_m + lookahead_m) * tangent_hat[0])
         target_north_m = float(ref_north_m + (along_path_offset_m + lookahead_m) * tangent_hat[1])
     else:
@@ -128,7 +130,17 @@ def compute_lateral_command(
     los_error_rad = float(np.clip(los_error_rad, -los_limit_rad, los_limit_rad))
 
     l1_gain = max(0.05, float(guidance.track_error_gain) * np.sqrt(max(0.05, float(guidance.cross_track_gain))))
-    curvature_cmd_inv_m = float(l1_gain * np.sin(los_error_rad) / lookahead_m)
+    curvature_feedback_inv_m = float(l1_gain * np.sin(los_error_rad) / lookahead_m)
+    curvature_feedforward_inv_m = 0.0
+    if target_s_m is not None:
+        preview_s_m = np.linspace(ref_s_m, target_s_m, 9, dtype=float)
+        preview_curvature_inv_m = reference_path.curvature_many(preview_s_m)
+        preview_index = int(np.argmax(np.abs(preview_curvature_inv_m)))
+        curvature_feedforward_inv_m = float(preview_curvature_inv_m[preview_index])
+    curvature_cmd_inv_m = float(
+        max(0.0, float(guidance.curvature_feedforward_gain)) * curvature_feedforward_inv_m
+        + curvature_feedback_inv_m
+    )
     phi_req_rad = float(np.arctan(max(ground_speed_mps, 1.0) ** 2 * curvature_cmd_inv_m / aero.g0))
     delta_isa_K = weather.delta_isa_K(s_m, h_m, t_s)
     v_cas_mps = float(aero.tas2cas(v_tas_mps, h_m, dT=openap_dT(delta_isa_K)))
