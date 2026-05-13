@@ -7,7 +7,7 @@ import numpy as np
 EARTH_RADIUS_M = 6_371_000.0
 # A modest nominal bank keeps the generated fly-by path trackable in approach
 # modes after the roll loop and bank limits are applied.
-_DEFAULT_FLYBY_BANK_RAD = float(np.deg2rad(12.0))
+_DEFAULT_FLYBY_BANK_RAD = float(np.deg2rad(18.0))
 _DEFAULT_FLYBY_SPEED_MPS = 230.0 * 0.514444
 _MIN_FLYBY_TURN_RAD = float(np.deg2rad(3.0))
 _MAX_FLYBY_TURN_RAD = float(np.deg2rad(165.0))
