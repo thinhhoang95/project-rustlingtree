@@ -1,4 +1,12 @@
-# FMS Bichannel Arrival Artifact Flow
+# FMS Bichannel Arrival Artifact Flow: A Complete Guide to the FMS Module
+
+Arrival artifact here refers to the whole pipeline from the flight plan (described as fix sequence) with initial (or boundary) state, to the prescription of target speed, descent with minimum thrust, decelerate at around 10,000ft to 250kts, and slow down in full configuration to land at runway threshold. 
+
+There are modes: 290kt cruise, 290kt descent, 250kt decel, then slow down to reference landing speed (just above stall speed a bit).
+
+The "base" (or pre-intervened) flight path will follow the fix sequence extracted by the ADS-B data, but the ATC will take over when the aircraft enters one of the "ATC takeover recognition areas", described by 4 polygons for 4 different arrival directions. This is the Wait for ATC or ATC takeover point. Then from this takeover point, it will only add one Final fix (which is whatever fix lined up with the selected runway).
+
+There is absolutely no guarantee that the base flight path is even feasible. 
 
 This document explains how the scenario-manager precompute pipeline uses the
 SIMAP FMS bichannel module to generate base-route arrival artifacts.
@@ -17,6 +25,8 @@ The short version:
 ```text
 catalog rows + raw ADS-B + fix catalog
   -> base-route construction
+  -> route tokens resolved to waypoints
+  -> ReferencePath
   -> raw ADS-B seed state
   -> tactical request
   -> FMSRequest
@@ -69,6 +79,21 @@ airspeed. The lateral channel owns map position, heading, bank, cross-track
 error, and track error.
 
 The two channels share the same reference path and the same time grid.
+
+The reference path is built before either channel can do useful work. It is the
+geometric spine of the entire replay:
+
+```text
+fix sequence / base route
+  -> resolved waypoint lat/lon sequence
+  -> ReferencePath
+  -> FMSRequest.reference_path
+  -> longitudinal stationing and lateral map guidance
+```
+
+The longitudinal FMS does not compute map position, heading, or bank. It only
+computes a schedule along this already-built path. The lateral channel then
+turns that schedule into actual map motion.
 
 ## Input Resources
 
@@ -166,6 +191,7 @@ ArtifactTask
   -> load fix catalog
   -> detect ATC decision point
   -> build base route
+  -> resolve base-route tokens into a ReferencePath
   -> pick raw ADS-B seed near first base-route fix
   -> build FMSRequest + FMSBiChannelState
   -> call plan_fms_bichannel()
@@ -300,6 +326,93 @@ centerline tolerance:      0.15 NM
 If no candidate exists, the flight is skipped through the exception handling in
 `_process_arrival_task()`.
 
+## Worked Example: Fix Sequence To Reference Path
+
+Suppose the catalog gives this arrival:
+
+```text
+flight_id     = ARR123
+runway        = 35C
+fix_sequence  = JEN>BOOVE>ALIAN>DFW
+```
+
+The exact fix names are not important. What matters is the transformation:
+
+```text
+catalog fix sequence
+  -> normalized route tokens
+  -> ATC decision point
+  -> base route
+  -> resolved waypoints
+  -> ReferencePath
+```
+
+After route normalization, the runway token is guaranteed to be present:
+
+```text
+[JEN, BOOVE, ALIAN, DFW, RW35C]
+```
+
+Assume `detect_wait_atc_point()` selects `BOOVE` as the ATC decision point. The
+base-route builder keeps the prefix through that point:
+
+```text
+[JEN, BOOVE]
+```
+
+Then `_select_final_fix()` finds a runway-aligned final fix near the configured
+target distance from the threshold. If that selected fix is `FINAL35C`, the
+base route becomes:
+
+```text
+[JEN, BOOVE, FINAL35C, RW35C]
+```
+
+That base route is the lateral path passed into `TacticalCommand`:
+
+```python
+TacticalCommand(
+    lateral_path=["JEN", "BOOVE", "FINAL35C", "RW35C"],
+    upstream=TacticalCondition(
+        fix_identifier="JEN",
+        cas_kts=...,
+        altitude_ft=...,
+    ),
+    altitude_constraints=(),
+)
+```
+
+`build_tactical_plan_request()` then resolves the route tokens through the fix
+catalog:
+
+```text
+JEN      -> PathWaypoint(identifier="JEN", lat_deg=..., lon_deg=...)
+BOOVE    -> PathWaypoint(identifier="BOOVE", lat_deg=..., lon_deg=...)
+FINAL35C -> PathWaypoint(identifier="FINAL35C", lat_deg=..., lon_deg=...)
+RW35C    -> PathWaypoint(identifier="RW35C", lat_deg=..., lon_deg=...)
+```
+
+Those waypoint coordinates become a continuous `ReferencePath`:
+
+```text
+PathWaypoint sequence
+  -> build_reference_path()
+  -> ReferencePath.from_geographic()
+  -> local east/north samples, track angles, curvature, and s_m stationing
+```
+
+The final waypoint, here `RW35C`, becomes the local map origin. The upstream
+fix, here `JEN`, is near `s_m = total_length_m`. The runway threshold is
+`s_m = 0`.
+
+This means both channels are already tied to route geometry before simulation:
+
+- the longitudinal FMS moves along `ReferencePath.s_m`;
+- the lateral FMS projects actual east/north position back onto the same
+  `ReferencePath`;
+- output lat/lon is converted from lateral east/north using the same path
+  origin.
+
 ## ADS-B Seed State
 
 The simulation is anchored to observed ADS-B through `_seed_for_flight_at_fix()`.
@@ -369,6 +482,11 @@ TacticalCommand(
 - upstream altitude and CAS are set from the seed;
 - the tactical constraint envelope is built.
 
+At this point the `ReferencePath` already exists inside `bundle.request`. The
+rest of the FMS request assembly does not create route geometry; it attaches
+FMS-specific start altitude, speed, target altitude, and time-step settings to
+that existing path.
+
 The precompute pipeline then creates:
 
 ```text
@@ -393,6 +511,13 @@ psi_rad    = ADS-B heading converted to math angle, or path track angle
 phi_rad    = 0.0
 ```
 
+These first lateral values do not come from the longitudinal planner:
+
+- `east_m` and `north_m` come from `reference_path.position_ne(start_s_m)`;
+- `psi_rad` comes from ADS-B heading when available, otherwise from
+  `reference_path.track_angle_rad(start_s_m)`;
+- `phi_rad` starts at `0.0`.
+
 ADS-B heading is aviation heading: degrees clockwise from north. The lateral
 dynamics use math angle in the east/north coordinate plane. The conversion is:
 
@@ -405,8 +530,10 @@ psi_rad = wrap(radians(90 - heading_deg))
 `ReferencePath` is the shared geometry object used by both the longitudinal and
 lateral channels.
 
-It is built from geographic waypoints, with the final waypoint as the local
-origin. For arrivals, the final waypoint is the runway threshold.
+It is built from the resolved base-route waypoint sequence, with the final
+waypoint as the local origin. For arrivals, the final waypoint is the runway
+threshold. It is not just a container for named fixes; it is a sampled geometric
+path derived from those fixes.
 
 The most important convention:
 
@@ -424,6 +551,17 @@ So:
 interior waypoints. That means the map path can curve before fixes instead of
 being a sharp polyline. Its stationing is scaled so `total_length_m` remains the
 original route chord length used by the longitudinal FMS.
+
+Note that like real FMS, the aircraft RNAV might produce early-turn behavior. It lives here. During construction, sharp interior corners
+can become:
+
+```text
+line to turn-start -> circular fly-by arc -> line from turn-end
+```
+
+The resulting samples carry track angle and `curvature_inv_m`. Later,
+`compute_lateral_command()` previews that curvature through
+`ReferencePath.curvature_many()` and uses it as lateral feed-forward.
 
 The reference path provides:
 
@@ -516,20 +654,38 @@ infeasible `FMSResult` with a truncated descent-to-threshold profile. The
 bichannel layer still replays lateral motion over whatever longitudinal result
 it receives.
 
+The longitudinal planner also applies the FMS speed target rule for the
+altitude speed cap, so target CAS is limited to the configured cap below the
+configured altitude, typically 250 kt below 10,000 ft.
+
 ## Lateral Channel
 
 After the longitudinal result is available, `_lateral_response()` computes the
 lateral replay.
 
+The first lateral state is already available before this loop starts. It is
+either:
+
+- the explicit `FMSBiChannelState` supplied by the caller, which is what the
+  artifact precompute path uses; or
+- a default state from `FMSBiChannelState.on_reference_path()`, which places the
+  aircraft on `base.reference_path` at the first longitudinal `s_m`.
+
+So the lateral loop is not asking the longitudinal solver for map state. It is
+combining a pre-existing lateral state with the longitudinal schedule.
+
 For each longitudinal sample index:
 
 1. copy scheduled `t_s`, `s_m`, `h_m`, and `v_tas_mps` into the lateral state;
-2. keep the previously integrated `east_m`, `north_m`, `psi_rad`, and
-   `phi_rad`;
+2. keep the current lateral `east_m`, `north_m`, `psi_rad`, and `phi_rad`;
 3. find the active mode for the scheduled `s_m`;
 4. call `compute_lateral_command()`;
 5. append all lateral diagnostics;
 6. integrate to the next longitudinal sample with `_advance_lateral_state()`.
+
+At index 0, those lateral values are the initialized values described above.
+At later indexes, they are the values produced by the previous
+`_advance_lateral_state()` call.
 
 The output length always matches the longitudinal result length.
 
@@ -855,6 +1011,9 @@ fix catalog
   -> runway waypoint
   -> ATC point detection
   -> runway-aligned final fix selection
+
+base route tokens
+  -> PathWaypoint sequence from fix catalog
   -> ReferencePath construction
 
 BaseRoute
@@ -879,4 +1038,3 @@ FMSBiChannelResult + SeedState
 all task results
   -> manifest summary
 ```
-
