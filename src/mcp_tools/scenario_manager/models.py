@@ -164,6 +164,7 @@ class ArrivalScheduleItem(BaseModel):
     base_route: dict[str, Any] | None = None
     atc_wait_point: dict[str, Any] | None = None
     wait_atc_point: dict[str, Any] | None = None
+    cas_profile: dict[str, Any] | None = None
 
 
 class HealthResponse(BaseModel):

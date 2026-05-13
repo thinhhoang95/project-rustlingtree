@@ -582,6 +582,24 @@ def _build_request_bundle(
     return bundle, fms_request, initial_state
 
 
+def _cas_profile_payload(times: np.ndarray, v_cas_mps: Any) -> dict[str, Any]:
+    cas_mps = np.asarray(v_cas_mps, dtype=float)
+    if len(cas_mps) != len(times):
+        raise ValueError("CAS profile length must match result time grid")
+    if not np.isfinite(cas_mps).all():
+        raise ValueError("CAS profile contains non-finite values")
+
+    return {
+        "columns": ["time", "cas_kts"],
+        "units": {"cas_kts": "kt"},
+        "source": "simap_fms_bichannel",
+        "points": [
+            [int(time_s), float(mps_to_kts(cas_value))]
+            for time_s, cas_value in zip(times, cas_mps, strict=True)
+        ],
+    }
+
+
 def _payload_from_result(
     *,
     row: pd.Series,
@@ -653,6 +671,7 @@ def _payload_from_result(
             "altitude": ALTITUDE_BREAKPOINT_MASK,
         },
         "points": points,
+        "cas_profile": _cas_profile_payload(times, result.v_cas_mps),
         "lateral_breakpoint_times": [int(times[index]) for index in breakpoints.lateral_indices],
         "altitude_breakpoint_times": [int(times[index]) for index in breakpoints.altitude_indices],
         "wait_atc_point": wait_atc_point,
@@ -1079,6 +1098,8 @@ def _manifest(
         "layout": {
             "flights": flights_path.name,
             "point_columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
+            "cas_profile_columns": ["time", "cas_kts"],
+            "cas_profile_units": {"cas_kts": "kt"},
         },
         "flights": [
             {

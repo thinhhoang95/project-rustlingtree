@@ -39,6 +39,12 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
         "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         "breakpoint_mask_bits": {"lateral": 1, "altitude": 2},
         "points": [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]],
+        "cas_profile": {
+            "columns": ["time", "cas_kts"],
+            "units": {"cas_kts": "kt"},
+            "source": "simap_fms_bichannel",
+            "points": [[310, 190.0], [312, 188.5], [314, 187.0]],
+        },
         "lateral_breakpoint_times": [310, 500],
         "altitude_breakpoint_times": [310, 500],
         "first_time": 310,
@@ -195,6 +201,12 @@ def test_arrival_schedule_uses_artifact_start_time_and_preserves_compressed_poin
     assert arrival["base_route"]["lateral_path"] == ["FIXA", "FIXB", "FINAL35C", "RW35C"]
     assert arrival["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert arrival["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrival["cas_profile"] == {
+        "columns": ["time", "cas_kts"],
+        "units": {"cas_kts": "kt"},
+        "source": "simap_fms_bichannel",
+        "points": [[310, 190.0], [312, 188.5], [314, 187.0]],
+    }
     expected_wait_point = {
         "source": "fix",
         "identifier": "FIXB",
@@ -252,6 +264,8 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert arrivals.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
+    assert arrivals.json()[0]["cas_profile"]["columns"] == ["time", "cas_kts"]
+    assert arrivals.json()[0]["cas_profile"]["points"] == [[310, 190.0], [312, 188.5], [314, 187.0]]
     assert arrivals.json()[0]["fix_sequence"] == "FIXA>FIXB>FINAL35C>RW35C"
     assert arrivals.json()[0]["final_fix"]["identifier"] == "FINAL35C"
     assert arrivals.json()[0]["baseline_final_fix"]["identifier"] == "FINAL35C"

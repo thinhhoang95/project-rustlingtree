@@ -158,6 +158,7 @@ Each item keeps the original compressed trajectory payload shape and adds:
 - `wait_atc_point`: compatibility alias for `atc_wait_point`
 - `final_fix`
 - `baseline_final_fix`: compatibility alias for `final_fix`
+- `cas_profile`: full-resolution SIMAP calibrated airspeed profile in knots
 
 The trajectory payload remains compatible with the ADS-B compressed trajectory format:
 
@@ -173,6 +174,15 @@ The trajectory payload remains compatible with the ADS-B compressed trajectory f
 - tolerance metadata
 
 The `fix_sequence` is not the original catalog sequence. It is the unique base-route sequence SIMAP used: original fixes up to and including the ATC wait point, then the runway-aligned final fix, then the runway threshold.
+
+The `cas_profile` is separate from trajectory `points` so existing geometry consumers do not need to reinterpret the compressed point schema. It is sampled at the full SIMAP FMS result timestep, not only at lateral or altitude breakpoints. Older artifacts generated before CAS support may omit this field until `simap_arrival_flights.jsonl` is regenerated.
+
+`cas_profile` fields:
+
+- `columns`: `["time", "cas_kts"]`
+- `units`: currently `{"cas_kts": "kt"}`
+- `source`: currently `"simap_fms_bichannel"`
+- `points`: `[time, cas_kts]` samples, where `time` is the epoch timestamp matching the simulated arrival timeline
 
 `base_route` fields:
 
@@ -277,6 +287,18 @@ Example response shape:
     "breakpoint_mask_bits": {
       "lateral": 1,
       "altitude": 2
+    },
+    "cas_profile": {
+      "columns": ["time", "cas_kts"],
+      "units": {
+        "cas_kts": "kt"
+      },
+      "source": "simap_fms_bichannel",
+      "points": [
+        [1775020679, 238.5],
+        [1775020681, 238.1],
+        [1775020683, 237.8]
+      ]
     },
     "lateral_breakpoint_times": [1775020679, 1775021708],
     "altitude_breakpoint_times": [1775020679, 1775021708],

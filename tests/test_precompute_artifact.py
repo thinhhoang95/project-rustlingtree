@@ -74,6 +74,7 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
         lat_deg=np.asarray([32.0, 32.01, 32.02]),
         lon_deg=np.asarray([-97.0, -97.01, -97.02]),
         h_m=np.asarray([1_000.0, 800.0, 600.0]),
+        v_cas_mps=np.asarray([100.0, 105.0, 110.0]),
         success=True,
         message="ok",
         max_abs_cross_track_m=0.0,
@@ -120,6 +121,10 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["columns"] == ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"]
     assert payloads[0]["breakpoint_mask_bits"] == {"lateral": 1, "altitude": 2}
     assert payloads[0]["points"][0][0] == 100
+    assert payloads[0]["cas_profile"]["columns"] == ["time", "cas_kts"]
+    assert payloads[0]["cas_profile"]["units"] == {"cas_kts": "kt"}
+    assert payloads[0]["cas_profile"]["source"] == "simap_fms_bichannel"
+    assert [point[0] for point in payloads[0]["cas_profile"]["points"]] == [100, 110, 120]
     assert payloads[0]["route_type"] == "base-route"
     assert payloads[0]["runway"] == "RW35C"
     assert payloads[0]["fix_sequence"] == "FIXA>FIXB>DAYZZ>RW35C"
@@ -133,6 +138,8 @@ def test_precompute_writes_arrival_artifacts_and_manifest(tmp_path: Path, monkey
     assert payloads[0]["base_route"]["final_fix"]["identifier"] == "DAYZZ"
     assert payloads[0]["simulation"]["lateral_guidance"]["lookahead_m"] == 1500.0
     assert stored_manifest["lateral_guidance"]["integration_step_s"] == 0.5
+    assert stored_manifest["layout"]["cas_profile_columns"] == ["time", "cas_kts"]
+    assert stored_manifest["layout"]["cas_profile_units"] == {"cas_kts": "kt"}
 
 
 def test_payload_uses_bichannel_map_coordinates_when_reference_path_is_available() -> None:
@@ -161,6 +168,7 @@ def test_payload_uses_bichannel_map_coordinates_when_reference_path_is_available
         lat_deg=np.asarray([33.0, 33.1]),
         lon_deg=np.asarray([-98.0, -98.1]),
         h_m=np.asarray([1000.0, 900.0]),
+        v_cas_mps=np.asarray([100.0, 90.0]),
         success=True,
         message="ok",
         max_abs_cross_track_m=42.0,
@@ -189,6 +197,62 @@ def test_payload_uses_bichannel_map_coordinates_when_reference_path_is_available
 
     assert payload["points"][0][1:3] == [33.0, -98.0]
     assert payload["points"][-1][1:3] == [33.1, -98.1]
+
+
+def test_payload_adds_full_resolution_cas_profile_in_knots() -> None:
+    base_route = precompute_artifact.BaseRoute(
+        lateral_path=["FIXA", "RW35C"],
+        upstream_identifier="FIXA",
+        runway_identifier="RW35C",
+        final_fix=precompute_artifact.FinalFixSelection(
+            waypoint=PathWaypoint("FIXA", 32.0, -97.0),
+            distance_nm=7.0,
+            along_track_nm=7.0,
+            cross_track_nm=0.0,
+            runway_true_heading_deg=350.0,
+        ),
+        atc_point={"identifier": "FIXA"},
+        target_final_fix_distance_nm=7.0,
+        final_fix_cross_track_tolerance_nm=0.15,
+    )
+    result = SimpleNamespace(
+        t_s=np.asarray([0.0, 2.0, 4.0]),
+        lat_deg=np.asarray([32.0, 32.01, 32.02]),
+        lon_deg=np.asarray([-97.0, -97.01, -97.02]),
+        h_m=np.asarray([1000.0, 950.0, 900.0]),
+        v_cas_mps=np.asarray([100.0, 105.0, 110.0]),
+        success=True,
+        message="ok",
+        max_abs_cross_track_m=0.0,
+        max_abs_track_error_rad=0.0,
+        final_threshold_error_m=0.0,
+    )
+
+    _artifact, payload = precompute_artifact._payload_from_result(
+        row=pd.Series({"flight_id": "ARR1", "callsign": "CALLARR1", "icao24": "abc001", "runway": "35C"}),
+        seed=precompute_artifact.SeedState(
+            time_s=100,
+            lat_deg=32.0,
+            lon_deg=-97.0,
+            geoaltitude_m=1000.0,
+            heading_deg=180.0,
+            ground_speed_mps=100.0,
+        ),
+        wait_atc_point=None,
+        base_route=base_route,
+        result=result,
+        guidance=precompute_artifact._default_lateral_guidance(),
+        lateral_tolerance_m=1.0,
+        altitude_tolerance_m=1.0,
+    )
+
+    assert payload["cas_profile"]["columns"] == ["time", "cas_kts"]
+    assert payload["cas_profile"]["units"] == {"cas_kts": "kt"}
+    assert payload["cas_profile"]["points"] == [
+        [100, precompute_artifact.mps_to_kts(100.0)],
+        [102, precompute_artifact.mps_to_kts(105.0)],
+        [104, precompute_artifact.mps_to_kts(110.0)],
+    ]
 
 
 def test_seed_for_flight_uses_adsb_point_closest_to_first_fix() -> None:
