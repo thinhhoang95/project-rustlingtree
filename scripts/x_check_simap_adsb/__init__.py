@@ -15,17 +15,15 @@ sys.modules[_SCRIPT_SPEC.name] = _SCRIPT_MODULE
 _SCRIPT_SPEC.loader.exec_module(_SCRIPT_MODULE)
 
 derive_speed_mps = _SCRIPT_MODULE.derive_speed_mps
-load_simap_payload = _SCRIPT_MODULE.load_simap_payload
 parse_flight_key = _SCRIPT_MODULE.parse_flight_key
 sample_trajectory = _SCRIPT_MODULE.sample_trajectory
-trajectory_from_simap_payload = _SCRIPT_MODULE.trajectory_from_simap_payload
+trajectory_from_bichannel_result = _SCRIPT_MODULE.trajectory_from_bichannel_result
 
 __all__ = [
     "build_bichannel_result",
     "derive_speed_mps",
-    "load_simap_payload",
     "parse_flight_key",
     "plot_cross_check",
     "sample_trajectory",
-    "trajectory_from_simap_payload",
+    "trajectory_from_bichannel_result",
 ]

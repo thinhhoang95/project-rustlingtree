@@ -147,8 +147,9 @@ class ArrivalScheduleItem(BaseModel):
     time_at_last_event: int
     time_at_last_event_utc: str | None = None
     runway: str
-    original_fix_sequence: str
-    original_fix_count: int
+    route_type: str | None = None
+    fix_sequence: str | None = None
+    fix_count: int | None = None
     breakpoint_mask_bits: dict[str, int] | None = None
     lateral_breakpoint_times: list[int] = Field(default_factory=list)
     altitude_breakpoint_times: list[int] = Field(default_factory=list)
@@ -158,7 +159,12 @@ class ArrivalScheduleItem(BaseModel):
     compressed_point_count: int | None = None
     lateral_tolerance_m: float | None = None
     altitude_tolerance_m: float | None = None
+    final_fix: dict[str, Any] | None = None
+    baseline_final_fix: dict[str, Any] | None = None
+    base_route: dict[str, Any] | None = None
+    atc_wait_point: dict[str, Any] | None = None
     wait_atc_point: dict[str, Any] | None = None
+    cas_profile: dict[str, Any] | None = None
 
 
 class HealthResponse(BaseModel):

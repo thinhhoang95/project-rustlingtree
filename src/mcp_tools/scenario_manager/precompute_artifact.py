@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from multiprocessing import Pool, cpu_count
@@ -32,10 +35,10 @@ from simap.fms_bichannel import FMSBiChannelRequest, FMSBiChannelState, plan_fms
 from simap.lateral_dynamics import LateralGuidanceConfig, wrap_angle_rad
 from simap.nlp_colloc.tactical import TacticalCommand, TacticalCondition
 from simap.nlp_colloc.tactical.builder import build_tactical_plan_request
+from simap.nlp_colloc.tactical.models import PathWaypoint
 from simap.nlp_colloc.tactical.navdata import load_fix_catalog
-from simap.nlp_colloc.tactical.path import resolve_lateral_path
 from simap.openap_adapter import openap_dT
-from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
+from simap.path_geometry import EARTH_RADIUS_M
 from simap.units import m_to_ft, mps_to_kts
 
 from mcp_tools.scenario_manager.wait_atc_point import detect_wait_atc_point
@@ -49,6 +52,29 @@ OUTPUT_FLIGHTS_FILENAME = "simap_arrival_flights.jsonl"
 DEFAULT_LATERAL_TOLERANCE_M = 100.0
 DEFAULT_ALTITUDE_TOLERANCE_M = 50.0
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
+DEFAULT_FINAL_FIX_DISTANCE_NM = 7.0
+DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM = 0.15
+DEFAULT_FMS_DT_S = 2.0
+DEFAULT_TOD_TOLERANCE_M = 25.0
+DEFAULT_MAX_TOD_ITERATIONS = 24
+METERS_PER_NM = 1_852.0
+_RUNWAY_RE = re.compile(r"^RW?(?P<number>\d{1,2})(?P<suffix>[LCR]?)$")
+
+
+def _default_lateral_guidance() -> LateralGuidanceConfig:
+    return LateralGuidanceConfig()
+
+
+def _lateral_guidance_payload(guidance: LateralGuidanceConfig) -> dict[str, float]:
+    return {
+        "lookahead_m": float(guidance.lookahead_m),
+        "cross_track_gain": float(guidance.cross_track_gain),
+        "track_error_gain": float(guidance.track_error_gain),
+        "curvature_feedforward_gain": float(guidance.curvature_feedforward_gain),
+        "min_lookahead_m": float(guidance.min_lookahead_m),
+        "max_los_angle_rad": float(guidance.max_los_angle_rad),
+        "integration_step_s": float(guidance.integration_step_s),
+    }
 
 
 @dataclass(frozen=True)
@@ -76,6 +102,8 @@ class ArtifactResult:
     reason: str | None = None
     wait_atc_point_found: bool = False
     wait_atc_cluster: str | None = None
+    simulation_success: bool | None = None
+    simulation_message: str | None = None
 
     @property
     def compression_ratio(self) -> float:
@@ -91,6 +119,58 @@ class ArtifactTask:
     fixes_csv: Path
     lateral_tolerance_m: float
     altitude_tolerance_m: float
+    final_fix_distance_nm: float
+    final_fix_cross_track_tolerance_nm: float
+    fms_dt_s: float
+    tod_tolerance_m: float
+    max_tod_iterations: int
+
+
+@dataclass(frozen=True)
+class FinalFixSelection:
+    waypoint: PathWaypoint
+    distance_nm: float
+    along_track_nm: float
+    cross_track_nm: float
+    runway_true_heading_deg: float
+
+
+@dataclass(frozen=True)
+class BaseRoute:
+    lateral_path: list[str | tuple[float, float]]
+    upstream_identifier: str
+    runway_identifier: str
+    final_fix: FinalFixSelection
+    atc_point: dict[str, Any]
+    target_final_fix_distance_nm: float
+    final_fix_cross_track_tolerance_nm: float
+
+    @property
+    def fix_sequence(self) -> str:
+        return ">".join(_route_token_text(token) for token in self.lateral_path)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "type": "base-route",
+            "selection_method": "atc_direct_to_runway_aligned_final_fix",
+            "fix_sequence": self.fix_sequence,
+            "fix_count": len(self.lateral_path),
+            "lateral_path": [_route_token_payload(token) for token in self.lateral_path],
+            "upstream_identifier": self.upstream_identifier,
+            "runway": self.runway_identifier,
+            "atc_point": self.atc_point,
+            "final_fix": {
+                "identifier": self.final_fix.waypoint.identifier,
+                "lat": float(self.final_fix.waypoint.lat_deg),
+                "lon": float(self.final_fix.waypoint.lon_deg),
+                "distance_nm": float(self.final_fix.distance_nm),
+                "along_track_nm": float(self.final_fix.along_track_nm),
+                "cross_track_nm": float(self.final_fix.cross_track_nm),
+                "target_distance_nm": float(self.target_final_fix_distance_nm),
+                "cross_track_tolerance_nm": float(self.final_fix_cross_track_tolerance_nm),
+            },
+            "runway_true_heading_deg": float(self.final_fix.runway_true_heading_deg),
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,6 +182,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--lateral-tolerance-m", type=float, default=DEFAULT_LATERAL_TOLERANCE_M)
     parser.add_argument("--altitude-tolerance-m", type=float, default=DEFAULT_ALTITUDE_TOLERANCE_M)
+    parser.add_argument("--final-fix-distance-nm", type=float, default=DEFAULT_FINAL_FIX_DISTANCE_NM)
+    parser.add_argument(
+        "--final-fix-cross-track-tolerance-nm",
+        type=float,
+        default=DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM,
+    )
+    parser.add_argument("--fms-dt-s", type=float, default=DEFAULT_FMS_DT_S)
+    parser.add_argument("--tod-tolerance-m", type=float, default=DEFAULT_TOD_TOLERANCE_M)
+    parser.add_argument("--max-tod-iterations", type=int, default=DEFAULT_MAX_TOD_ITERATIONS)
     parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
     parser.add_argument("--processes", type=int, default=cpu_count())
     parser.add_argument("--limit", type=int, default=None)
@@ -128,10 +217,225 @@ def _arrival_rows(events_path: Path, fix_sequences_path: Path) -> pd.DataFrame:
 def _route_tokens(fix_sequence: object, runway: object) -> list[str]:
     tokens = [token.strip().upper() for token in str(fix_sequence).split(">") if token.strip()]
     tokens = [token for token in tokens if token != "NAN"]
-    runway_token = f"RW{str(runway).strip().upper()}"
+    runway_token = _normalize_runway_identifier(runway)
     if runway_token not in tokens:
         tokens.append(runway_token)
     return tokens
+
+
+def _normalize_runway_identifier(runway: object) -> str:
+    runway_text = str(runway).strip().upper()
+    if not runway_text or runway_text == "NAN":
+        raise ValueError("missing runway")
+    if not runway_text.startswith("RW"):
+        runway_text = f"RW{runway_text}"
+    match = _RUNWAY_RE.match(runway_text)
+    if match is None:
+        raise ValueError(f"invalid runway identifier: {runway!r}")
+    number = int(match.group("number"))
+    if number < 1 or number > 36:
+        raise ValueError(f"invalid runway number: {runway!r}")
+    return f"RW{number:02d}{match.group('suffix')}"
+
+
+def _route_token_text(token: str | tuple[float, float]) -> str:
+    if isinstance(token, tuple):
+        return f"{float(token[0]):.8f},{float(token[1]):.8f}"
+    return str(token).upper()
+
+
+def _route_token_payload(token: str | tuple[float, float]) -> str | list[float]:
+    if isinstance(token, tuple):
+        return [float(token[0]), float(token[1])]
+    return str(token).upper()
+
+
+def _reciprocal_runway_identifier(runway_identifier: str) -> str:
+    match = _RUNWAY_RE.match(runway_identifier)
+    if match is None:
+        raise ValueError(f"invalid runway identifier: {runway_identifier!r}")
+    number = int(match.group("number"))
+    suffix = match.group("suffix")
+    reciprocal_number = ((number + 18 - 1) % 36) + 1
+    reciprocal_suffix = {"L": "R", "R": "L"}.get(suffix, suffix)
+    return f"RW{reciprocal_number:02d}{reciprocal_suffix}"
+
+
+def _bearing_deg(
+    *,
+    origin: PathWaypoint,
+    destination: PathWaypoint,
+) -> float:
+    east_m, north_m = _local_ne_from_origin(
+        origin_lat_deg=origin.lat_deg,
+        origin_lon_deg=origin.lon_deg,
+        lat_deg=destination.lat_deg,
+        lon_deg=destination.lon_deg,
+    )
+    if abs(east_m) < 1e-9 and abs(north_m) < 1e-9:
+        raise ValueError("cannot compute bearing between coincident points")
+    return float((math.degrees(math.atan2(east_m, north_m)) + 360.0) % 360.0)
+
+
+def _runway_true_heading_deg(
+    runway_identifier: str,
+    fix_catalog: dict[str, PathWaypoint],
+) -> float:
+    runway = fix_catalog.get(runway_identifier)
+    if runway is None:
+        raise KeyError(f"unknown runway fix: {runway_identifier}")
+    reciprocal = fix_catalog.get(_reciprocal_runway_identifier(runway_identifier))
+    if reciprocal is not None:
+        return _bearing_deg(origin=runway, destination=reciprocal)
+
+    match = _RUNWAY_RE.match(runway_identifier)
+    if match is None:
+        raise ValueError(f"invalid runway identifier: {runway_identifier!r}")
+    number = int(match.group("number"))
+    return float(360.0 if number == 36 else number * 10.0)
+
+
+def _local_ne_from_origin(
+    *,
+    origin_lat_deg: float,
+    origin_lon_deg: float,
+    lat_deg: float,
+    lon_deg: float,
+) -> tuple[float, float]:
+    lat0_rad = math.radians(float(origin_lat_deg))
+    east_m = EARTH_RADIUS_M * math.cos(lat0_rad) * math.radians(float(lon_deg) - float(origin_lon_deg))
+    north_m = EARTH_RADIUS_M * math.radians(float(lat_deg) - float(origin_lat_deg))
+    return float(east_m), float(north_m)
+
+
+def _select_final_fix(
+    *,
+    runway_identifier: str,
+    fix_catalog: dict[str, PathWaypoint],
+    target_distance_nm: float,
+    cross_track_tolerance_nm: float,
+) -> FinalFixSelection:
+    if target_distance_nm <= 0.0:
+        raise ValueError("final-fix target distance must be positive")
+    if cross_track_tolerance_nm <= 0.0:
+        raise ValueError("final-fix cross-track tolerance must be positive")
+
+    runway = fix_catalog.get(runway_identifier)
+    if runway is None:
+        raise KeyError(f"unknown runway fix: {runway_identifier}")
+    runway_heading_deg = _runway_true_heading_deg(runway_identifier, fix_catalog)
+    outbound_heading_rad = math.radians((runway_heading_deg + 180.0) % 360.0)
+    outbound_east = math.sin(outbound_heading_rad)
+    outbound_north = math.cos(outbound_heading_rad)
+
+    candidates: list[tuple[float, float, float, FinalFixSelection]] = []
+    for waypoint in fix_catalog.values():
+        identifier = waypoint.identifier.upper()
+        if identifier.startswith("RW"):
+            continue
+        east_m, north_m = _local_ne_from_origin(
+            origin_lat_deg=runway.lat_deg,
+            origin_lon_deg=runway.lon_deg,
+            lat_deg=waypoint.lat_deg,
+            lon_deg=waypoint.lon_deg,
+        )
+        along_track_m = east_m * outbound_east + north_m * outbound_north
+        if along_track_m <= 0.0:
+            continue
+        cross_track_m = east_m * outbound_north - north_m * outbound_east
+        distance_m = math.hypot(east_m, north_m)
+        distance_nm = distance_m / METERS_PER_NM
+        along_track_nm = along_track_m / METERS_PER_NM
+        cross_track_nm = cross_track_m / METERS_PER_NM
+        if abs(cross_track_nm) > cross_track_tolerance_nm:
+            continue
+
+        selection = FinalFixSelection(
+            waypoint=waypoint,
+            distance_nm=float(distance_nm),
+            along_track_nm=float(along_track_nm),
+            cross_track_nm=float(cross_track_nm),
+            runway_true_heading_deg=runway_heading_deg,
+        )
+        candidates.append(
+            (
+                abs(along_track_nm - target_distance_nm),
+                abs(cross_track_nm),
+                distance_nm,
+                selection,
+            )
+        )
+
+    if not candidates:
+        raise ValueError(
+            f"no final fix for {runway_identifier} within "
+            f"{cross_track_tolerance_nm:.2f} NM of the extended runway centerline"
+        )
+    return min(candidates, key=lambda item: item[:3])[3]
+
+
+def _route_token_latlon(
+    token: str | tuple[float, float],
+    fix_catalog: dict[str, PathWaypoint],
+) -> tuple[float, float]:
+    if isinstance(token, tuple):
+        return float(token[0]), float(token[1])
+    waypoint = fix_catalog[str(token).upper()]
+    return float(waypoint.lat_deg), float(waypoint.lon_deg)
+
+
+def _dedupe_consecutive_route_tokens(
+    route: list[str | tuple[float, float]],
+) -> list[str | tuple[float, float]]:
+    deduped: list[str | tuple[float, float]] = []
+    for token in route:
+        if deduped and deduped[-1] == token:
+            continue
+        deduped.append(token)
+    return deduped
+
+
+def _upstream_identifier_for_route(route: list[str | tuple[float, float]]) -> str:
+    first = route[0]
+    if isinstance(first, tuple):
+        return "COORD01"
+    return str(first).upper()
+
+
+def _build_base_route(
+    *,
+    row: pd.Series,
+    wait_atc_point: dict[str, Any],
+    fix_catalog: dict[str, PathWaypoint],
+    final_fix_distance_nm: float,
+    final_fix_cross_track_tolerance_nm: float,
+) -> BaseRoute:
+    runway_identifier = _normalize_runway_identifier(row["runway"])
+    original_route = _route_tokens(row["fix_sequence"], runway_identifier)
+    route_index = int(wait_atc_point["route_index"])
+    route_prefix = original_route[: route_index + 1]
+    if not route_prefix:
+        raise ValueError("base route requires at least one fix before the ATC decision point")
+    final_fix = _select_final_fix(
+        runway_identifier=runway_identifier,
+        fix_catalog=fix_catalog,
+        target_distance_nm=final_fix_distance_nm,
+        cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+    )
+    lateral_path = _dedupe_consecutive_route_tokens(
+        [*route_prefix, final_fix.waypoint.identifier, runway_identifier]
+    )
+    if len(lateral_path) < 2:
+        raise ValueError("base route must contain at least two unique waypoints")
+    return BaseRoute(
+        lateral_path=lateral_path,
+        upstream_identifier=_upstream_identifier_for_route(lateral_path),
+        runway_identifier=runway_identifier,
+        final_fix=final_fix,
+        atc_point=wait_atc_point,
+        target_final_fix_distance_nm=final_fix_distance_nm,
+        final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+    )
 
 
 def _flight_raw_tracks(raw_adsb_dir: Path, *, processes: int, split_gap_seconds: int) -> dict[str, pd.DataFrame]:
@@ -194,16 +498,6 @@ def _seed_for_flight_at_fix(
     )
 
 
-def _first_route_fix_latlon_from_catalog(route: list[str], fix_catalog) -> tuple[float, float]:
-    resolved_path = resolve_lateral_path(route, fix_catalog)
-    first_waypoint = resolved_path.waypoints[0]
-    return float(first_waypoint.lat_deg), float(first_waypoint.lon_deg)
-
-
-def _first_route_fix_latlon(route: list[str], fixes_csv: Path) -> tuple[float, float]:
-    return _first_route_fix_latlon_from_catalog(route, load_fix_catalog(fixes_csv))
-
-
 def _latlon_distance_m(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
     lat0_rad = np.deg2rad(0.5 * (lat_a_deg + lat_b_deg))
     dx = EARTH_RADIUS_M * np.cos(lat0_rad) * np.deg2rad(lon_b_deg - lon_a_deg)
@@ -211,21 +505,40 @@ def _latlon_distance_m(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon
     return float(np.hypot(dx, dy))
 
 
-def _ne_from_latlon(reference_path: ReferencePath, *, lat_deg: float, lon_deg: float) -> tuple[float, float]:
-    lat0_rad = np.deg2rad(reference_path.origin_lat_deg)
-    east_m = EARTH_RADIUS_M * np.cos(lat0_rad) * np.deg2rad(lon_deg - reference_path.origin_lon_deg)
-    north_m = EARTH_RADIUS_M * np.deg2rad(lat_deg - reference_path.origin_lat_deg)
-    return float(east_m), float(north_m)
-
-
 def _heading_deg_to_psi_rad(heading_deg: float) -> float:
     return wrap_angle_rad(np.deg2rad(90.0 - heading_deg))
 
 
-def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FMSRequest, FMSBiChannelState]:
-    route = _route_tokens(row["fix_sequence"], row["runway"])
+def _build_request(
+    *,
+    route: list[str | tuple[float, float]],
+    upstream_identifier: str,
+    seed: SeedState,
+    fixes_csv: Path,
+    fms_dt_s: float,
+) -> tuple[FMSRequest, FMSBiChannelState]:
+    _, fms_request, initial_state = _build_request_bundle(
+        route=route,
+        upstream_identifier=upstream_identifier,
+        seed=seed,
+        fixes_csv=fixes_csv,
+        fms_dt_s=fms_dt_s,
+    )
+    return fms_request, initial_state
+
+
+def _build_request_bundle(
+    *,
+    route: list[str | tuple[float, float]],
+    upstream_identifier: str,
+    seed: SeedState,
+    fixes_csv: Path,
+    fms_dt_s: float,
+) -> tuple[Any, FMSRequest, FMSBiChannelState]:
     if len(route) < 2:
-        raise ValueError("route must contain at least one fix and a runway")
+        raise ValueError("route must contain at least one upstream waypoint and a runway")
+    if fms_dt_s <= 0.0:
+        raise ValueError("fms_dt_s must be positive")
     h_m = max(float(seed.geoaltitude_m), 1.0)
     cas_mps = float(
         aero.tas2cas(
@@ -237,7 +550,7 @@ def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FM
     command = TacticalCommand(
         lateral_path=route,
         upstream=TacticalCondition(
-            fix_identifier=route[0],
+            fix_identifier=upstream_identifier,
             cas_kts=max(80.0, mps_to_kts(cas_mps)),
             altitude_ft=m_to_ft(h_m),
         ),
@@ -245,7 +558,7 @@ def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FM
     )
     bundle = build_tactical_plan_request(command, fixes_csv=fixes_csv)
     start_s_m = bundle.request.reference_path.total_length_m
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m, dt_s=fms_dt_s)
     east_m, north_m = bundle.request.reference_path.position_ne(fms_request.start_s_m)
     psi_rad = (
         _heading_deg_to_psi_rad(seed.heading_deg)
@@ -266,21 +579,54 @@ def _build_request(row: pd.Series, seed: SeedState, fixes_csv: Path) -> tuple[FM
         psi_rad=psi_rad,
         phi_rad=0.0,
     )
-    return fms_request, initial_state
+    return bundle, fms_request, initial_state
+
+
+def _cas_profile_payload(times: np.ndarray, v_cas_mps: Any) -> dict[str, Any]:
+    cas_mps = np.asarray(v_cas_mps, dtype=float)
+    if len(cas_mps) != len(times):
+        raise ValueError("CAS profile length must match result time grid")
+    if not np.isfinite(cas_mps).all():
+        raise ValueError("CAS profile contains non-finite values")
+
+    return {
+        "columns": ["time", "cas_kts"],
+        "units": {"cas_kts": "kt"},
+        "source": "simap_fms_bichannel",
+        "points": [
+            [int(time_s), float(mps_to_kts(cas_value))]
+            for time_s, cas_value in zip(times, cas_mps, strict=True)
+        ],
+    }
 
 
 def _payload_from_result(
     *,
     row: pd.Series,
-    seed_time_s: int,
+    seed: SeedState,
     wait_atc_point: dict[str, Any] | None,
+    base_route: BaseRoute,
     result,
+    reference_path: Any | None = None,
+    guidance: LateralGuidanceConfig | None = None,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
 ) -> tuple[ArtifactResult, dict[str, Any]]:
-    times = np.rint(seed_time_s + result.t_s).astype(np.int64)
-    latitudes = np.asarray(result.lat_deg, dtype=float)
-    longitudes = np.asarray(result.lon_deg, dtype=float)
+    times = np.rint(seed.time_s + result.t_s).astype(np.int64)
+    if hasattr(result, "lat_deg") and hasattr(result, "lon_deg"):
+        latitudes = np.asarray(result.lat_deg, dtype=float)
+        longitudes = np.asarray(result.lon_deg, dtype=float)
+    elif reference_path is not None and hasattr(result, "s_m"):
+        path_s_m = np.asarray(result.s_m, dtype=float).copy()
+        if len(path_s_m):
+            path_s_m[-1] = 0.0
+        positions_ne = reference_path.position_ne_many(path_s_m)
+        latlon = reference_path.latlon_from_ne_many(positions_ne[:, 0], positions_ne[:, 1])
+        latitudes = np.asarray(latlon[:, 0], dtype=float)
+        longitudes = np.asarray(latlon[:, 1], dtype=float)
+    else:
+        latitudes = np.asarray(result.lat_deg, dtype=float)
+        longitudes = np.asarray(result.lon_deg, dtype=float)
     geoaltitudes = np.asarray(result.h_m, dtype=float)
     breakpoints = compress_breakpoints(
         times=times,
@@ -292,6 +638,7 @@ def _payload_from_result(
     )
     lateral_indices = set(int(index) for index in breakpoints.lateral_indices)
     altitude_indices = set(int(index) for index in breakpoints.altitude_indices)
+    base_route_payload = base_route.to_payload()
     points: list[list[int | float]] = []
     for index in breakpoints.minimal_indices:
         int_index = int(index)
@@ -314,15 +661,22 @@ def _payload_from_result(
         "flight_id": str(row["flight_id"]),
         "callsign": str(row["callsign"]),
         "icao24": str(row["icao24"]),
+        "runway": _normalize_runway_identifier(row["runway"]),
+        "route_type": "base-route",
+        "fix_sequence": base_route.fix_sequence,
+        "fix_count": len(base_route.lateral_path),
         "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
         "breakpoint_mask_bits": {
             "lateral": LATERAL_BREAKPOINT_MASK,
             "altitude": ALTITUDE_BREAKPOINT_MASK,
         },
         "points": points,
+        "cas_profile": _cas_profile_payload(times, result.v_cas_mps),
         "lateral_breakpoint_times": [int(times[index]) for index in breakpoints.lateral_indices],
         "altitude_breakpoint_times": [int(times[index]) for index in breakpoints.altitude_indices],
         "wait_atc_point": wait_atc_point,
+        "baseline_final_fix": base_route_payload["final_fix"],
+        "base_route": base_route_payload,
         "first_time": int(times[0]),
         "last_time": int(times[-1]),
         "raw_point_count": len(times),
@@ -335,6 +689,7 @@ def _payload_from_result(
             "max_abs_cross_track_m": float(result.max_abs_cross_track_m),
             "max_abs_track_error_rad": float(result.max_abs_track_error_rad),
             "final_threshold_error_m": float(result.final_threshold_error_m),
+            "lateral_guidance": _lateral_guidance_payload(guidance or _default_lateral_guidance()),
         },
     }
     artifact = ArtifactResult(
@@ -350,6 +705,8 @@ def _payload_from_result(
         status="generated",
         wait_atc_point_found=wait_atc_point is not None,
         wait_atc_cluster=str(wait_atc_point["arrival_cluster"]) if wait_atc_point is not None else None,
+        simulation_success=bool(result.success),
+        simulation_message=str(result.message),
     )
     return artifact, payload
 
@@ -370,6 +727,51 @@ def _skip_result(row: pd.Series, reason: str) -> ArtifactResult:
     )
 
 
+def _reason_counts(results: list[ArtifactResult]) -> dict[str, int]:
+    counts = Counter(result.reason or "unknown" for result in results if result.status == "skipped")
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _simulation_message_counts(results: list[ArtifactResult]) -> dict[str, int]:
+    counts = Counter(
+        result.simulation_message or "unknown"
+        for result in results
+        if result.status == "generated" and result.simulation_success is False
+    )
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _print_precompute_summary(
+    *,
+    console: Console,
+    manifest: dict[str, Any],
+    diagnostics: list[str],
+) -> None:
+    console.print(
+        "[bold]Artifact summary[/bold] "
+        f"generated={manifest['generated_count']} "
+        f"skipped_arrivals={manifest['skipped_arrival_count']} "
+        f"skipped_departures={manifest['skipped_departure_count']} "
+        f"sim_success={manifest['simulation_success_count']} "
+        f"sim_failed={manifest['simulation_failure_count']}"
+    )
+
+    skip_counts = manifest.get("skipped_arrival_reason_counts", {})
+    if skip_counts:
+        console.print("[bold yellow]Skipped arrivals by reason[/bold yellow]")
+        for reason, count in skip_counts.items():
+            console.print(f"  {count:>4}  {reason}")
+
+    simulation_failure_counts = manifest.get("simulation_failure_message_counts", {})
+    if simulation_failure_counts:
+        console.print("[bold yellow]Generated base routes with vertically infeasible SIMAP profile[/bold yellow]")
+        for message, count in simulation_failure_counts.items():
+            console.print(f"  {count:>4}  {message}")
+
+    if diagnostics:
+        console.print(f"[yellow]wait_atc_point diagnostics:[/yellow] {len(diagnostics)} messages")
+
+
 def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str, Any] | None, list[str]]:
     row = pd.Series(task.row)
     diagnostics: list[str] = []
@@ -377,6 +779,8 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
         if task.raw_flight is None:
             return _skip_result(row, "missing raw ADS-B flight"), None, diagnostics
         route = _route_tokens(row["fix_sequence"], row["runway"])
+        if len(route) < 2:
+            return _skip_result(row, "missing route fixes before runway"), None, diagnostics
         fix_catalog = load_fix_catalog(task.fixes_csv)
         wait_atc_point = detect_wait_atc_point(
             route,
@@ -385,27 +789,48 @@ def _process_arrival_task(task: ArtifactTask) -> tuple[ArtifactResult, dict[str,
             diagnostics=diagnostics,
             trace_label=f'{row["flight_id"]}/{row["callsign"]}',
         )
-        first_fix_lat_deg, first_fix_lon_deg = _first_route_fix_latlon_from_catalog(route, fix_catalog)
+        if wait_atc_point is None:
+            return _skip_result(row, "missing ATC decision point"), None, diagnostics
+        base_route = _build_base_route(
+            row=row,
+            wait_atc_point=wait_atc_point,
+            fix_catalog=fix_catalog,
+            final_fix_distance_nm=task.final_fix_distance_nm,
+            final_fix_cross_track_tolerance_nm=task.final_fix_cross_track_tolerance_nm,
+        )
+        first_fix_lat_deg, first_fix_lon_deg = _route_token_latlon(base_route.lateral_path[0], fix_catalog)
         seed = _seed_for_flight_at_fix(
             task.raw_flight,
             fix_lat_deg=first_fix_lat_deg,
             fix_lon_deg=first_fix_lon_deg,
         )
         if seed is None:
-            return _skip_result(row, "missing raw seed near first entry fix"), None, diagnostics
-        fms_request, initial_state = _build_request(row, seed, task.fixes_csv)
+            return _skip_result(row, "missing raw seed near first route fix"), None, diagnostics
+        fms_request, initial_state = _build_request(
+            route=base_route.lateral_path,
+            upstream_identifier=base_route.upstream_identifier,
+            seed=seed,
+            fixes_csv=task.fixes_csv,
+            fms_dt_s=task.fms_dt_s,
+        )
+        guidance = _default_lateral_guidance()
         result = plan_fms_bichannel(
             FMSBiChannelRequest(
                 base_request=fms_request,
-                guidance=LateralGuidanceConfig(),
+                guidance=guidance,
                 initial_state=initial_state,
-            )
+            ),
+            tod_tolerance_m=task.tod_tolerance_m,
+            max_tod_iterations=task.max_tod_iterations,
         )
         artifact, payload = _payload_from_result(
             row=row,
-            seed_time_s=seed.time_s,
+            seed=seed,
             wait_atc_point=wait_atc_point,
+            base_route=base_route,
             result=result,
+            reference_path=getattr(fms_request, "reference_path", None),
+            guidance=guidance,
             lateral_tolerance_m=task.lateral_tolerance_m,
             altitude_tolerance_m=task.altitude_tolerance_m,
         )
@@ -435,6 +860,11 @@ def precompute_artifacts(
     output_dir: Path,
     lateral_tolerance_m: float = DEFAULT_LATERAL_TOLERANCE_M,
     altitude_tolerance_m: float = DEFAULT_ALTITUDE_TOLERANCE_M,
+    final_fix_distance_nm: float = DEFAULT_FINAL_FIX_DISTANCE_NM,
+    final_fix_cross_track_tolerance_nm: float = DEFAULT_FINAL_FIX_CROSS_TRACK_TOLERANCE_NM,
+    fms_dt_s: float = DEFAULT_FMS_DT_S,
+    tod_tolerance_m: float = DEFAULT_TOD_TOLERANCE_M,
+    max_tod_iterations: int = DEFAULT_MAX_TOD_ITERATIONS,
     split_gap_seconds: int = DEFAULT_SPLIT_GAP_SECONDS,
     processes: int = 1,
     limit: int | None = None,
@@ -444,10 +874,30 @@ def precompute_artifacts(
     if limit is not None:
         arrivals = arrivals.head(limit).copy()
     if console is not None:
+        console.print(
+            "[bold]Precomputing base-route arrivals[/bold] "
+            f"arrivals={len(arrivals)} "
+            f"final_fix_target={final_fix_distance_nm:.1f}NM "
+            f"centerline_tolerance={final_fix_cross_track_tolerance_nm:.2f}NM "
+            f"fms_dt={fms_dt_s:.1f}s "
+            f"tod_tolerance={tod_tolerance_m:.1f}m "
+            f"max_tod_iterations={max_tod_iterations} "
+            f"processes={processes}"
+        )
+        console.print(
+            "[dim]Inputs:[/dim] "
+            f"events={events_path.as_posix()} "
+            f"fix_sequences={fix_sequences_path.as_posix()} "
+            f"raw_adsb={raw_adsb_dir.as_posix()} "
+            f"fixes={fixes_csv.as_posix()}"
+        )
+    if console is not None:
         with console.status("[bold]Loading raw ADS-B tracks...[/bold]"):
             raw_by_flight = _flight_raw_tracks(raw_adsb_dir, processes=processes, split_gap_seconds=split_gap_seconds)
     else:
         raw_by_flight = _flight_raw_tracks(raw_adsb_dir, processes=processes, split_gap_seconds=split_gap_seconds)
+    if console is not None:
+        console.print(f"[bold]Loaded raw ADS-B tracks[/bold] flights={len(raw_by_flight)}")
 
     tasks: list[ArtifactTask] = []
     for _idx, row in arrivals.iterrows():
@@ -459,8 +909,17 @@ def precompute_artifacts(
                 fixes_csv=fixes_csv,
                 lateral_tolerance_m=lateral_tolerance_m,
                 altitude_tolerance_m=altitude_tolerance_m,
+                final_fix_distance_nm=final_fix_distance_nm,
+                final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+                fms_dt_s=fms_dt_s,
+                tod_tolerance_m=tod_tolerance_m,
+                max_tod_iterations=max_tod_iterations,
             )
         )
+    if console is not None:
+        missing_raw_count = sum(1 for task in tasks if task.raw_flight is None)
+        if missing_raw_count:
+            console.print(f"[yellow]Arrivals missing raw ADS-B before simulation:[/yellow] {missing_raw_count}")
     task_results: list[tuple[ArtifactResult, dict[str, Any] | None, list[str]]] = []
     if console is not None:
         progress = Progress(
@@ -469,15 +928,28 @@ def precompute_artifacts(
             BarColumn(),
             TaskProgressColumn(),
             MofNCompleteColumn(),
+            TextColumn("[green]ok {task.fields[generated]}[/green]"),
+            TextColumn("[red]skipped {task.fields[skipped]}[/red]"),
             TimeRemainingColumn(),
             TimeElapsedColumn(),
             console=console,
             transient=False,
         )
         with progress:
-            progress_task = progress.add_task("[cyan]Computing artifact flights[/cyan]", total=len(tasks))
+            progress_task = progress.add_task(
+                "[cyan]Computing artifact flights[/cyan]",
+                total=len(tasks),
+                generated=0,
+                skipped=0,
+            )
             for task_result in _run_artifact_tasks(tasks, processes=processes) or ():
                 task_results.append(task_result)
+                result, _payload, _diagnostics = task_result
+                progress.update(
+                    progress_task,
+                    generated=sum(1 for item, _payload, _messages in task_results if item.status == "generated"),
+                    skipped=sum(1 for item, _payload, _messages in task_results if item.status == "skipped"),
+                )
                 progress.advance(progress_task)
     else:
         task_results = list(_run_artifact_tasks(tasks, processes=processes) or ())
@@ -485,6 +957,7 @@ def precompute_artifacts(
     payloads = [payload for _result, payload, _diagnostics in task_results if payload is not None]
     diagnostics = [message for _result, _payload, messages in task_results for message in messages]
     if console is not None and diagnostics:
+        console.print("[bold yellow]Sample wait_atc_point diagnostics[/bold yellow]")
         for message in diagnostics[:100]:
             console.print(f"[yellow]wait_atc_point:[/yellow] {message}")
         if len(diagnostics) > 100:
@@ -506,6 +979,11 @@ def precompute_artifacts(
                 flights_path=flights_path,
                 lateral_tolerance_m=lateral_tolerance_m,
                 altitude_tolerance_m=altitude_tolerance_m,
+                final_fix_distance_nm=final_fix_distance_nm,
+                final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+                fms_dt_s=fms_dt_s,
+                tod_tolerance_m=tod_tolerance_m,
+                max_tod_iterations=max_tod_iterations,
                 processes=processes,
                 skipped_departure_count=_departure_count(events_path),
             )
@@ -513,6 +991,7 @@ def precompute_artifacts(
             with manifest_path.open("w", encoding="utf-8") as stream:
                 json.dump(manifest, stream, indent=2, allow_nan=False)
                 stream.write("\n")
+        _print_precompute_summary(console=console, manifest=manifest, diagnostics=diagnostics)
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
         flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
@@ -526,6 +1005,11 @@ def precompute_artifacts(
             flights_path=flights_path,
             lateral_tolerance_m=lateral_tolerance_m,
             altitude_tolerance_m=altitude_tolerance_m,
+            final_fix_distance_nm=final_fix_distance_nm,
+            final_fix_cross_track_tolerance_nm=final_fix_cross_track_tolerance_nm,
+            fms_dt_s=fms_dt_s,
+            tod_tolerance_m=tod_tolerance_m,
+            max_tod_iterations=max_tod_iterations,
             processes=processes,
             skipped_departure_count=_departure_count(events_path),
         )
@@ -551,11 +1035,22 @@ def _manifest(
     flights_path: Path,
     lateral_tolerance_m: float,
     altitude_tolerance_m: float,
+    final_fix_distance_nm: float,
+    final_fix_cross_track_tolerance_nm: float,
+    fms_dt_s: float,
+    tod_tolerance_m: float,
+    max_tod_iterations: int,
     processes: int,
     skipped_departure_count: int,
 ) -> dict[str, Any]:
     generated = [result for result in results if result.status == "generated"]
     skipped = [result for result in results if result.status == "skipped"]
+    simulation_success = [
+        result for result in generated if result.simulation_success is True
+    ]
+    simulation_failure = [
+        result for result in generated if result.simulation_success is False
+    ]
     wait_atc_point_count = sum(1 for result in generated if result.wait_atc_point_found)
     wait_atc_cluster_counts = {
         cluster: sum(1 for result in generated if result.wait_atc_cluster == cluster)
@@ -563,7 +1058,7 @@ def _manifest(
     }
     return {
         "created_at_utc": datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "artifact_type": "simap_fms_bichannel_arrivals",
+        "artifact_type": "simap_fms_bichannel_base_route_arrivals",
         "events_path": events_path.as_posix(),
         "fix_sequences_path": fix_sequences_path.as_posix(),
         "raw_adsb_dir": raw_adsb_dir.as_posix(),
@@ -573,6 +1068,10 @@ def _manifest(
         "generated_count": len(generated),
         "skipped_arrival_count": len(skipped),
         "skipped_departure_count": skipped_departure_count,
+        "skipped_arrival_reason_counts": _reason_counts(results),
+        "simulation_success_count": len(simulation_success),
+        "simulation_failure_count": len(simulation_failure),
+        "simulation_failure_message_counts": _simulation_message_counts(results),
         "wait_atc_point_count": wait_atc_point_count,
         "wait_atc_point_success_rate": (
             float(wait_atc_point_count / len(generated)) if generated else 0.0
@@ -582,6 +1081,15 @@ def _manifest(
         "compressed_point_count": sum(result.compressed_point_count for result in generated),
         "lateral_tolerance_m": lateral_tolerance_m,
         "altitude_tolerance_m": altitude_tolerance_m,
+        "fms_dt_s": fms_dt_s,
+        "tod_tolerance_m": tod_tolerance_m,
+        "max_tod_iterations": int(max_tod_iterations),
+        "lateral_guidance": _lateral_guidance_payload(_default_lateral_guidance()),
+        "base_route": {
+            "type": "base-route",
+            "final_fix_target_distance_nm": final_fix_distance_nm,
+            "final_fix_cross_track_tolerance_nm": final_fix_cross_track_tolerance_nm,
+        },
         "processes": int(processes),
         "breakpoint_mask_bits": {
             "lateral": LATERAL_BREAKPOINT_MASK,
@@ -590,6 +1098,8 @@ def _manifest(
         "layout": {
             "flights": flights_path.name,
             "point_columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
+            "cas_profile_columns": ["time", "cas_kts"],
+            "cas_profile_units": {"cas_kts": "kt"},
         },
         "flights": [
             {
@@ -607,6 +1117,8 @@ def _manifest(
                 "reason": result.reason,
                 "wait_atc_point_found": result.wait_atc_point_found,
                 "wait_atc_cluster": result.wait_atc_cluster,
+                "simulation_success": result.simulation_success,
+                "simulation_message": result.simulation_message,
             }
             for result in sorted(results, key=lambda item: (item.status, item.first_time or 0, item.flight_id))
         ],
@@ -626,6 +1138,11 @@ def main() -> None:
         output_dir=_abs_path(root, args.output_dir),
         lateral_tolerance_m=args.lateral_tolerance_m,
         altitude_tolerance_m=args.altitude_tolerance_m,
+        final_fix_distance_nm=args.final_fix_distance_nm,
+        final_fix_cross_track_tolerance_nm=args.final_fix_cross_track_tolerance_nm,
+        fms_dt_s=args.fms_dt_s,
+        tod_tolerance_m=args.tod_tolerance_m,
+        max_tod_iterations=args.max_tod_iterations,
         split_gap_seconds=args.split_gap_seconds,
         processes=args.processes,
         limit=args.limit,
@@ -637,6 +1154,10 @@ def main() -> None:
                 "generated_count": manifest["generated_count"],
                 "skipped_arrival_count": manifest["skipped_arrival_count"],
                 "skipped_departure_count": manifest["skipped_departure_count"],
+                "simulation_success_count": manifest["simulation_success_count"],
+                "vertical_profile_infeasible_count": manifest["simulation_failure_count"],
+                "skipped_arrival_reason_counts": manifest["skipped_arrival_reason_counts"],
+                "simulation_failure_message_counts": manifest["simulation_failure_message_counts"],
                 "wait_atc_point_count": manifest["wait_atc_point_count"],
                 "wait_atc_point_success_rate": manifest["wait_atc_point_success_rate"],
                 "flights_path": manifest["flights_path"],

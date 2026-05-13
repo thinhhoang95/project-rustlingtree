@@ -5,14 +5,152 @@ from dataclasses import dataclass
 import numpy as np
 
 EARTH_RADIUS_M = 6_371_000.0
+# A modest nominal bank keeps the generated fly-by path trackable in approach
+# modes after the roll loop and bank limits are applied.
+_DEFAULT_FLYBY_BANK_RAD = float(np.deg2rad(12.0))
+_DEFAULT_FLYBY_SPEED_MPS = 230.0 * 0.514444
+_MIN_FLYBY_TURN_RAD = float(np.deg2rad(3.0))
+_MAX_FLYBY_TURN_RAD = float(np.deg2rad(165.0))
+_MAX_FLYBY_LEG_FRACTION = 0.45
+_MAX_FLYBY_LEAD_M = 7.0 * 1_852.0
 
 
 def _wrap_angle_rad(angle_rad: float) -> float:
     return float(np.arctan2(np.sin(angle_rad), np.cos(angle_rad)))
 
 
-def _mean_angle_rad(a_rad: float, b_rad: float) -> float:
-    return float(np.arctan2(np.sin(a_rad) + np.sin(b_rad), np.cos(a_rad) + np.cos(b_rad)))
+def _left_normal(vector: np.ndarray) -> np.ndarray:
+    return np.asarray([-vector[1], vector[0]], dtype=float)
+
+
+def _append_line(
+    samples: list[np.ndarray],
+    start: np.ndarray,
+    end: np.ndarray,
+    *,
+    target_spacing_m: float,
+) -> None:
+    length_m = float(np.linalg.norm(end - start))
+    if length_m <= 1e-6:
+        return
+    count = max(2, int(np.ceil(length_m / target_spacing_m)) + 1)
+    for fraction in np.linspace(0.0, 1.0, count):
+        point = start + float(fraction) * (end - start)
+        if samples and np.linalg.norm(point - samples[-1]) <= 1e-6:
+            continue
+        samples.append(point)
+
+
+def _append_arc(
+    samples: list[np.ndarray],
+    center: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+    *,
+    turn_sign: float,
+    radius_m: float,
+    target_spacing_m: float,
+) -> None:
+    start_angle = float(np.arctan2(start[1] - center[1], start[0] - center[0]))
+    end_angle = float(np.arctan2(end[1] - center[1], end[0] - center[0]))
+    if turn_sign > 0.0:
+        while end_angle <= start_angle:
+            end_angle += 2.0 * np.pi
+    else:
+        while end_angle >= start_angle:
+            end_angle -= 2.0 * np.pi
+    sweep_rad = abs(end_angle - start_angle)
+    count = max(3, int(np.ceil(radius_m * sweep_rad / target_spacing_m)) + 1)
+    for angle in np.linspace(start_angle, end_angle, count):
+        point = center + radius_m * np.asarray([np.cos(angle), np.sin(angle)], dtype=float)
+        if samples and np.linalg.norm(point - samples[-1]) <= 1e-6:
+            continue
+        samples.append(point)
+
+
+def _flyby_turn_radius_m() -> float:
+    return float(_DEFAULT_FLYBY_SPEED_MPS**2 / (9.80665 * np.tan(_DEFAULT_FLYBY_BANK_RAD)))
+
+
+def _build_flyby_samples(points_ne: np.ndarray, *, samples_per_segment: int) -> np.ndarray:
+    chord_m = np.hypot(np.diff(points_ne[:, 0]), np.diff(points_ne[:, 1]))
+    total_chord_m = float(np.sum(chord_m))
+    target_count = max((len(points_ne) - 1) * samples_per_segment, len(points_ne) - 1)
+    target_spacing_m = float(np.clip(total_chord_m / target_count, 60.0, 250.0))
+    nominal_radius_m = _flyby_turn_radius_m()
+
+    turn_starts: list[np.ndarray | None] = [None] * len(points_ne)
+    turn_ends: list[np.ndarray | None] = [None] * len(points_ne)
+    turn_centers: list[np.ndarray | None] = [None] * len(points_ne)
+    turn_signs: list[float] = [0.0] * len(points_ne)
+    turn_radii: list[float] = [0.0] * len(points_ne)
+
+    for index in range(1, len(points_ne) - 1):
+        previous_point = points_ne[index - 1]
+        waypoint = points_ne[index]
+        next_point = points_ne[index + 1]
+        inbound = waypoint - previous_point
+        outbound = next_point - waypoint
+        inbound_length_m = float(np.linalg.norm(inbound))
+        outbound_length_m = float(np.linalg.norm(outbound))
+        if inbound_length_m <= 0.0 or outbound_length_m <= 0.0:
+            continue
+        inbound_hat = inbound / inbound_length_m
+        outbound_hat = outbound / outbound_length_m
+        turn_cross = float(inbound_hat[0] * outbound_hat[1] - inbound_hat[1] * outbound_hat[0])
+        turn_dot = float(np.clip(np.dot(inbound_hat, outbound_hat), -1.0, 1.0))
+        turn_angle_rad = abs(float(np.arctan2(turn_cross, turn_dot)))
+        if turn_angle_rad < _MIN_FLYBY_TURN_RAD or turn_angle_rad > _MAX_FLYBY_TURN_RAD:
+            continue
+
+        requested_lead_m = nominal_radius_m * float(np.tan(0.5 * turn_angle_rad))
+        max_lead_m = min(
+            _MAX_FLYBY_LEAD_M,
+            _MAX_FLYBY_LEG_FRACTION * inbound_length_m,
+            _MAX_FLYBY_LEG_FRACTION * outbound_length_m,
+        )
+        lead_m = float(min(requested_lead_m, max_lead_m))
+        if lead_m <= 1.0:
+            continue
+
+        radius_m = lead_m / float(np.tan(0.5 * turn_angle_rad))
+        turn_sign = 1.0 if turn_cross > 0.0 else -1.0
+        turn_start = waypoint - lead_m * inbound_hat
+        turn_end = waypoint + lead_m * outbound_hat
+        center = turn_start + turn_sign * radius_m * _left_normal(inbound_hat)
+
+        turn_starts[index] = turn_start
+        turn_ends[index] = turn_end
+        turn_centers[index] = center
+        turn_signs[index] = turn_sign
+        turn_radii[index] = radius_m
+
+    samples: list[np.ndarray] = [points_ne[0]]
+    line_start = points_ne[0]
+    for index in range(1, len(points_ne) - 1):
+        turn_start = turn_starts[index]
+        turn_end = turn_ends[index]
+        turn_center = turn_centers[index]
+        if turn_start is None or turn_end is None or turn_center is None:
+            line_end = points_ne[index]
+            _append_line(samples, line_start, line_end, target_spacing_m=target_spacing_m)
+            line_start = line_end
+            continue
+
+        _append_line(samples, line_start, turn_start, target_spacing_m=target_spacing_m)
+        _append_arc(
+            samples,
+            turn_center,
+            turn_start,
+            turn_end,
+            turn_sign=turn_signs[index],
+            radius_m=turn_radii[index],
+            target_spacing_m=target_spacing_m,
+        )
+        line_start = turn_end
+
+    _append_line(samples, line_start, points_ne[-1], target_spacing_m=target_spacing_m)
+    return np.asarray(samples, dtype=float)
 
 
 @dataclass(frozen=True)
@@ -81,27 +219,32 @@ class ReferencePath:
         lat0_rad = np.deg2rad(origin_lat_deg)
         east_m = EARTH_RADIUS_M * np.cos(lat0_rad) * np.deg2rad(lon - origin_lon_deg)
         north_m = EARTH_RADIUS_M * np.deg2rad(lat - origin_lat_deg)
+        waypoint_ne = np.column_stack([east_m, north_m])
 
         chord_m = np.hypot(np.diff(east_m), np.diff(north_m))
         if np.any(chord_m <= 0.0):
             raise ValueError("waypoints must be unique and ordered")
-        waypoint_s_from_start_m = np.concatenate(([0.0], np.cumsum(chord_m)))
+        route_length_m = float(np.sum(chord_m))
+        path_ne = _build_flyby_samples(waypoint_ne, samples_per_segment=samples_per_segment)
+        east_sample = path_ne[:, 0]
+        north_sample = path_ne[:, 1]
+        sample_chord_m = np.hypot(np.diff(east_sample), np.diff(north_sample))
+        physical_s_from_start_m = np.concatenate(([0.0], np.cumsum(sample_chord_m)))
+        physical_length_m = float(physical_s_from_start_m[-1])
+        if physical_length_m <= 0.0:
+            raise ValueError("reference path must have positive length")
+        s_from_start_m = physical_s_from_start_m * (route_length_m / physical_length_m)
+        total_length_m = route_length_m
 
-        segment_track_rad = np.arctan2(np.diff(north_m), np.diff(east_m))
-        waypoint_track_rad = np.empty(len(lat), dtype=float)
-        waypoint_track_rad[0] = float(segment_track_rad[0])
-        waypoint_track_rad[-1] = float(segment_track_rad[-1])
-        for index in range(1, len(lat) - 1):
-            waypoint_track_rad[index] = _mean_angle_rad(float(segment_track_rad[index - 1]), float(segment_track_rad[index]))
-
-        total_length_m = float(waypoint_s_from_start_m[-1])
-        sample_count = max((len(lat) - 1) * samples_per_segment + 1, len(lat))
-        s_from_start_m = np.linspace(0.0, total_length_m, sample_count, dtype=float)
-        east_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, east_m)
-        north_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, north_m)
-        track_sample = np.interp(s_from_start_m, waypoint_s_from_start_m, np.unwrap(waypoint_track_rad))
+        segment_track_rad = np.arctan2(np.diff(north_sample), np.diff(east_sample))
+        track_sample = np.empty(len(east_sample), dtype=float)
+        track_sample[0] = float(segment_track_rad[0])
+        track_sample[-1] = float(segment_track_rad[-1])
+        if len(track_sample) > 2:
+            unwrapped_segment_track = np.unwrap(segment_track_rad)
+            track_sample[1:-1] = 0.5 * (unwrapped_segment_track[:-1] + unwrapped_segment_track[1:])
         curvature_inv_m = np.gradient(track_sample, s_from_start_m, edge_order=1)
-        track_rad = track_sample
+        track_rad = np.unwrap(track_sample)
         s_m = total_length_m - s_from_start_m
         lat_sample = origin_lat_deg + np.rad2deg(north_sample / EARTH_RADIUS_M)
         lon_sample = origin_lon_deg + np.rad2deg(east_sample / (EARTH_RADIUS_M * np.cos(lat0_rad)))

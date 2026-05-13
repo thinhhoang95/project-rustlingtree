@@ -40,6 +40,24 @@ THRESHOLDS = pd.DataFrame(
 )
 
 
+PARALLEL_END_THRESHOLDS = pd.DataFrame(
+    [
+        {
+            "runway": "17C",
+            "runway_pair": "17C/35C",
+            "threshold_lat": 32.915706694444445,
+            "threshold_lon": -97.02597491666667,
+        },
+        {
+            "runway": "35C",
+            "runway_pair": "17C/35C",
+            "threshold_lat": 32.87887877777778,
+            "threshold_lon": -97.02617166666668,
+        },
+    ]
+)
+
+
 def make_flight(rows: list[dict[str, object]]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     frame["callsign"] = frame["callsign"].map(normalize_callsign)
@@ -105,6 +123,28 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(event["runway"], "17C")
         self.assertEqual(event["event_time"], 240)
         self.assertLess(float(event["altitude_delta_m"]), 0.0)
+
+    def test_classify_flight_track_uses_heading_to_choose_runway_end(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "abc125", "lat": 33.30, "lon": -97.02, "heading": 180.0, "callsign": "AAL102", "geoaltitude": 2_800.0},
+                {"time": 60, "icao24": "abc125", "lat": 33.10, "lon": -97.02, "heading": 180.0, "callsign": "AAL102", "geoaltitude": 1_200.0},
+                {"time": 120, "icao24": "abc125", "lat": 32.913, "lon": -97.02, "heading": 180.0, "callsign": "AAL102", "geoaltitude": 220.0},
+            ]
+        )
+
+        classification, event = classify_flight_track(
+            flight=flight,
+            thresholds=PARALLEL_END_THRESHOLDS,
+            runway_radius_m=5_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification, "arrival")
+        assert event is not None
+        self.assertEqual(event["runway"], "17C")
 
     def test_classify_flight_track_detects_departure(self) -> None:
         flight = make_flight(

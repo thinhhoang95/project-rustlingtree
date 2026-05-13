@@ -25,7 +25,6 @@ SIMAP_COLOR = "#c2410c"
 CAS_COLOR = "#f59e0b"
 GAMMA_COLOR = "#7c3aed"
 BANK_COLOR = "#2563eb"
-LOWER_STATE_COLOR = "#2563eb"
 UPPER_STATE_COLOR = "#dc2626"
 FREE_STATE_COLOR = "#6b7280"
 UNAVAILABLE = "N/A"
@@ -190,12 +189,12 @@ def _state_summary(time_s: np.ndarray, state: np.ndarray) -> tuple[int, float | 
     return int(active.size), float(time_s[int(active[0])])
 
 
-def _first_active_position(trajectory: FMSBiChannelResult, state: np.ndarray) -> tuple[float, float] | None:
+def _first_active_position(lon_deg: np.ndarray, lat_deg: np.ndarray, state: np.ndarray) -> tuple[float, float] | None:
     active = np.flatnonzero(state != 0)
     if active.size == 0:
         return None
     idx = int(active[0])
-    return float(trajectory.lon_deg[idx]), float(trajectory.lat_deg[idx])
+    return float(lon_deg[idx]), float(lat_deg[idx])
 
 
 def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -204,11 +203,11 @@ def _effective_cas_bounds(request: Any, s_m: np.ndarray) -> tuple[np.ndarray, np
     return np.maximum(route_lower_mps, mode_bounds[:, 0]), np.minimum(route_upper_mps, mode_bounds[:, 1])
 
 
-def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest:
+def _build_bichannel_request(bundle: Any, seed: SeedLike, *, fms_dt_s: float) -> FMSBiChannelRequest:
     reference_path = bundle.request.reference_path
 
     start_s_m = reference_path.total_length_m
-    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m)
+    fms_request = FMSRequest.from_coupled_request(bundle.request, start_s_m=start_s_m, dt_s=fms_dt_s)
     east_m, north_m = reference_path.position_ne(fms_request.start_s_m)
     heading_deg = getattr(seed, "heading_deg", None)
     if heading_deg is not None and np.isfinite(float(heading_deg)):
@@ -233,30 +232,20 @@ def _build_bichannel_request(bundle: Any, seed: SeedLike) -> FMSBiChannelRequest
     )
 
 
-def build_bichannel_result(bundle: Any, seed: SeedLike) -> FMSBiChannelResult:
-    request = _build_bichannel_request(bundle, seed)
-    return plan_fms_bichannel(request)
-
-
-def _plot_state_axis(ax: Axes, time_s: np.ndarray, state: np.ndarray, *, title: str, first_active_time_s: float | None, current_time_s: float | None = None) -> None:
-    ax.step(time_s, state, where="mid", color="#111827", linewidth=1.2)
-    if np.any(state == -1):
-        ax.scatter(time_s[state == -1], state[state == -1], color=LOWER_STATE_COLOR, s=12, zorder=3, label="lower")
-    if np.any(state == 1):
-        ax.scatter(time_s[state == 1], state[state == 1], color=UPPER_STATE_COLOR, s=12, zorder=3, label="upper")
-    if current_time_s is not None:
-        current_value = _interp_value(current_time_s, time_s, state.astype(float))
-        if current_value is not None:
-            ax.plot([current_time_s], [current_value], "o", color="#111827", markersize=6, zorder=4)
-    if first_active_time_s is not None:
-        ax.axvline(first_active_time_s, color=UPPER_STATE_COLOR, linestyle="--", linewidth=1.0, alpha=0.75)
-    ax.axhline(0.0, color=FREE_STATE_COLOR, linestyle=":", linewidth=1.0)
-    ax.set_ylim(-1.25, 1.25)
-    ax.set_yticks([-1, 0, 1])
-    ax.set_yticklabels(["lower", "free", "upper"])
-    ax.set_title(title)
-    ax.set_ylabel("state")
-    ax.grid(True, alpha=0.25)
+def build_bichannel_result(
+    bundle: Any,
+    seed: SeedLike,
+    *,
+    fms_dt_s: float = 0.5,
+    tod_tolerance_m: float = 5.0,
+    max_tod_iterations: int = 40,
+) -> FMSBiChannelResult:
+    request = _build_bichannel_request(bundle, seed, fms_dt_s=fms_dt_s)
+    return plan_fms_bichannel(
+        request,
+        tod_tolerance_m=tod_tolerance_m,
+        max_tod_iterations=max_tod_iterations,
+    )
 
 
 def _hide_xticklabels(ax: Axes) -> None:
@@ -342,16 +331,30 @@ def plot_cross_check(
     bundle: Any,
     seed: SeedLike,
     wait_atc_point: Mapping[str, Any] | None = None,
+    bichannel: FMSBiChannelResult | None = None,
+    fms_dt_s: float = 0.5,
+    tod_tolerance_m: float = 5.0,
+    max_tod_iterations: int = 40,
 ) -> None:
-    bichannel = build_bichannel_result(bundle, seed)
+    if bichannel is None:
+        bichannel = build_bichannel_result(
+            bundle,
+            seed,
+            fms_dt_s=fms_dt_s,
+            tod_tolerance_m=tod_tolerance_m,
+            max_tod_iterations=max_tod_iterations,
+        )
+    simap_display = _BichannelTrajectoryAdapter(bichannel, seed)
     sim_time_s = float(seed.time_s) + np.asarray(bichannel.t_s, dtype=float)
     adsb_time_s = np.asarray(adsb.time_s, dtype=float)
     adsb_cross_track_m = _signed_cross_track(reference_path, adsb)
     sim_cross_track_m = np.asarray(bichannel.cross_track_m, dtype=float)
     sim_track_error_deg = np.rad2deg(np.asarray(bichannel.track_error_rad, dtype=float))
     sim_gamma_deg = np.rad2deg(np.asarray(bichannel.longitudinal.gamma_rad, dtype=float))
-    sim_phi_deg = np.rad2deg(np.asarray(bichannel.phi_rad, dtype=float))
-    sim_phi_req_deg = np.rad2deg(np.asarray(bichannel.phi_req_rad, dtype=float))
+    sim_phi_rad = np.asarray(bichannel.phi_rad, dtype=float)
+    sim_phi_req_rad = np.asarray(bichannel.phi_req_rad, dtype=float)
+    sim_phi_deg = np.rad2deg(sim_phi_rad)
+    sim_phi_req_deg = np.rad2deg(sim_phi_req_rad)
     sim_phi_max_deg = np.rad2deg(np.asarray(bichannel.phi_max_rad, dtype=float))
 
     cas_lower_mps, cas_upper_mps = _effective_cas_bounds(bundle.request, bichannel.s_m)
@@ -361,23 +364,21 @@ def plot_cross_check(
 
     cas_state = _state_from_bounds(bichannel.longitudinal.v_cas_mps, cas_lower_mps, cas_upper_mps, atol=CAS_STATE_ATOL_MPS)
     gamma_state = _state_from_bounds(bichannel.longitudinal.gamma_rad, gamma_lower_rad, gamma_upper_rad, atol=GAMMA_STATE_ATOL_RAD)
-    bank_state = _state_from_bounds(bichannel.phi_req_rad, -bichannel.phi_max_rad, bichannel.phi_max_rad, atol=BANK_STATE_ATOL_RAD)
+    bank_state = _state_from_bounds(sim_phi_req_rad, -bichannel.phi_max_rad, bichannel.phi_max_rad, atol=BANK_STATE_ATOL_RAD)
 
     cas_active_count, cas_first_active = _state_summary(sim_time_s, cas_state)
     gamma_active_count, gamma_first_active = _state_summary(sim_time_s, gamma_state)
     bank_active_count, bank_first_active = _state_summary(sim_time_s, bank_state)
 
     fig = plt.figure(figsize=(18.0, 18.5))
-    grid = fig.add_gridspec(6, 2, height_ratios=[1.22, 0.92, 0.92, 0.92, 0.92, 0.16])
+    grid = fig.add_gridspec(6, 2, height_ratios=[1.22, 0.9, 0.82, 0.82, 0.82, 0.16])
     trajectory_ax = fig.add_subplot(grid[0, :])
-    cross_track_ax = fig.add_subplot(grid[1, 0])
-    track_error_ax = fig.add_subplot(grid[1, 1])
-    cas_ax = fig.add_subplot(grid[2, 0])
-    cas_state_ax = fig.add_subplot(grid[2, 1])
-    gamma_ax = fig.add_subplot(grid[3, 0])
-    gamma_state_ax = fig.add_subplot(grid[3, 1])
-    bank_ax = fig.add_subplot(grid[4, 0])
-    bank_state_ax = fig.add_subplot(grid[4, 1])
+    altitude_ax = fig.add_subplot(grid[1, :])
+    cross_track_ax = fig.add_subplot(grid[2, 0])
+    track_error_ax = fig.add_subplot(grid[2, 1])
+    cas_ax = fig.add_subplot(grid[3, 0])
+    gamma_ax = fig.add_subplot(grid[3, 1])
+    bank_ax = fig.add_subplot(grid[4, :])
     slider_ax = fig.add_subplot(grid[5, :])
 
     trajectory_ax.plot(
@@ -390,13 +391,20 @@ def plot_cross_check(
         zorder=1,
     )
     trajectory_ax.plot(adsb.lon_deg, adsb.lat_deg, color=ADSB_COLOR, linewidth=2.0, label="ADS-B", zorder=2)
-    trajectory_ax.plot(bichannel.lon_deg, bichannel.lat_deg, color=SIMAP_COLOR, linewidth=2.0, label="SIMAP", zorder=3)
+    trajectory_ax.plot(
+        simap_display.lon_deg,
+        simap_display.lat_deg,
+        color=SIMAP_COLOR,
+        linewidth=2.6,
+        label="SIMAP",
+        zorder=5,
+    )
     _plot_fix_markers(trajectory_ax, bundle.path)
     _plot_wait_atc_point(trajectory_ax, wait_atc_point)
 
-    first_bank_position = _first_active_position(bichannel, bank_state)
-    first_cas_position = _first_active_position(bichannel, cas_state)
-    first_gamma_position = _first_active_position(bichannel, gamma_state)
+    first_bank_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, bank_state)
+    first_cas_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, cas_state)
+    first_gamma_position = _first_active_position(simap_display.lon_deg, simap_display.lat_deg, gamma_state)
     for position, marker, color, label in (
         (first_bank_position, "*", UPPER_STATE_COLOR, "first bank limit"),
         (first_cas_position, "D", CAS_COLOR, "first CAS limit"),
@@ -422,8 +430,28 @@ def plot_cross_check(
     trajectory_ax.legend(loc="best", fontsize=8.5)
     _set_kdfw_airport_area_limits(trajectory_ax)
 
+    altitude_ax.plot(adsb_time_s, m_to_ft(adsb.altitude_m), color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
+    altitude_ax.plot(
+        sim_time_s,
+        m_to_ft(bichannel.h_m),
+        color=SIMAP_COLOR,
+        linewidth=1.8,
+        label="SIMAP",
+    )
+    altitude_ax.set_title("Altitude")
+    altitude_ax.set_ylabel("altitude [ft]")
+    altitude_ax.grid(True, alpha=0.25)
+    altitude_ax.legend(loc="best", fontsize=8.5)
+    _hide_xticklabels(altitude_ax)
+
     cross_track_ax.plot(adsb_time_s, adsb_cross_track_m, color=ADSB_COLOR, linewidth=1.6, label="ADS-B")
-    cross_track_ax.plot(sim_time_s, sim_cross_track_m, color=SIMAP_COLOR, linewidth=1.8, label="SIMAP")
+    cross_track_ax.plot(
+        sim_time_s,
+        sim_cross_track_m,
+        color=SIMAP_COLOR,
+        linewidth=2.0,
+        label="SIMAP",
+    )
     if bank_first_active is not None:
         cross_track_ax.axvline(bank_first_active, color=UPPER_STATE_COLOR, linestyle="--", linewidth=1.0, alpha=0.75)
     if bank_active_count > 0:
@@ -467,15 +495,6 @@ def plot_cross_check(
     cas_ax.legend(loc="best", fontsize=8.5)
     _hide_xticklabels(cas_ax)
 
-    _plot_state_axis(
-        cas_state_ax,
-        sim_time_s,
-        cas_state,
-        title="CAS envelope enforcement",
-        first_active_time_s=cas_first_active,
-    )
-    _hide_xticklabels(cas_state_ax)
-
     gamma_ax.plot(sim_time_s, sim_gamma_deg, color=GAMMA_COLOR, linewidth=1.8, label="SIMAP")
     if gamma_lower_deg is not None and gamma_upper_deg is not None:
         gamma_ax.fill_between(
@@ -497,15 +516,6 @@ def plot_cross_check(
     gamma_ax.legend(loc="best", fontsize=8.5)
     _hide_xticklabels(gamma_ax)
 
-    _plot_state_axis(
-        gamma_state_ax,
-        sim_time_s,
-        gamma_state,
-        title="Gamma envelope enforcement",
-        first_active_time_s=gamma_first_active,
-    )
-    _hide_xticklabels(gamma_state_ax)
-
     bank_ax.plot(sim_time_s, sim_phi_deg, color=SIMAP_COLOR, linewidth=1.8, label="actual bank")
     bank_ax.plot(sim_time_s, sim_phi_req_deg, color=BANK_COLOR, linewidth=1.4, linestyle="--", label="requested bank")
     bank_ax.fill_between(
@@ -526,14 +536,6 @@ def plot_cross_check(
     bank_ax.grid(True, alpha=0.25)
     bank_ax.legend(loc="best", fontsize=8.5)
 
-    _plot_state_axis(
-        bank_state_ax,
-        sim_time_s,
-        bank_state,
-        title="Bank-angle envelope enforcement",
-        first_active_time_s=bank_first_active,
-    )
-
     start_time = min(float(adsb_time_s[0]), float(sim_time_s[0]))
     end_time = max(float(adsb_time_s[-1]), float(sim_time_s[-1]))
     initial_time = max(float(adsb_time_s[0]), float(sim_time_s[0]))
@@ -542,7 +544,7 @@ def plot_cross_check(
         [
             _fmt_unix_time(initial_time),
             _fmt_sample("ADS-B", _sample_trajectory(adsb, initial_time), speed_label="CAS"),
-            _fmt_sample("SIMAP", _sample_trajectory(_ResultTrajectoryAdapter(bichannel, seed), initial_time), speed_label="CAS"),
+            _fmt_sample("SIMAP", _sample_trajectory(simap_display, initial_time), speed_label="CAS"),
         ]
     )
     trajectory_ax.text(
@@ -568,6 +570,8 @@ def plot_cross_check(
 
     current_adsb_point, = trajectory_ax.plot([], [], "o", color=ADSB_COLOR, markersize=7.5, zorder=7)
     current_simap_point, = trajectory_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=7.5, zorder=7)
+    current_altitude_adsb_point, = altitude_ax.plot([], [], "o", color=ADSB_COLOR, markersize=6.0, zorder=7)
+    current_altitude_simap_point, = altitude_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=6.0, zorder=7)
     current_cross_track_adsb_point, = cross_track_ax.plot([], [], "o", color=ADSB_COLOR, markersize=6.0, zorder=7)
     current_cross_track_simap_point, = cross_track_ax.plot([], [], "o", color=SIMAP_COLOR, markersize=6.0, zorder=7)
     current_track_error_point, = track_error_ax.plot([], [], "o", color="#0f766e", markersize=6.0, zorder=7)
@@ -587,9 +591,11 @@ def plot_cross_check(
     def update(time_s: float) -> None:
         time_s = float(time_s)
         adsb_sample = _sample_trajectory(adsb, time_s)
-        simap_sample = _sample_trajectory(_ResultTrajectoryAdapter(bichannel, seed), time_s)
+        simap_sample = _sample_trajectory(simap_display, time_s)
         cross_track_sim_m = _interp_value(time_s, sim_time_s, sim_cross_track_m)
         track_error_deg = _interp_value(time_s, sim_time_s, sim_track_error_deg)
+        altitude_adsb_ft = None if adsb_sample.altitude_m is None else m_to_ft(adsb_sample.altitude_m)
+        altitude_simap_ft = None if simap_sample.altitude_m is None else m_to_ft(simap_sample.altitude_m)
         cas_sim_mps = _interp_value(time_s, sim_time_s, bichannel.v_cas_mps)
         gamma_deg = _interp_value(time_s, sim_time_s, sim_gamma_deg)
         bank_actual_deg = _interp_value(time_s, sim_time_s, sim_phi_deg)
@@ -597,6 +603,8 @@ def plot_cross_check(
 
         _set_marker(current_adsb_point, adsb_sample.lon_deg, adsb_sample.lat_deg)
         _set_marker(current_simap_point, simap_sample.lon_deg, simap_sample.lat_deg)
+        _set_marker(current_altitude_adsb_point, adsb_sample.time_s, altitude_adsb_ft)
+        _set_marker(current_altitude_simap_point, simap_sample.time_s, altitude_simap_ft)
         _set_marker(current_cross_track_adsb_point, adsb_sample.time_s, _interp_value(time_s, adsb_time_s, adsb_cross_track_m))
         _set_marker(current_cross_track_simap_point, time_s, cross_track_sim_m)
         _set_marker(current_track_error_point, time_s, track_error_deg)
@@ -610,7 +618,9 @@ def plot_cross_check(
             _current_title(
                 "Cross-track deviation",
                 time_s,
-                f"SIMAP {UNAVAILABLE if cross_track_sim_m is None else f'{cross_track_sim_m:+.1f} m'}",
+                (
+                    f"SIMAP {UNAVAILABLE if cross_track_sim_m is None else f'{cross_track_sim_m:+.1f} m'}"
+                ),
             )
         )
         track_error_ax.set_title(
@@ -618,6 +628,16 @@ def plot_cross_check(
                 "Track error",
                 time_s,
                 f"SIMAP {UNAVAILABLE if track_error_deg is None else f'{track_error_deg:+.2f} deg'}",
+            )
+        )
+        altitude_ax.set_title(
+            _current_title(
+                "Altitude",
+                time_s,
+                (
+                    f"ADS-B {UNAVAILABLE if altitude_adsb_ft is None else f'{altitude_adsb_ft:,.1f} ft'}, "
+                    f"SIMAP {UNAVAILABLE if altitude_simap_ft is None else f'{altitude_simap_ft:,.1f} ft'}"
+                ),
             )
         )
         cas_ax.set_title(
@@ -657,7 +677,7 @@ def plot_cross_check(
 
 
 @dataclass(frozen=True)
-class _ResultTrajectoryAdapter:
+class _BichannelTrajectoryAdapter:
     result: FMSBiChannelResult
     seed: SeedLike
 

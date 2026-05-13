@@ -161,6 +161,98 @@ def _initial_state(
     )
 
 
+def _lerp(start: float, end: float, fraction: float) -> float:
+    return float(start + (end - start) * fraction)
+
+
+def _advance_lateral_state(
+    *,
+    request: FMSBiChannelRequest,
+    state: FMSBiChannelState,
+    longitudinal: FMSResult,
+    idx: int,
+) -> FMSBiChannelState:
+    base = _base_fms_request(request.base_request)
+    step_dt_s = float(max(0.0, longitudinal.t_s[idx + 1] - longitudinal.t_s[idx]))
+    if step_dt_s <= 0.0:
+        return state
+
+    max_step_s = float(request.guidance.integration_step_s)
+    if not np.isfinite(max_step_s) or max_step_s <= 0.0:
+        max_step_s = step_dt_s
+    max_step_s = min(max_step_s, step_dt_s)
+
+    elapsed_s = 0.0
+    integrated = state
+    while elapsed_s < step_dt_s - 1e-9:
+        dt_s = float(min(max_step_s, step_dt_s - elapsed_s))
+        fraction = elapsed_s / step_dt_s
+        scheduled_t_s = _lerp(float(longitudinal.t_s[idx]), float(longitudinal.t_s[idx + 1]), fraction)
+        scheduled_s_m = _lerp(float(longitudinal.s_m[idx]), float(longitudinal.s_m[idx + 1]), fraction)
+        scheduled_h_m = _lerp(float(longitudinal.h_m[idx]), float(longitudinal.h_m[idx + 1]), fraction)
+        scheduled_v_tas_mps = _lerp(
+            float(longitudinal.v_tas_mps[idx]),
+            float(longitudinal.v_tas_mps[idx + 1]),
+            fraction,
+        )
+        mode = mode_for_s(base.cfg, scheduled_s_m)
+        command = compute_lateral_command(
+            s_m=scheduled_s_m,
+            east_m=integrated.east_m,
+            north_m=integrated.north_m,
+            h_m=scheduled_h_m,
+            t_s=scheduled_t_s,
+            psi_rad=integrated.psi_rad,
+            v_tas_mps=scheduled_v_tas_mps,
+            cfg=base.cfg,
+            mode=mode,
+            reference_path=base.reference_path,
+            weather=base.weather,
+            guidance=request.guidance,
+        )
+        psi_dot_rps, phi_dot_rps = lateral_rates(
+            phi_rad=integrated.phi_rad,
+            phi_req_rad=command.phi_req_rad,
+            tau_phi_s=mode.tau_phi_s,
+            p_max_rps=mode.p_max_rps,
+            v_tas_mps=scheduled_v_tas_mps,
+        )
+        next_phi_rad = float(integrated.phi_rad + phi_dot_rps * dt_s)
+        if (command.phi_req_rad - integrated.phi_rad) * (command.phi_req_rad - next_phi_rad) < 0.0:
+            next_phi_rad = float(command.phi_req_rad)
+
+        next_elapsed_s = elapsed_s + dt_s
+        next_fraction = min(1.0, next_elapsed_s / step_dt_s)
+        next_scheduled_s_m = _lerp(float(longitudinal.s_m[idx]), float(longitudinal.s_m[idx + 1]), next_fraction)
+        scheduled_east_m, scheduled_north_m = base.reference_path.position_ne(scheduled_s_m)
+        next_scheduled_east_m, next_scheduled_north_m = base.reference_path.position_ne(next_scheduled_s_m)
+        scheduled_path_speed_mps = float(
+            np.hypot(next_scheduled_east_m - scheduled_east_m, next_scheduled_north_m - scheduled_north_m) / dt_s
+        )
+        velocity_scale = (
+            float(np.clip(scheduled_path_speed_mps / command.ground_speed_mps, 0.0, 2.0))
+            if command.ground_speed_mps > 1e-6 and scheduled_path_speed_mps > 0.0
+            else 1.0
+        )
+        integrated = FMSBiChannelState(
+            t_s=_lerp(float(longitudinal.t_s[idx]), float(longitudinal.t_s[idx + 1]), next_fraction),
+            s_m=next_scheduled_s_m,
+            h_m=_lerp(float(longitudinal.h_m[idx]), float(longitudinal.h_m[idx + 1]), next_fraction),
+            v_tas_mps=_lerp(
+                float(longitudinal.v_tas_mps[idx]),
+                float(longitudinal.v_tas_mps[idx + 1]),
+                next_fraction,
+            ),
+            east_m=float(integrated.east_m + command.east_dot_mps * velocity_scale * dt_s),
+            north_m=float(integrated.north_m + command.north_dot_mps * velocity_scale * dt_s),
+            psi_rad=wrap_angle_rad(integrated.psi_rad + psi_dot_rps * dt_s),
+            phi_rad=next_phi_rad,
+        )
+        elapsed_s = next_elapsed_s
+
+    return integrated
+
+
 def _lateral_response(
     *,
     request: FMSBiChannelRequest,
@@ -224,29 +316,7 @@ def _lateral_response(
 
         if idx + 1 >= len(longitudinal):
             continue
-        step_dt_s = float(max(0.0, longitudinal.t_s[idx + 1] - longitudinal.t_s[idx]))
-        if step_dt_s <= 0.0:
-            continue
-        psi_dot_rps, phi_dot_rps = lateral_rates(
-            phi_rad=state.phi_rad,
-            phi_req_rad=command.phi_req_rad,
-            tau_phi_s=mode.tau_phi_s,
-            p_max_rps=mode.p_max_rps,
-            v_tas_mps=state.v_tas_mps,
-        )
-        next_phi_rad = float(state.phi_rad + phi_dot_rps * step_dt_s)
-        if (command.phi_req_rad - state.phi_rad) * (command.phi_req_rad - next_phi_rad) < 0.0:
-            next_phi_rad = float(command.phi_req_rad)
-        state = FMSBiChannelState(
-            t_s=float(longitudinal.t_s[idx + 1]),
-            s_m=float(longitudinal.s_m[idx + 1]),
-            h_m=float(longitudinal.h_m[idx + 1]),
-            v_tas_mps=float(longitudinal.v_tas_mps[idx + 1]),
-            east_m=float(state.east_m + command.east_dot_mps * step_dt_s),
-            north_m=float(state.north_m + command.north_dot_mps * step_dt_s),
-            psi_rad=wrap_angle_rad(state.psi_rad + psi_dot_rps * step_dt_s),
-            phi_rad=next_phi_rad,
-        )
+        state = _advance_lateral_state(request=request, state=state, longitudinal=longitudinal, idx=idx)
 
     east_arr = np.asarray(east_m, dtype=float)
     north_arr = np.asarray(north_m, dtype=float)
@@ -255,7 +325,12 @@ def _lateral_response(
     phi_max_arr = np.asarray(phi_max_rad, dtype=float)
     phi_req_arr = np.asarray(phi_req_rad, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        bank_ratio = np.divide(np.abs(phi_req_arr), phi_max_arr, out=np.zeros_like(phi_req_arr), where=phi_max_arr > 0.0)
+        bank_ratio = np.divide(
+            np.abs(phi_req_arr),
+            phi_max_arr,
+            out=np.zeros_like(phi_req_arr),
+            where=phi_max_arr > 0.0,
+        )
 
     max_abs_cross_track_m = float(np.max(np.abs(cross_track_m))) if cross_track_m else 0.0
     max_abs_track_error_rad = float(np.max(np.abs(track_error_rad))) if track_error_rad else 0.0

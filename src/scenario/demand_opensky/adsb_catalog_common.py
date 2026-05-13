@@ -26,6 +26,7 @@ class ThresholdCandidate:
     event_distance_m: float
     altitude_delta_m: float
     distance_delta_m: float
+    heading_error_deg: float | None = None
 
 
 def haversine_distance_m(
