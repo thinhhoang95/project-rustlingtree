@@ -167,6 +167,16 @@ class ArrivalScheduleItem(BaseModel):
     cas_profile: dict[str, Any] | None = None
 
 
+class FeasibilityEvaluationItem(BaseModel):
+    flight_number: str
+    icao24: str
+    flight_id: str
+    runway: str
+    missing_distance_nmi: float
+    missing_distance_m: float
+    simulation_message: str
+
+
 class HealthResponse(BaseModel):
     status: str
     events_count: int

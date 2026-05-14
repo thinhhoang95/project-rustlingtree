@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 
+from mcp_tools.evaluators import FeasibleEvaluator
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import (
     ArrivalScheduleItem,
     DepartureScheduleItem,
+    FeasibilityEvaluationItem,
     HealthResponse,
     ScenarioResourceConfig,
 )
@@ -37,6 +40,11 @@ def create_app() -> FastAPI:
     def arrivals(request: Request) -> list[dict[str, object]]:
         manager: ScenarioManager = request.app.state.scenario_manager
         return manager.arrival_schedule()
+
+    @app.get("/tools/evals/feasibility", response_model=list[FeasibilityEvaluationItem])
+    def feasibility(request: Request) -> list[dict[str, object]]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        return [asdict(item) for item in FeasibleEvaluator(manager).evaluate()]
 
     @app.get("/diff", response_model=list[dict[str, object]])
     def diff(request: Request) -> list[dict[str, object]]:

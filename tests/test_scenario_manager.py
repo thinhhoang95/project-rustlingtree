@@ -75,6 +75,11 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
             "fix_count": 4,
             "lateral_path": ["FIXA", "FIXB", "FINAL35C", "RW35C"],
         },
+        "simulation": {
+            "success": False,
+            "message": "infeasible: not enough along-track distance to complete FMS profile before threshold",
+            "final_threshold_error_m": 1_852.0,
+        },
     }
     simap_arrival_trajectories_path.write_text(json.dumps(simap_arrival_payload) + "\n", encoding="utf-8")
 
@@ -250,7 +255,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
 
     route_paths = {route.path for route in app.routes}
 
-    assert {"/health", "/departures", "/arrivals", "/diff"} <= route_paths
+    assert {"/health", "/departures", "/arrivals", "/tools/evals/feasibility", "/diff"} <= route_paths
     assert manager.health()["arrivals_missing_trajectories_count"] == 1
     assert [item["flight_id"] for item in manager.departure_schedule()] == ["DEP1"]
     assert manager.arrival_schedule()[0]["time_at_first_fix"] == 310
@@ -259,9 +264,11 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     with TestClient(app) as client:
         departures = client.get("/departures")
         arrivals = client.get("/arrivals")
+        feasibility = client.get("/tools/evals/feasibility")
 
     assert departures.status_code == 200
     assert arrivals.status_code == 200
+    assert feasibility.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
     assert arrivals.json()[0]["cas_profile"]["columns"] == ["time", "cas_kts"]
@@ -271,3 +278,16 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert arrivals.json()[0]["baseline_final_fix"]["identifier"] == "FINAL35C"
     assert arrivals.json()[0]["atc_wait_point"]["identifier"] == "FIXB"
     assert arrivals.json()[0]["wait_atc_point"]["identifier"] == "FIXB"
+    assert feasibility.json() == [
+        {
+            "flight_number": "CALLARR1",
+            "icao24": "arr001",
+            "flight_id": "ARR1",
+            "runway": "RW35C",
+            "missing_distance_nmi": 1.0,
+            "missing_distance_m": 1_852.0,
+            "simulation_message": (
+                "infeasible: not enough along-track distance to complete FMS profile before threshold"
+            ),
+        }
+    ]
