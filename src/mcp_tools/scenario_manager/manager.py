@@ -149,8 +149,11 @@ class ScenarioManager:
         return str(token)
 
     def _apply_diff(self, payload: dict[str, Any]) -> dict[str, Any]:
-        # Intervention patching will be implemented later. Keep the hook wired
+        # IMPORTANT: Intervention patching will be implemented later. Keep the hook wired
         # so API behavior is already centered on artifact + diff state.
+        # Any future trajectory-bearing override must also replace simulation
+        # metadata atomically; eval tools read the served payload's simulation
+        # fields and would otherwise report stale base-artifact feasibility.
         return payload
 
     def intervention_diff(self) -> list[dict[str, Any]]:
