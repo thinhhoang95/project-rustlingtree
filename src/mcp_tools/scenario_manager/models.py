@@ -177,6 +177,30 @@ class FeasibilityEvaluationItem(BaseModel):
     simulation_message: str
 
 
+class ConflictFlightItem(BaseModel):
+    flight_number: str
+    icao24: str
+    flight_id: str
+    runway: str
+
+
+class ConflictEvaluationItem(BaseModel):
+    flight_a: ConflictFlightItem
+    flight_b: ConflictFlightItem
+    start_time: int
+    end_time: int
+    closest_time: int
+    closest_time_utc: str
+    latitude: float
+    longitude: float
+    lateral_distance_nmi: float
+    vertical_separation_ft: float
+    lateral_threshold_nmi: float
+    vertical_threshold_ft: float
+    severity: float
+    confidence: str
+
+
 class HealthResponse(BaseModel):
     status: str
     events_count: int

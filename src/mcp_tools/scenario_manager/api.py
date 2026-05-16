@@ -6,10 +6,11 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 
-from mcp_tools.evaluators import FeasibleEvaluator
+from mcp_tools.evaluators import ConflictEvaluator, FeasibleEvaluator
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import (
     ArrivalScheduleItem,
+    ConflictEvaluationItem,
     DepartureScheduleItem,
     FeasibilityEvaluationItem,
     HealthResponse,
@@ -45,6 +46,11 @@ def create_app() -> FastAPI:
     def feasibility(request: Request) -> list[dict[str, object]]:
         manager: ScenarioManager = request.app.state.scenario_manager
         return [asdict(item) for item in FeasibleEvaluator(manager).evaluate()]
+
+    @app.get("/tools/evals/conflicts", response_model=list[ConflictEvaluationItem])
+    def conflicts(request: Request) -> list[dict[str, object]]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        return [asdict(item) for item in ConflictEvaluator(manager).evaluate()]
 
     @app.get("/diff", response_model=list[dict[str, object]])
     def diff(request: Request) -> list[dict[str, object]]:
