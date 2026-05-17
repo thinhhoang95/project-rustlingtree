@@ -69,6 +69,11 @@ class ScenarioManager:
                     "runway": str(row["runway"]),
                 }
             )
+            payload = self._apply_diff(payload)
+            departure_time = int(payload.get("departure_time", row["event_time"]))
+            payload["departure_time"] = departure_time
+            payload["departure_time_utc"] = self._arrival_time_utc(payload, departure_time)
+            payload["runway"] = str(payload.get("runway") or row["runway"])
             schedule.append(payload)
         return schedule
 

@@ -201,6 +201,25 @@ class ConflictEvaluationItem(BaseModel):
     confidence: str
 
 
+class RunwayUseFlightItem(BaseModel):
+    flight_number: str
+    icao24: str
+    flight_id: str
+    operation: str
+    runway: str
+
+
+class RunwayOverlapEvaluationItem(BaseModel):
+    runway: str
+    use_a: RunwayUseFlightItem
+    use_b: RunwayUseFlightItem
+    start_time: int
+    end_time: int
+    overlapping_time: int
+    overlapping_time_utc: str
+    overlapping_duration: int
+
+
 class HealthResponse(BaseModel):
     status: str
     events_count: int

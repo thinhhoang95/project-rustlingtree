@@ -124,3 +124,70 @@ curl http://127.0.0.1:8000/tools/evals/conflicts
 - `confidence`: `confirmed` for conflicts in the reconstructed trajectory, or `possible` when only compression tolerance expansion creates an overlap.
 
 An empty array means no conflicts are detected among the served arrivals.
+
+## Runway Overlapping Uses
+
+`GET /tools/evals/runway-overlaps`
+
+Returns overlapping runway-use intervals across the current scenario-manager
+arrival and departure schedules. The result uses the served schedules, so it
+reflects the precomputed artifact after any scenario-manager diff has been
+applied.
+
+The evaluator applies fixed runway occupancy assumptions:
+
+- each departure occupies the runway for `90 s` from `departure_time`
+- each arrival occupies the runway for `60 s` from `time_at_last_event`, treated as the runway-threshold arrival time
+
+Runway identifiers are normalized for matching. `RW35C`, `RWY35C`, and `35C`
+match the same runway end, and reciprocal ends are grouped as one physical
+runway surface. For example, `RW35C` and `17C` both report under `17C/35C`.
+
+### Example Request
+
+```bash
+curl http://127.0.0.1:8000/tools/evals/runway-overlaps
+```
+
+### Example Response
+
+```json
+[
+  {
+    "runway": "17C/35C",
+    "use_a": {
+      "flight_number": "AAL123",
+      "icao24": "a1b2c3",
+      "flight_id": "AAL123M1a1b2c3",
+      "operation": "arrival",
+      "runway": "RW35C"
+    },
+    "use_b": {
+      "flight_number": "DAL456",
+      "icao24": "d4e5f6",
+      "flight_id": "DAL456M1d4e5f6",
+      "operation": "departure",
+      "runway": "17C"
+    },
+    "start_time": 1775021230,
+    "end_time": 1775021260,
+    "overlapping_time": 1775021230,
+    "overlapping_time_utc": "2026-04-01T07:27:10Z",
+    "overlapping_duration": 30
+  }
+]
+```
+
+### Fields
+
+- `runway`: normalized physical runway key used for overlap grouping.
+- `use_a`, `use_b`: the overlapping runway uses, ordered by interval start time.
+- `use_a.operation`, `use_b.operation`: either `arrival` or `departure`.
+- `use_a.runway`, `use_b.runway`: served runway identifier for each operation before physical-runway grouping.
+- `start_time`, `end_time`: overlap interval in epoch seconds.
+- `overlapping_time`: timestamp when the overlap begins; equivalent to `start_time`.
+- `overlapping_time_utc`: UTC rendering of `overlapping_time`.
+- `overlapping_duration`: overlap duration in seconds.
+
+An empty array means no overlapping runway uses are detected among the served
+arrivals and departures.

@@ -183,6 +183,29 @@ def test_departure_schedule_returns_adsb_trajectory_and_skips_missing_flights(tm
     assert departure["last_time"] == 140
 
 
+def test_departure_schedule_uses_diff_mutated_payload(tmp_path: Path, monkeypatch) -> None:
+    manager = ScenarioManager(write_fixture_resources(tmp_path))
+
+    def apply_diff(payload: dict[str, object]) -> dict[str, object]:
+        if payload.get("flight_id") != "DEP1":
+            return payload
+        diffed = dict(payload)
+        diffed["departure_time"] = 115
+        diffed["runway"] = "RW18R"
+        return diffed
+
+    monkeypatch.setattr(manager, "_apply_diff", apply_diff)
+
+    schedule = manager.departure_schedule()
+
+    assert len(schedule) == 1
+    departure = schedule[0]
+    assert departure["flight_id"] == "DEP1"
+    assert departure["departure_time"] == 115
+    assert departure["departure_time_utc"] == "1970-01-01T00:01:55Z"
+    assert departure["runway"] == "RW18R"
+
+
 def test_arrival_schedule_uses_artifact_start_time_and_preserves_compressed_points(tmp_path: Path) -> None:
     manager = ScenarioManager(write_fixture_resources(tmp_path))
 
@@ -261,6 +284,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         "/arrivals",
         "/tools/evals/feasibility",
         "/tools/evals/conflicts",
+        "/tools/evals/runway-overlaps",
         "/diff",
     } <= route_paths
     assert manager.health()["arrivals_missing_trajectories_count"] == 1
@@ -273,11 +297,13 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         arrivals = client.get("/arrivals")
         feasibility = client.get("/tools/evals/feasibility")
         conflicts = client.get("/tools/evals/conflicts")
+        runway_overlaps = client.get("/tools/evals/runway-overlaps")
 
     assert departures.status_code == 200
     assert arrivals.status_code == 200
     assert feasibility.status_code == 200
     assert conflicts.status_code == 200
+    assert runway_overlaps.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
     assert arrivals.json()[0]["cas_profile"]["columns"] == ["time", "cas_kts"]
@@ -301,3 +327,4 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         }
     ]
     assert conflicts.json() == []
+    assert runway_overlaps.json() == []

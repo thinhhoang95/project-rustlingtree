@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 
-from mcp_tools.evaluators import ConflictEvaluator, FeasibleEvaluator
+from mcp_tools.evaluators import ConflictEvaluator, FeasibleEvaluator, RunwayOverlapEvaluator
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import (
     ArrivalScheduleItem,
@@ -14,6 +14,7 @@ from mcp_tools.scenario_manager.models import (
     DepartureScheduleItem,
     FeasibilityEvaluationItem,
     HealthResponse,
+    RunwayOverlapEvaluationItem,
     ScenarioResourceConfig,
 )
 
@@ -51,6 +52,11 @@ def create_app() -> FastAPI:
     def conflicts(request: Request) -> list[dict[str, object]]:
         manager: ScenarioManager = request.app.state.scenario_manager
         return [asdict(item) for item in ConflictEvaluator(manager).evaluate()]
+
+    @app.get("/tools/evals/runway-overlaps", response_model=list[RunwayOverlapEvaluationItem])
+    def runway_overlaps(request: Request) -> list[dict[str, object]]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        return [asdict(item) for item in RunwayOverlapEvaluator(manager).evaluate()]
 
     @app.get("/diff", response_model=list[dict[str, object]])
     def diff(request: Request) -> list[dict[str, object]]:
