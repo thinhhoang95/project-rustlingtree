@@ -741,6 +741,10 @@ def _simulation_message_counts(results: list[ArtifactResult]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _flight_payload_sort_key(payload: dict[str, Any]) -> tuple[int, str]:
+    return int(payload["first_time"]), str(payload["flight_id"])
+
+
 def _print_precompute_summary(
     *,
     console: Console,
@@ -969,7 +973,7 @@ def precompute_artifacts(
         with console.status("[bold]Writing artifact outputs...[/bold]"):
             output_dir.mkdir(parents=True, exist_ok=True)
             flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
-            write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+            write_jsonl(flights_path, sorted(payloads, key=_flight_payload_sort_key))
             manifest = _manifest(
                 results=results,
                 events_path=events_path,
@@ -995,7 +999,7 @@ def precompute_artifacts(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
         flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
-        write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+        write_jsonl(flights_path, sorted(payloads, key=_flight_payload_sort_key))
         manifest = _manifest(
             results=results,
             events_path=events_path,

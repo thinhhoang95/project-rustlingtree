@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
+import datetime as dt
 from unittest.mock import patch
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -303,13 +304,13 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(fix_sequences["flight_id"].tolist(), ["AAL1061M1abc123", "AAL1061M2abc123"])
 
     def test_build_output_path_uses_local_range_and_airport(self) -> None:
-        from_datetime = pd.Timestamp("2025-04-01T00:00:00")
-        to_datetime = pd.Timestamp("2025-04-01T23:59:59")
+        from_datetime = dt.datetime(2025, 4, 1, 0, 0, 0)
+        to_datetime = dt.datetime(2025, 4, 1, 23, 59, 59)
 
         output_path = build_output_path(
             Path("data/adsb/catalogs"),
-            from_datetime.to_pydatetime(),
-            to_datetime.to_pydatetime(),
+            from_datetime,
+            to_datetime,
             ZoneInfo("America/Chicago"),
             "KDFW",
         )
@@ -360,9 +361,9 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
             output_dir = Path(tmpdir) / "catalogs"
             output_dir.mkdir()
             output_path = output_dir / "authoritative.csv"
-            inside_ts = int(pd.Timestamp("2025-04-01T05:00:59Z").timestamp())
-            outside_ts = int(pd.Timestamp("2025-03-31T23:00:00Z").timestamp())
-            departure_ts = int(pd.Timestamp("2025-04-01T12:00:00Z").timestamp())
+            inside_ts = int(dt.datetime(2025, 4, 1, 5, 0, 59, tzinfo=dt.UTC).timestamp())
+            outside_ts = int(dt.datetime(2025, 3, 31, 23, 0, 0, tzinfo=dt.UTC).timestamp())
+            departure_ts = int(dt.datetime(2025, 4, 1, 12, 0, 0, tzinfo=dt.UTC).timestamp())
 
             def fake_run_query(query: str, path: Path, trino_bin: str, token: str) -> None:
                 self.assertIn("day BETWEEN", query)
@@ -384,8 +385,8 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
                 side_effect=fake_run_query,
             ) as run_query_mock:
                 result_path = download_authoritative_departures_and_arrivals_catalog(
-                    from_datetime=pd.Timestamp("2025-04-01T00:00:00", tz="America/Chicago").to_pydatetime(),
-                    to_datetime=pd.Timestamp("2025-04-01T23:59:59", tz="America/Chicago").to_pydatetime(),
+                    from_datetime=dt.datetime(2025, 4, 1, 0, 0, 0, tzinfo=ZoneInfo("America/Chicago")),
+                    to_datetime=dt.datetime(2025, 4, 1, 23, 59, 59, tzinfo=ZoneInfo("America/Chicago")),
                     timezone=ZoneInfo("America/Chicago"),
                     output_dir=output_dir,
                     output_path=output_path,

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any
-
-from mcp_tools.scenario_manager.manager import ScenarioManager
+from typing import Any, Protocol
 
 _METERS_PER_NM = 1_852.0
+
+
+class ArrivalScheduleProvider(Protocol):
+    def arrival_schedule(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -22,7 +24,7 @@ class FeasibleFlight:
 
 @dataclass(frozen=True)
 class FeasibleEvaluator:
-    manager: ScenarioManager
+    manager: ArrivalScheduleProvider
 
     def evaluate(self) -> list[FeasibleFlight]:
         infeasible_flights: list[FeasibleFlight] = []

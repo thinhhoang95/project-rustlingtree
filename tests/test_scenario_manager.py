@@ -127,6 +127,8 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
 
 def test_resource_config_loads_default_entry_from_data_manifest(tmp_path: Path) -> None:
     config = write_fixture_resources(tmp_path)
+    assert config.simap_arrival_artifact_manifest_path is not None
+    assert config.adsb_compressed_metadata_path is not None
     data_manifest_path = tmp_path / "data_manifest.json"
     data_manifest_path.write_text(
         json.dumps(
@@ -276,7 +278,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr("mcp_tools.scenario_manager.api.ScenarioManager", lambda _config: manager)
     app = create_app()
 
-    route_paths = {route.path for route in app.routes}
+    route_paths = {str(getattr(route, "path", "")) for route in app.routes}
 
     assert {
         "/health",

@@ -105,8 +105,9 @@ def _validate_dataset_bounds(
     if valid_times.empty:
         raise ValueError("Loaded ADS-B tracks do not contain any timestamps.")
 
-    earliest_ts = int(valid_times.min())
-    latest_ts = int(valid_times.max())
+    valid_time_values = valid_times.to_numpy()
+    earliest_ts = int(valid_time_values.min())
+    latest_ts = int(valid_time_values.max())
     earliest_utc = dt.datetime.fromtimestamp(earliest_ts, tz=dt.timezone.utc)
     latest_utc = dt.datetime.fromtimestamp(latest_ts, tz=dt.timezone.utc)
     earliest_local = earliest_utc.astimezone(timezone)

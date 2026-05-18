@@ -3,11 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import math
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 import numpy as np
-
-from mcp_tools.scenario_manager.manager import ScenarioManager
 
 CONFLICT_ENVELOPE_RADIUS_NM = 5.0
 CONFLICT_ENVELOPE_HEIGHT_FL = 100.0
@@ -18,6 +16,10 @@ _FEET_PER_CONFLICT_HEIGHT_FL = 10.0
 _CONFLICT_ENVELOPE_HEIGHT_FT = CONFLICT_ENVELOPE_HEIGHT_FL * _FEET_PER_CONFLICT_HEIGHT_FL
 _DEFAULT_MERGE_GAP_S = 5.0
 _EPS = 1.0e-9
+
+
+class ArrivalScheduleProvider(Protocol):
+    def arrival_schedule(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ class ConflictEvent:
 
 @dataclass(frozen=True)
 class ConflictEvaluator:
-    manager: ScenarioManager
+    manager: ArrivalScheduleProvider
 
     def evaluate(self) -> list[ConflictEvent]:
         arrivals = self.manager.arrival_schedule()

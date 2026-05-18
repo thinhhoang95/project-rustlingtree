@@ -4,15 +4,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import math
 import re
-from typing import Any
-
-from mcp_tools.scenario_manager.manager import ScenarioManager
+from typing import Any, Protocol
 
 DEPARTURE_RUNWAY_OCCUPANCY_S = 90
 ARRIVAL_RUNWAY_OCCUPANCY_S = 60
 
 _RUNWAY_PATTERN = re.compile(r"^(\d{1,2})([LCR]?)$")
 _RUNWAY_SIDE_RECIPROCAL = {"L": "R", "R": "L", "C": "C", "": ""}
+
+
+class ScheduleProvider(Protocol):
+    def arrival_schedule(self) -> list[dict[str, Any]]: ...
+
+    def departure_schedule(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,7 @@ class RunwayOverlapEvent:
 
 @dataclass(frozen=True)
 class RunwayOverlapEvaluator:
-    manager: ScenarioManager
+    manager: ScheduleProvider
 
     def evaluate(self) -> list[RunwayOverlapEvent]:
         uses = [

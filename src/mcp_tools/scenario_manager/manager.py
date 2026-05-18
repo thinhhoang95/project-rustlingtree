@@ -89,7 +89,8 @@ class ScenarioManager:
             payload = self._apply_diff(dict(trajectory))
             time_at_first_fix = int(payload.get("first_time", fix_sequence["first_time"]))
             time_at_last_event = int(payload.get("last_time", fix_sequence["last_time"]))
-            base_route = payload.get("base_route") if isinstance(payload.get("base_route"), dict) else {}
+            raw_base_route = payload.get("base_route")
+            base_route: dict[str, Any] = dict(raw_base_route) if isinstance(raw_base_route, dict) else {}
             route_fix_sequence = self._route_fix_sequence(payload, fix_sequence, base_route)
             route_fix_count = self._route_fix_count(payload, fix_sequence, base_route, route_fix_sequence)
             atc_wait_point = payload.get("atc_wait_point") or payload.get("wait_atc_point") or base_route.get("atc_point")

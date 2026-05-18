@@ -7,7 +7,7 @@ from simap.units import ft_to_m
 from simap.units import kts_to_mps
 from simap import planned_cas_bounds_mps
 
-from tactical import (
+from simap.nlp_colloc.tactical import (
     AltitudeConstraint,
     TacticalCommand,
     TacticalCondition,
