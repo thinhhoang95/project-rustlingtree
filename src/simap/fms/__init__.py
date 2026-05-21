@@ -1,6 +1,8 @@
 """FMS longitudinal descent heuristic."""
 
 from .core import (
+    ATCSpeedSegment,
+    ATCSpeedSegmentInput,
     FMSPIConfig,
     FMSRequest,
     FMSResult,
@@ -18,6 +20,8 @@ from .holds import (
 )
 
 __all__ = [
+    "ATCSpeedSegment",
+    "ATCSpeedSegmentInput",
     "FMSPIConfig",
     "FMSRequest",
     "FMSResult",

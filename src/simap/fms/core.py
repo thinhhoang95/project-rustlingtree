@@ -4,13 +4,21 @@ import numpy as np
 from openap import aero
 
 from ..config import mode_for_s
-from .datatypes import FMSPIConfig, FMSRequest, FMSResult, FMSSpeedTargets
+from .datatypes import (
+    ATCSpeedSegment,
+    ATCSpeedSegmentInput,
+    FMSPIConfig,
+    FMSRequest,
+    FMSResult,
+    FMSSpeedTargets,
+)
 from .helpers import (
     _cas_from_tas,
     _copy_request,
     _drag,
     _ground_speed_mps,
     _idle_thrust,
+    _managed_target_cas_mps,
     _result_with_metadata,
     _simulate_level_segment,
     _stitch_results,
@@ -65,7 +73,7 @@ def simulate_fms_descent(request: FMSRequest) -> FMSResult:
             t_s=t_s,
             v_tas_mps=v_tas_mps,
         )
-        target_cas_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+        target_cas_mps = _managed_target_cas_mps(request=request, mode=mode, s_m=s_m, h_m=h_m)
         speed_error_mps = float(cas_mps - target_cas_mps)
         raw_pitch_rad = float(
             request.controller.nominal_pitch_rad
@@ -273,6 +281,8 @@ def plan_fms_descent(
 
 
 __all__ = [
+    "ATCSpeedSegment",
+    "ATCSpeedSegmentInput",
     "FMSPIConfig",
     "FMSRequest",
     "FMSResult",

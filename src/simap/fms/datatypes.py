@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..backends import PerformanceBackend
-from ..config import AircraftConfig, ModeConfig
+from ..config import AircraftConfig, ModeConfig, mode_for_s, planned_cas_bounds_mps
 from ..nlp_colloc.coupled import CoupledDescentPlanRequest
 from ..path_geometry import ReferencePath
 from ..units import fpm_to_mps, ft_to_m, kts_to_mps
@@ -40,6 +40,33 @@ class FMSSpeedTargets:
 
 
 @dataclass(frozen=True)
+class ATCSpeedSegment:
+    s_from_m: float
+    cas_mps: float
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.s_from_m):
+            raise ValueError("ATCSpeedSegment.s_from_m must be finite")
+        if not np.isfinite(self.cas_mps) or self.cas_mps <= 0.0:
+            raise ValueError(
+                f"ATCSpeedSegment at s_from_m={self.s_from_m:.3f} has invalid cas_mps={self.cas_mps:.3f}"
+            )
+
+
+ATCSpeedSegmentInput = ATCSpeedSegment | tuple[float, float]
+
+
+def _coerce_atc_speed_segment(segment: ATCSpeedSegmentInput) -> ATCSpeedSegment:
+    if isinstance(segment, ATCSpeedSegment):
+        return segment
+    try:
+        s_from_m, cas_mps = segment
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ATC speed segments must be ATCSpeedSegment instances or (s_from_m, cas_mps) pairs") from exc
+    return ATCSpeedSegment(s_from_m=float(s_from_m), cas_mps=float(cas_mps))
+
+
+@dataclass(frozen=True)
 class FMSPIConfig:
     nominal_pitch_rad: float = -np.deg2rad(3.0)
     kp_rad_per_mps: float = np.deg2rad(0.10)
@@ -70,6 +97,7 @@ class FMSRequest:
     dt_s: float = 0.5
     max_time_s: float = 7_200.0
     stop_at_reference_path_end: bool = False
+    atc_speed_segments: tuple[ATCSpeedSegmentInput, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -82,6 +110,60 @@ class FMSRequest:
             raise ValueError("start_s_m must lie on the reference path")
         if self.start_cas_mps <= 0.0:
             raise ValueError("start_cas_mps must be positive")
+        segments = tuple(_coerce_atc_speed_segment(segment) for segment in self.atc_speed_segments)
+        object.__setattr__(self, "atc_speed_segments", segments)
+        self._validate_atc_speed_segments()
+
+    def _base_target_cas_mps(self, s_m: float) -> float:
+        return float(self.speed_targets.for_mode(mode_for_s(self.cfg, s_m), h_m=None))
+
+    def _validate_atc_speed_segments(self) -> None:
+        seen_s_from: set[float] = set()
+        for segment in self.atc_speed_segments:
+            s_from_m = float(segment.s_from_m)
+            cas_mps = float(segment.cas_mps)
+            if s_from_m in seen_s_from:
+                raise ValueError(
+                    f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} duplicates s_from_m"
+                )
+            seen_s_from.add(s_from_m)
+            if s_from_m < 0.0 or s_from_m > self.start_s_m:
+                raise ValueError(
+                    f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} "
+                    "must lie within [0, start_s_m]"
+                )
+
+            base_at_acceptance = self._base_target_cas_mps(s_from_m)
+            if cas_mps >= base_at_acceptance - 1e-9:
+                raise ValueError(
+                    f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} "
+                    f"is not lower than base profile cas_mps={base_at_acceptance:.3f}"
+                )
+
+            validation_s_m = {0.0, s_from_m}
+            for gate_m in (self.cfg.final_gate_m, self.cfg.approach_gate_m):
+                if 0.0 <= gate_m <= s_from_m:
+                    validation_s_m.add(float(gate_m))
+                    validation_s_m.add(float(min(s_from_m, np.nextafter(gate_m, np.inf))))
+                    validation_s_m.add(float(max(0.0, np.nextafter(gate_m, -np.inf))))
+
+            for sample_s_m in validation_s_m:
+                if sample_s_m > s_from_m:
+                    continue
+                base_target_mps = self._base_target_cas_mps(sample_s_m)
+                if base_target_mps <= cas_mps + 1e-9:
+                    continue
+                lower_mps, upper_mps = planned_cas_bounds_mps(self.cfg, sample_s_m)
+                if cas_mps < lower_mps - 1e-9:
+                    raise ValueError(
+                        f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} "
+                        f"is below planned lower CAS bound {lower_mps:.3f} at s_m={sample_s_m:.3f}"
+                    )
+                if cas_mps > upper_mps + 1e-9:
+                    raise ValueError(
+                        f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} "
+                        f"is above planned upper CAS bound {upper_mps:.3f} at s_m={sample_s_m:.3f}"
+                    )
 
     @classmethod
     def from_coupled_request(
@@ -93,6 +175,7 @@ class FMSRequest:
         dt_s: float = 0.5,
         max_time_s: float = 7_200.0,
         controller: FMSPIConfig | None = None,
+        atc_speed_segments: tuple[ATCSpeedSegmentInput, ...] = (),
     ) -> "FMSRequest":
         from .helpers import infer_fms_speed_targets
 
@@ -109,6 +192,7 @@ class FMSRequest:
             controller=FMSPIConfig() if controller is None else controller,
             dt_s=dt_s,
             max_time_s=max_time_s,
+            atc_speed_segments=atc_speed_segments,
         )
 
 
@@ -173,6 +257,8 @@ class FMSResult:
 
 
 __all__ = [
+    "ATCSpeedSegment",
+    "ATCSpeedSegmentInput",
     "FMSPIConfig",
     "FMSRequest",
     "FMSResult",

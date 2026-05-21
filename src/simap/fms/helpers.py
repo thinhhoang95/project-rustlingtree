@@ -25,6 +25,21 @@ def infer_fms_speed_targets(request: CoupledDescentPlanRequest) -> FMSSpeedTarge
     )
 
 
+def _managed_target_cas_mps(
+    *,
+    request: FMSRequest,
+    mode: ModeConfig,
+    s_m: float,
+    h_m: float | None = None,
+) -> float:
+    base_target_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+    target_mps = float(base_target_mps)
+    for segment in request.atc_speed_segments:
+        if s_m <= segment.s_from_m + 1e-9 and base_target_mps > segment.cas_mps:
+            target_mps = min(target_mps, float(segment.cas_mps))
+    return target_mps
+
+
 def _cas_from_tas(
     *,
     weather: WeatherProvider,
@@ -127,6 +142,7 @@ def _copy_request(
         stop_at_reference_path_end=(
             request.stop_at_reference_path_end if stop_at_reference_path_end is None else stop_at_reference_path_end
         ),
+        atc_speed_segments=request.atc_speed_segments,
     )
 
 
@@ -188,7 +204,12 @@ def _simulate_level_segment(request: FMSRequest, *, tod_s_m: float) -> FMSResult
             t_s=0.0,
             v_cas_mps=request.start_cas_mps,
         )
-        target_cas_mps = request.speed_targets.for_mode(mode, h_m=request.start_h_m)
+        target_cas_mps = _managed_target_cas_mps(
+            request=request,
+            mode=mode,
+            s_m=start_s_m,
+            h_m=request.start_h_m,
+        )
         thrust_n = _drag(
             request=request,
             mode=mode,
@@ -253,7 +274,7 @@ def _simulate_level_segment(request: FMSRequest, *, tod_s_m: float) -> FMSResult
 
     while True:
         mode = mode_for_s(request.cfg, s_m)
-        target_cas_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+        target_cas_mps = _managed_target_cas_mps(request=request, mode=mode, s_m=s_m, h_m=h_m)
         drag_n = _drag(
             request=request,
             mode=mode,
