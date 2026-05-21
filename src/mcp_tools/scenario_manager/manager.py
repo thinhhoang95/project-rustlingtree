@@ -6,6 +6,13 @@ from typing import Any
 import pandas as pd
 
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
+from mcp_tools.scenario_manager.path_stretching import (
+    PathStretchSaveRequest,
+    PathStretchSimulationRequest,
+    apply_path_stretch_diff,
+    save_path_stretch,
+    simulate_path_stretch,
+)
 from mcp_tools.scenario_manager.resources import (
     load_compressed_flights,
     load_events,
@@ -32,6 +39,7 @@ class ScenarioManager:
             else {}
         )
         self.diff: list[dict[str, Any]] = []
+        self.path_stretch_drafts: dict[str, dict[str, Any]] = {}
         self._fix_sequence_by_flight_id = self._build_fix_sequence_index(self.fix_sequences)
 
     @staticmethod
@@ -155,15 +163,16 @@ class ScenarioManager:
         return str(token)
 
     def _apply_diff(self, payload: dict[str, Any]) -> dict[str, Any]:
-        # IMPORTANT: Intervention patching will be implemented later. Keep the hook wired
-        # so API behavior is already centered on artifact + diff state.
-        # Any future trajectory-bearing override must also replace simulation
-        # metadata atomically; eval tools read the served payload's simulation
-        # fields and would otherwise report stale base-artifact feasibility.
-        return payload
+        return apply_path_stretch_diff(payload, self.diff)
 
     def intervention_diff(self) -> list[dict[str, Any]]:
         return list(self.diff)
+
+    def simulate_path_stretch(self, request: PathStretchSimulationRequest) -> dict[str, Any]:
+        return simulate_path_stretch(self, request)
+
+    def save_path_stretch(self, flight_id: str, request: PathStretchSaveRequest) -> dict[str, Any]:
+        return save_path_stretch(self, flight_id, request)
 
     @staticmethod
     def _arrival_time_utc(_trajectory: dict[str, Any], arrival_time: int) -> str:

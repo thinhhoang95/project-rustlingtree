@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 
 from mcp_tools.advisors import FeasibilityAdvisor, SpeedControlAdvisor, VectoringAdvisor
 from mcp_tools.evaluators import ConflictEvaluator, FeasibleEvaluator, RunwayOverlapEvaluator
@@ -20,6 +20,10 @@ from mcp_tools.scenario_manager.models import (
     ScenarioResourceConfig,
     SpeedControlAdvisoryItem,
     VectoringAdvisoryItem,
+)
+from mcp_tools.scenario_manager.path_stretching import (
+    PathStretchSaveRequest,
+    PathStretchSimulationRequest,
 )
 
 
@@ -101,6 +105,29 @@ def create_app() -> FastAPI:
     def diff(request: Request) -> list[dict[str, object]]:
         manager: ScenarioManager = request.app.state.scenario_manager
         return manager.intervention_diff()
+
+    @app.post("/tools/path-stretch/simulate", response_model=dict[str, object])
+    def path_stretch_simulate(
+        request: Request,
+        body: PathStretchSimulationRequest,
+    ) -> dict[str, object]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        try:
+            return manager.simulate_path_stretch(body)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/diff/path-stretch/{flight_id}", response_model=dict[str, object])
+    def path_stretch_save(
+        request: Request,
+        flight_id: str,
+        body: PathStretchSaveRequest,
+    ) -> dict[str, object]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        try:
+            return manager.save_path_stretch(flight_id, body)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return app
 
