@@ -204,6 +204,7 @@ class ScenarioManager:
                 "events": self.config.events_path.as_posix(),
                 "landings_and_departures": self.config.events_path.as_posix(),
                 "fix_sequences": self.config.fix_sequences_path.as_posix(),
+                "fixes": self.config.fixes_path.as_posix(),
                 "simap_arrival_trajectories": self.config.simap_arrival_trajectories_path.as_posix(),
                 "simap_arrival_artifact_manifest": self.config.simap_arrival_artifact_manifest_path.as_posix()
                 if self.config.simap_arrival_artifact_manifest_path is not None

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from mcp_tools.advisors import FeasibilityAdvisory, SpeedControlAdvisory, VectoringAdvisory
 from mcp_tools.scenario_manager.api import create_app
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
@@ -114,12 +115,22 @@ def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
     )
     adsb_compressed_metadata_path = tmp_path / "metadata.json"
     adsb_compressed_metadata_path.write_text(json.dumps({"flight_count": 2}) + "\n", encoding="utf-8")
+    fixes_path = tmp_path / "fixes.csv"
+    fixes_path.write_text(
+        "identifier,latitude_deg,longitude_deg,fix_type,elevation_ft\n"
+        "FIXA,32.0,-97.0,fix,\n"
+        "FIXB,32.1,-97.1,fix,\n"
+        "FINAL35C,32.9,-97.0,fix,\n"
+        "RW35C,33.0,-97.0,runway,620\n",
+        encoding="utf-8",
+    )
 
     return ScenarioResourceConfig(
         events_path=events_path,
         fix_sequences_path=fix_sequences_path,
         simap_arrival_trajectories_path=simap_arrival_trajectories_path,
         adsb_compressed_trajectories_path=adsb_compressed_trajectories_path,
+        fixes_path=fixes_path,
         simap_arrival_artifact_manifest_path=simap_arrival_artifact_manifest_path,
         adsb_compressed_metadata_path=adsb_compressed_metadata_path,
     )
@@ -140,6 +151,7 @@ def test_resource_config_loads_default_entry_from_data_manifest(tmp_path: Path) 
                     "simap_arrival_artifact_manifest": config.simap_arrival_artifact_manifest_path.as_posix(),
                     "adsb_compressed_trajectories": config.adsb_compressed_trajectories_path.as_posix(),
                     "adsb_compressed_metadata": config.adsb_compressed_metadata_path.as_posix(),
+                    "fixes": config.fixes_path.as_posix(),
                     "default": True,
                 },
                 "2025-04-02": {
@@ -165,6 +177,7 @@ def test_resource_config_loads_default_entry_from_data_manifest(tmp_path: Path) 
     assert loaded.simap_arrival_artifact_manifest_path == config.simap_arrival_artifact_manifest_path
     assert loaded.adsb_compressed_trajectories_path == config.adsb_compressed_trajectories_path
     assert loaded.adsb_compressed_metadata_path == config.adsb_compressed_metadata_path
+    assert loaded.fixes_path == config.fixes_path
 
 
 def test_departure_schedule_returns_adsb_trajectory_and_skips_missing_flights(tmp_path: Path) -> None:
@@ -276,6 +289,89 @@ def test_health_reports_missing_arrival_trajectories(tmp_path: Path) -> None:
 def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> None:
     manager = ScenarioManager(write_fixture_resources(tmp_path))
     monkeypatch.setattr("mcp_tools.scenario_manager.api.ScenarioManager", lambda _config: manager)
+
+    class FakeFeasibilityAdvisor:
+        def __init__(self, _manager: ScenarioManager) -> None:
+            pass
+
+        def evaluate(self, flight_id: str | None = None) -> list[FeasibilityAdvisory]:
+            assert flight_id == "ARR1"
+            return [
+                FeasibilityAdvisory(
+                    flight_number="CALLARR1",
+                    icao24="arr001",
+                    flight_id="ARR1",
+                    runway="RW35C",
+                    miles_to_gain_nmi=2.0,
+                    miles_to_gain_m=3_704.0,
+                    minutes_to_gain=4.0,
+                    baseline_success=False,
+                    baseline_message="infeasible",
+                    what_if_success=True,
+                    what_if_message="ok",
+                    baseline_time_s=100.0,
+                    what_if_time_s=340.0,
+                    search_converged=True,
+                )
+            ]
+
+    class FakeVectoringAdvisor:
+        def __init__(self, _manager: ScenarioManager) -> None:
+            pass
+
+        def advise(self, *, flight_id: str, extra_distance_nmi: float) -> VectoringAdvisory:
+            assert flight_id == "ARR1"
+            assert extra_distance_nmi == 2.0
+            return VectoringAdvisory(
+                flight_number="CALLARR1",
+                icao24="arr001",
+                flight_id="ARR1",
+                runway="RW35C",
+                miles_to_gain_nmi=2.0,
+                minutes_to_gain=3.0,
+                baseline_success=False,
+                baseline_message="infeasible",
+                what_if_success=False,
+                what_if_message="still infeasible",
+                baseline_time_s=100.0,
+                what_if_time_s=280.0,
+                requested_extension_nmi=2.0,
+                requested_extension_m=3_704.0,
+                required_feasibility_miles_nmi=4.0,
+                required_feasibility_m=7_408.0,
+                feasibility_search_converged=True,
+            )
+
+    class FakeSpeedControlAdvisor:
+        def __init__(self, _manager: ScenarioManager) -> None:
+            pass
+
+        def advise(self, *, flight_id: str, s_m: float, cas_kts: float) -> SpeedControlAdvisory:
+            assert flight_id == "ARR1"
+            assert s_m == 50_000.0
+            assert cas_kts == 180.0
+            return SpeedControlAdvisory(
+                flight_number="CALLARR1",
+                icao24="arr001",
+                flight_id="ARR1",
+                runway="RW35C",
+                miles_to_gain_nmi=0.0,
+                minutes_to_gain=2.0,
+                baseline_success=True,
+                baseline_message="ok",
+                what_if_success=True,
+                what_if_message="ok",
+                baseline_time_s=100.0,
+                what_if_time_s=220.0,
+                s_m=50_000.0,
+                cas_kts=180.0,
+                equivalent_vectoring_miles_nmi=6.0,
+                equivalent_vectoring_m=11_112.0,
+            )
+
+    monkeypatch.setattr("mcp_tools.scenario_manager.api.FeasibilityAdvisor", FakeFeasibilityAdvisor)
+    monkeypatch.setattr("mcp_tools.scenario_manager.api.VectoringAdvisor", FakeVectoringAdvisor)
+    monkeypatch.setattr("mcp_tools.scenario_manager.api.SpeedControlAdvisor", FakeSpeedControlAdvisor)
     app = create_app()
 
     route_paths = {str(getattr(route, "path", "")) for route in app.routes}
@@ -287,6 +383,9 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         "/tools/evals/feasibility",
         "/tools/evals/conflicts",
         "/tools/evals/runway-overlaps",
+        "/tools/advisors/feasibility",
+        "/tools/advisors/vectoring",
+        "/tools/advisors/speed-control",
         "/diff",
     } <= route_paths
     assert manager.health()["arrivals_missing_trajectories_count"] == 1
@@ -300,12 +399,24 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         feasibility = client.get("/tools/evals/feasibility")
         conflicts = client.get("/tools/evals/conflicts")
         runway_overlaps = client.get("/tools/evals/runway-overlaps")
+        advisory_feasibility = client.get("/tools/advisors/feasibility", params={"flight_id": "ARR1"})
+        advisory_vectoring = client.get(
+            "/tools/advisors/vectoring",
+            params={"flight_id": "ARR1", "extra_distance_nmi": 2.0},
+        )
+        advisory_speed = client.get(
+            "/tools/advisors/speed-control",
+            params={"flight_id": "ARR1", "s_m": 50_000.0, "cas_kts": 180.0},
+        )
 
     assert departures.status_code == 200
     assert arrivals.status_code == 200
     assert feasibility.status_code == 200
     assert conflicts.status_code == 200
     assert runway_overlaps.status_code == 200
+    assert advisory_feasibility.status_code == 200
+    assert advisory_vectoring.status_code == 200
+    assert advisory_speed.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
     assert arrivals.json()[0]["cas_profile"]["columns"] == ["time", "cas_kts"]
@@ -330,3 +441,6 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     ]
     assert conflicts.json() == []
     assert runway_overlaps.json() == []
+    assert advisory_feasibility.json()[0]["miles_to_gain_nmi"] == 2.0
+    assert advisory_vectoring.json()["required_feasibility_miles_nmi"] == 4.0
+    assert advisory_speed.json()["equivalent_vectoring_miles_nmi"] == 6.0

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+DEFAULT_FIXES_PATH = Path("data/kdfw_procs/airport_related_fixes.csv")
 
 
 def project_root() -> Path:
@@ -18,6 +20,7 @@ class ScenarioResourceConfig:
     fix_sequences_path: Path
     simap_arrival_trajectories_path: Path
     adsb_compressed_trajectories_path: Path
+    fixes_path: Path = field(default_factory=lambda: project_root() / DEFAULT_FIXES_PATH)
     data_manifest_path: Path | None = None
     data_date: str | None = None
     simap_arrival_artifact_manifest_path: Path | None = None
@@ -63,12 +66,14 @@ class ScenarioResourceConfig:
             root,
             manifest_path,
         )
+        fixes_path = cls._optional_manifest_path(entry, "fixes", root, manifest_path) or root / DEFAULT_FIXES_PATH
 
         return cls(
             events_path=events_path,
             fix_sequences_path=fix_sequences_path,
             simap_arrival_trajectories_path=simap_arrival_trajectories_path,
             adsb_compressed_trajectories_path=adsb_compressed_trajectories_path,
+            fixes_path=fixes_path,
             data_manifest_path=manifest_path,
             data_date=date_label,
             simap_arrival_artifact_manifest_path=simap_arrival_artifact_manifest_path,
@@ -218,6 +223,41 @@ class RunwayOverlapEvaluationItem(BaseModel):
     overlapping_time: int
     overlapping_time_utc: str
     overlapping_duration: int
+
+
+class BaseAdvisoryItem(BaseModel):
+    flight_number: str
+    icao24: str
+    flight_id: str
+    runway: str
+    miles_to_gain_nmi: float
+    minutes_to_gain: float
+    baseline_success: bool
+    baseline_message: str
+    what_if_success: bool
+    what_if_message: str
+    baseline_time_s: float
+    what_if_time_s: float
+
+
+class FeasibilityAdvisoryItem(BaseAdvisoryItem):
+    miles_to_gain_m: float
+    search_converged: bool
+
+
+class VectoringAdvisoryItem(BaseAdvisoryItem):
+    requested_extension_nmi: float
+    requested_extension_m: float
+    required_feasibility_miles_nmi: float
+    required_feasibility_m: float
+    feasibility_search_converged: bool
+
+
+class SpeedControlAdvisoryItem(BaseAdvisoryItem):
+    s_m: float
+    cas_kts: float
+    equivalent_vectoring_miles_nmi: float
+    equivalent_vectoring_m: float
 
 
 class HealthResponse(BaseModel):

@@ -1,16 +1,64 @@
-# Advisory Tools 
+# Advisory Tools
 
-Advisory Tools are tools that could provide additional context on demand to help the user or agent to plan their course of action. Compared to Evaluators, Advisory Tools will provide answers to usual what-if questions, such as how many more miles are needed to successfully clear the feasibility condition, how many seconds will be added if we stretch the path by x nautical miles (along-track), or how many extra seconds will be gained if a speed intervention is conducted.
+Advisory tools provide on-demand context for planning interventions. Compared
+to evaluators, they answer what-if questions: how many more along-track miles
+are needed to make an arrival feasible, how much time a vectoring extension
+adds, or how much time a lower speed instruction gains.
+
+## Important Approach Revision
+
+Do not use `simulation.final_threshold_error_m` as the advisory
+`miles_to_gain` source. That field is useful diagnostic metadata for the served
+trajectory, but it is not reliable as the additional along-track distance needed
+to make a longitudinal profile feasible. In current bichannel artifacts it is a
+final threshold-position error, while infeasible longitudinal profiles can also
+be threshold-truncated with substantial altitude remaining.
+
+Advisors should instead rebuild a longitudinal `FMSRequest` from the served
+arrival payload, then recompute baseline and what-if profiles. This keeps the
+answer aligned with the active ScenarioManager view, including future diff
+application, and avoids mixing base-artifact metadata with advisory semantics.
 
 ## Advisory Tool Output
-Two things that need to be output:
-- (Along-track) Miles-to-gain (Extra nautical miles). Positive means more nautical miles to be covered.
-- Minutes-to-gain (Extra flight time minutes). Positive means the flight time is longer.
 
-## Three Advisory Tools 
-### Basic Operations
-1. Feasibility Advisor: will return the remaining (along-track) nautical miles that need to be covered through path stretching (vectoring). It is shown that this distance is invariant to where the stretch is placed. I think in the metadata, in the computation of the longitudinal profile of infeasible trajectory had already contained this information, thus the feasibility advisor will simply return this value. Just to be sure that the correct value is returned, given the context that multiple versions could exist in the ScenarioManager, like the precomputed artifact and the applied diff. For the computation time, I think we use the same technique as the Speed control advisor below (direct longitudinal profile computation then subtract the difference).
-2. Vectoring advisor: if the along track distance is extended by some value x; obviously the miles-to-gain equal to whatever was input, but please compute the minutes-to-gain in two cases:
-  - Because in managed descent, the Top-of-Descent (TOD) in stretched path could be pushed to later, the idea is that the mintutes-to-gain is due to x with pre-TOD cruise speed.
-  - For infeasible flight, use the Feasibility Advisor first to cover the "infeasible part" first, then the remaining of x with the pre Top-of-Descent cruise speed. 
-3. Speed control advisor: given some along-track station s_m value, and the new prescribed Calibrated Airspeed value, return the Miles-to-gain and the Minutes-to-gain. I had tried to derive an analytical way to solve this but I think the best way is to launch two longitudinal profile calculation attempts, and take differences. It is simpler and computationally quite the same to the best analytical method.
+Core output fields:
+
+- `miles_to_gain_nmi`: extra along-track route miles. Positive means more path
+  distance is flown.
+- `minutes_to_gain`: extra flight time minutes. Positive means the flight time
+  is longer.
+- Baseline and what-if planner success/message fields, so the caller can see
+  whether the advisory is based on a feasible profile.
+
+For speed-only advisories, the actual route distance does not change, so
+`miles_to_gain_nmi` should be `0.0`. Return an additional
+`equivalent_vectoring_miles_nmi` field that converts the time gain into an
+equivalent route-extension distance using the baseline pre-TOD/level-segment
+groundspeed, falling back to initial groundspeed when no level segment exists.
+
+## Three Advisory Tools
+
+1. Feasibility Advisor
+   - Rebuild the baseline longitudinal profile from the served arrival.
+   - If the baseline is feasible, return zero miles and zero minutes.
+   - If the baseline is infeasible, prepend virtual along-track distance to the
+     reference path and search for the smallest extension that makes
+     `plan_fms_descent()` succeed.
+   - Use bracket doubling followed by bisection to the configured TOD tolerance.
+
+2. Vectoring Advisor
+   - Given an extra along-track distance `x`, extend the reference path by `x`
+     and recompute the profile.
+   - Return `miles_to_gain_nmi = x`.
+   - Compute `minutes_to_gain` from the recomputed profile time delta, not from
+     a fixed cruise-speed shortcut.
+   - Include the feasibility-advisor required distance for context.
+
+3. Speed-Control Advisor
+   - Given an along-track station `s_m` and lower prescribed CAS, add an
+     `ATCSpeedSegment` at that station and recompute the profile.
+   - V1 supports reductions only. The requested CAS must be lower than the base
+     managed profile at the acceptance station and within existing planned CAS
+     bounds.
+   - Return actual route miles as `0.0`, plus `minutes_to_gain` and
+     `equivalent_vectoring_miles_nmi`.
