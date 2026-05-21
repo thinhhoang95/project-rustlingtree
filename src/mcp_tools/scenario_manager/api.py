@@ -25,6 +25,10 @@ from mcp_tools.scenario_manager.path_stretching import (
     PathStretchSaveRequest,
     PathStretchSimulationRequest,
 )
+from mcp_tools.scenario_manager.speed_intervention import (
+    SpeedInterventionSaveRequest,
+    SpeedInterventionSimulationRequest,
+)
 
 
 @asynccontextmanager
@@ -126,6 +130,29 @@ def create_app() -> FastAPI:
         manager: ScenarioManager = request.app.state.scenario_manager
         try:
             return manager.save_path_stretch(flight_id, body)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/tools/speed-intervention/simulate", response_model=dict[str, object])
+    def speed_intervention_simulate(
+        request: Request,
+        body: SpeedInterventionSimulationRequest,
+    ) -> dict[str, object]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        try:
+            return manager.simulate_speed_intervention(body)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/diff/speed-intervention/{flight_id}", response_model=dict[str, object])
+    def speed_intervention_save(
+        request: Request,
+        flight_id: str,
+        body: SpeedInterventionSaveRequest,
+    ) -> dict[str, object]:
+        manager: ScenarioManager = request.app.state.scenario_manager
+        try:
+            return manager.save_speed_intervention(flight_id, body)
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

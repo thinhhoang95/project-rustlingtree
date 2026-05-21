@@ -13,6 +13,12 @@ from mcp_tools.scenario_manager.path_stretching import (
     save_path_stretch,
     simulate_path_stretch,
 )
+from mcp_tools.scenario_manager.speed_intervention import (
+    SpeedInterventionSaveRequest,
+    SpeedInterventionSimulationRequest,
+    save_speed_intervention,
+    simulate_speed_intervention,
+)
 from mcp_tools.scenario_manager.resources import (
     load_compressed_flights,
     load_events,
@@ -40,6 +46,7 @@ class ScenarioManager:
         )
         self.diff: list[dict[str, Any]] = []
         self.path_stretch_drafts: dict[str, dict[str, Any]] = {}
+        self.speed_intervention_drafts: dict[str, dict[str, Any]] = {}
         self._fix_sequence_by_flight_id = self._build_fix_sequence_index(self.fix_sequences)
 
     @staticmethod
@@ -173,6 +180,12 @@ class ScenarioManager:
 
     def save_path_stretch(self, flight_id: str, request: PathStretchSaveRequest) -> dict[str, Any]:
         return save_path_stretch(self, flight_id, request)
+
+    def simulate_speed_intervention(self, request: SpeedInterventionSimulationRequest) -> dict[str, Any]:
+        return simulate_speed_intervention(self, request)
+
+    def save_speed_intervention(self, flight_id: str, request: SpeedInterventionSaveRequest) -> dict[str, Any]:
+        return save_speed_intervention(self, flight_id, request)
 
     @staticmethod
     def _arrival_time_utc(_trajectory: dict[str, Any], arrival_time: int) -> str:

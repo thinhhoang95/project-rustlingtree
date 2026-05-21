@@ -389,6 +389,8 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         "/diff",
         "/tools/path-stretch/simulate",
         "/diff/path-stretch/{flight_id}",
+        "/tools/speed-intervention/simulate",
+        "/diff/speed-intervention/{flight_id}",
     } <= route_paths
     assert manager.health()["arrivals_missing_trajectories_count"] == 1
     assert [item["flight_id"] for item in manager.departure_schedule()] == ["DEP1"]

@@ -221,7 +221,7 @@ def save_path_stretch(
         record
         for record in manager.diff
         if not (
-            record.get("type") == "path-stretch"
+            record.get("type") in {"path-stretch", "speed-intervention"}
             and str(record.get("flight_id", "")) == flight_id
         )
     ]
@@ -236,7 +236,7 @@ def apply_path_stretch_diff(payload: dict[str, Any], diff: list[dict[str, Any]])
     flight_id = str(payload.get("flight_id", ""))
     applied = dict(payload)
     for record in diff:
-        if record.get("type") != "path-stretch" or str(record.get("flight_id", "")) != flight_id:
+        if record.get("type") not in {"path-stretch", "speed-intervention"} or str(record.get("flight_id", "")) != flight_id:
             continue
         overrides = record.get("overrides")
         if not isinstance(overrides, dict):
@@ -270,6 +270,7 @@ _TRAJECTORY_OVERRIDE_FIELDS = {
     "atc_wait_point",
     "wait_atc_point",
     "path_stretch",
+    "speed_intervention",
 }
 
 
