@@ -21,6 +21,7 @@ class SpeedControlAdvisor:
     planner: ProfilePlanner = ProfilePlanner()
 
     def advise(self, *, flight_id: str, s_m: float, cas_kts: float) -> SpeedControlAdvisory:
+        """Answer: what happens if this arrival accepts one lower-CAS instruction?"""
         s_m = _finite_nonnegative(s_m, "s_m")
         cas_kts = _finite_positive(cas_kts, "cas_kts")
         arrival = arrivals_for(self.manager, flight_id=flight_id)[0]

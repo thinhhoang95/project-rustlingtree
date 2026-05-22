@@ -20,6 +20,7 @@ class VectoringAdvisor:
     planner: ProfilePlanner = ProfilePlanner()
 
     def advise(self, *, flight_id: str, extra_distance_nmi: float) -> VectoringAdvisory:
+        """Answer: what happens if this arrival gets N extra nautical miles?"""
         extra_distance_nmi = _finite_nonnegative(extra_distance_nmi, "extra_distance_nmi")
         arrival = arrivals_for(self.manager, flight_id=flight_id)[0]
         profile = self.planner.build(arrival, resolve_fixes_path(self.manager))

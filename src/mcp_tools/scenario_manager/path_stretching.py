@@ -106,6 +106,7 @@ def simulate_path_stretch(
     manager: Any,
     request: PathStretchSimulationRequest,
 ) -> dict[str, Any]:
+    """Answer: what trajectory results from editing this arrival's lateral route?"""
     flight_id = request.flight_id.strip()
     if not flight_id:
         raise ValueError("flight_id is required")
@@ -220,6 +221,7 @@ def save_path_stretch(
     flight_id: str,
     request: PathStretchSaveRequest,
 ) -> dict[str, Any]:
+    """Answer: can this path-stretch draft become the active arrival trajectory?"""
     flight_id = flight_id.strip()
     draft = manager.path_stretch_drafts.get(request.draft_id)
     if draft is None:

@@ -72,6 +72,7 @@ def create_app() -> FastAPI:
 
     @app.get("/tools/advisors/feasibility", response_model=list[FeasibilityAdvisoryItem])
     def advisory_feasibility(request: Request, flight_id: str | None = None) -> list[dict[str, object]]:
+        """Answer: how much extra upstream distance is needed for vertical feasibility?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         return [asdict(item) for item in FeasibilityAdvisor(manager).evaluate(flight_id=flight_id)]
 
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
         flight_id: str,
         extra_distance_nmi: float,
     ) -> dict[str, object]:
+        """Answer: what happens if this arrival gets N extra nautical miles?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         return asdict(
             VectoringAdvisor(manager).advise(
@@ -96,6 +98,7 @@ def create_app() -> FastAPI:
         s_m: float,
         cas_kts: float,
     ) -> dict[str, object]:
+        """Answer: what happens if this arrival accepts one lower-CAS instruction?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         return asdict(
             SpeedControlAdvisor(manager).advise(
@@ -107,6 +110,7 @@ def create_app() -> FastAPI:
 
     @app.get("/diff", response_model=list[dict[str, object]])
     def diff(request: Request) -> list[dict[str, object]]:
+        """Answer: which trajectory edit diffs are currently active?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         return manager.intervention_diff()
 
@@ -115,6 +119,7 @@ def create_app() -> FastAPI:
         request: Request,
         body: PathStretchSimulationRequest,
     ) -> dict[str, object]:
+        """Answer: what trajectory results from editing this arrival's lateral route?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         try:
             return manager.simulate_path_stretch(body)
@@ -127,6 +132,7 @@ def create_app() -> FastAPI:
         flight_id: str,
         body: PathStretchSaveRequest,
     ) -> dict[str, object]:
+        """Answer: can this path-stretch draft become the active arrival trajectory?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         try:
             return manager.save_path_stretch(flight_id, body)
@@ -138,6 +144,7 @@ def create_app() -> FastAPI:
         request: Request,
         body: SpeedInterventionSimulationRequest,
     ) -> dict[str, object]:
+        """Answer: what trajectory results from adding these speed advisories?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         try:
             return manager.simulate_speed_intervention(body)
@@ -150,6 +157,7 @@ def create_app() -> FastAPI:
         flight_id: str,
         body: SpeedInterventionSaveRequest,
     ) -> dict[str, object]:
+        """Answer: can this speed-intervention draft become the active trajectory?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         try:
             return manager.save_speed_intervention(flight_id, body)

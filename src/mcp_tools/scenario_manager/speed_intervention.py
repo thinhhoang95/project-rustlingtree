@@ -57,6 +57,7 @@ def simulate_speed_intervention(
     manager: Any,
     request: SpeedInterventionSimulationRequest,
 ) -> dict[str, Any]:
+    """Answer: what trajectory results from adding these speed advisories?"""
     flight_id = request.flight_id.strip()
     if not flight_id:
         raise ValueError("flight_id is required")
@@ -171,6 +172,7 @@ def save_speed_intervention(
     flight_id: str,
     request: SpeedInterventionSaveRequest,
 ) -> dict[str, Any]:
+    """Answer: can this speed-intervention draft become the active trajectory?"""
     flight_id = flight_id.strip()
     draft = manager.speed_intervention_drafts.get(request.draft_id)
     if draft is None:

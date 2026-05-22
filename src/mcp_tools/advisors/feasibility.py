@@ -23,6 +23,7 @@ class FeasibilityAdvisor:
     max_extension_nmi: float = 256.0
 
     def evaluate(self, flight_id: str | None = None) -> list[FeasibilityAdvisory]:
+        """Answer: how much extra upstream distance is needed for vertical feasibility?"""
         fixes_path = resolve_fixes_path(self.manager)
         advisories: list[FeasibilityAdvisory] = []
         for arrival in arrivals_for(self.manager, flight_id=flight_id):
@@ -44,6 +45,7 @@ class FeasibilityAdvisor:
         *,
         baseline: PlannedProfile | None = None,
     ) -> FeasibilityAdvisory:
+        """Answer feasibility distance for one rebuilt arrival profile."""
         baseline = self.planner.plan(profile) if baseline is None else baseline
         if baseline.success:
             return _advisory(
