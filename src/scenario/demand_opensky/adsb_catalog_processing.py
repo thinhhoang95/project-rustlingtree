@@ -142,7 +142,7 @@ def _runway_heading_by_identifier(thresholds: pd.DataFrame) -> dict[str, float]:
 
 
 def _nearest_valid_heading(positions: pd.DataFrame, event_index: int) -> float | None:
-    headings = pd.to_numeric(positions["heading"], errors="coerce").to_numpy(dtype=float)
+    headings = np.asarray(pd.to_numeric(positions["heading"], errors="coerce"), dtype=float)
     valid_indices = np.flatnonzero(np.isfinite(headings))
     if len(valid_indices) == 0:
         return None
@@ -171,7 +171,7 @@ def classify_flight_track(
 
     lats = positions["lat"].to_numpy(dtype=float)
     lons = positions["lon"].to_numpy(dtype=float)
-    altitudes = pd.to_numeric(positions["geoaltitude"], errors="coerce").to_numpy(dtype=float)
+    altitudes = np.asarray(pd.to_numeric(positions["geoaltitude"], errors="coerce"), dtype=float)
 
     best_candidate: ThresholdCandidate | None = None
     best_threshold_row: RunwayThresholdRecord | None = None

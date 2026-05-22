@@ -85,6 +85,7 @@ class SeedState:
     geoaltitude_m: float
     heading_deg: float | None
     ground_speed_mps: float
+    cas_mps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -540,13 +541,18 @@ def _build_request_bundle(
     if fms_dt_s <= 0.0:
         raise ValueError("fms_dt_s must be positive")
     h_m = max(float(seed.geoaltitude_m), 1.0)
-    cas_mps = float(
-        aero.tas2cas(
-            max(seed.ground_speed_mps, 1.0),
-            h_m,
-            dT=openap_dT(0.0),
+    if seed.cas_mps is None:
+        cas_mps = float(
+            aero.tas2cas(
+                max(seed.ground_speed_mps, 1.0),
+                h_m,
+                dT=openap_dT(0.0),
+            )
         )
-    )
+    else:
+        cas_mps = float(seed.cas_mps)
+        if not np.isfinite(cas_mps) or cas_mps <= 0.0:
+            raise ValueError("seed.cas_mps must be finite and positive")
     command = TacticalCommand(
         lateral_path=route,
         upstream=TacticalCondition(
@@ -739,6 +745,10 @@ def _simulation_message_counts(results: list[ArtifactResult]) -> dict[str, int]:
         if result.status == "generated" and result.simulation_success is False
     )
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _flight_payload_sort_key(payload: dict[str, Any]) -> tuple[int, str]:
+    return int(payload["first_time"]), str(payload["flight_id"])
 
 
 def _print_precompute_summary(
@@ -969,7 +979,7 @@ def precompute_artifacts(
         with console.status("[bold]Writing artifact outputs...[/bold]"):
             output_dir.mkdir(parents=True, exist_ok=True)
             flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
-            write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+            write_jsonl(flights_path, sorted(payloads, key=_flight_payload_sort_key))
             manifest = _manifest(
                 results=results,
                 events_path=events_path,
@@ -995,7 +1005,7 @@ def precompute_artifacts(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
         flights_path = output_dir / OUTPUT_FLIGHTS_FILENAME
-        write_jsonl(flights_path, sorted(payloads, key=lambda item: (int(item["first_time"]), str(item["flight_id"]))))
+        write_jsonl(flights_path, sorted(payloads, key=_flight_payload_sort_key))
         manifest = _manifest(
             results=results,
             events_path=events_path,

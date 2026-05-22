@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -504,6 +504,8 @@ def main() -> None:
     reference_path = bundle.request.reference_path
     base_route_payload = base_route.to_payload()
     final_fix = base_route_payload["final_fix"]
+    sequence_fix = cast(Any, sequence_row["fix_sequence"])
+    sequence_fix_text = str(sequence_fix) if pd.notna(sequence_fix) else ""
 
     console = Console()
     console.rule("[bold cyan]Fresh SIMAP precompute cross-check[/bold cyan]")
@@ -513,7 +515,7 @@ def main() -> None:
             f"[bold]Callsign[/bold]: {key.callsign_segment}\n"
             f"[bold]ICAO24[/bold]: {key.icao24}\n"
             f"[bold]Schedule runway[/bold]: {event_row['runway']}\n"
-            f"[bold]Catalog fix sequence[/bold]: {sequence_row['fix_sequence'] if pd.notna(sequence_row['fix_sequence']) else ''}\n"
+            f"[bold]Catalog fix sequence[/bold]: {sequence_fix_text}\n"
             f"[bold]SIMAP lateral_path[/bold]: {' > '.join(_route_token_display(token) for token in route_tokens)}\n"
             f"[bold]Upstream boundary[/bold]: {upstream_identifier} / {_fmt_kt(fms_request.start_cas_mps)} kt / {_fmt_ft(fms_request.start_h_m)} ft\n"
             f"[bold]Base-route settings[/bold]: final fix {precompute_context.final_fix_distance_nm:.1f} NM / cross-track tol {precompute_context.final_fix_cross_track_tolerance_nm:.2f} NM\n"

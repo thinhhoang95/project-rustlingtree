@@ -6,6 +6,7 @@ import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -149,9 +150,9 @@ def _airport_extent(
     center_lon: float | None = None,
 ) -> tuple[float, float, float, float]:
     if center_lat is None:
-        center_lat = float(thresholds["threshold_lat"].mean())
+        center_lat = float(np.nanmean(thresholds["threshold_lat"].to_numpy(dtype=float)))
     if center_lon is None:
-        center_lon = float(thresholds["threshold_lon"].mean())
+        center_lon = float(np.nanmean(thresholds["threshold_lon"].to_numpy(dtype=float)))
 
     lat_delta = radius_m / 111_320.0
     lon_scale = max(np.cos(np.deg2rad(center_lat)), 0.2)
@@ -169,7 +170,7 @@ def plot_trajectory(track: pd.DataFrame, thresholds: pd.DataFrame, output_path: 
     min_lon, max_lon, min_lat, max_lat = _airport_extent(thresholds, DEFAULT_AIRPORT_RADIUS_M)
 
     fig = plt.figure(figsize=(13.5, 9.5), constrained_layout=True)
-    ax = plt.axes(projection=ccrs.PlateCarree())
+    ax = cast(Any, plt.axes(projection=ccrs.PlateCarree()))
     ax.set_extent([min_lon, max_lon, min_lat, max_lat], crs=ccrs.PlateCarree())
     ax.set_facecolor("#eef3f7")
     ax.gridlines(draw_labels=True, linewidth=0.25, linestyle="--", color="#a9a9a9", alpha=0.7)
@@ -256,7 +257,7 @@ def plot_trajectory(track: pd.DataFrame, thresholds: pd.DataFrame, output_path: 
         zorder=6,
         label="runway thresholds",
     )
-    for _, row in thresholds.iterrows():
+    for row in thresholds.to_dict("records"):
         ax.text(
             float(row["threshold_lon"]) + 0.01,
             float(row["threshold_lat"]) + 0.008,

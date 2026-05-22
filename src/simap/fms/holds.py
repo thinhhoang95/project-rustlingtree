@@ -15,6 +15,7 @@ from .helpers import (
     _drag,
     _ground_speed_mps,
     _idle_thrust,
+    _managed_target_cas_mps,
     _simulate_level_segment,
     _tas_from_cas,
 )
@@ -129,7 +130,7 @@ def _managed_command(
     cas_mps: float,
     speed_integral_mps_s: float,
 ) -> tuple[_StepCommand, float, float]:
-    target_cas_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+    target_cas_mps = _managed_target_cas_mps(request=request, mode=mode, s_m=s_m, h_m=h_m)
     speed_error_mps = float(cas_mps - target_cas_mps)
     raw_pitch_rad = float(
         request.controller.nominal_pitch_rad

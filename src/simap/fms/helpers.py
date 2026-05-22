@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 from openap import aero
 
@@ -7,7 +9,7 @@ from ..config import ModeConfig, mode_for_s
 from ..nlp_colloc.coupled import CoupledDescentPlanRequest
 from ..openap_adapter import openap_dT
 from ..weather import WeatherProvider, alongtrack_wind_mps
-from .datatypes import FMSRequest, FMSResult, FMSSpeedTargets
+from .datatypes import ATCSpeedSegment, FMSRequest, FMSResult, FMSSpeedTargets
 
 
 def _first_not_none(*values: float | None) -> float:
@@ -23,6 +25,21 @@ def infer_fms_speed_targets(request: CoupledDescentPlanRequest) -> FMSSpeedTarge
         approach_cas_mps=_first_not_none(request.cfg.approach.cas_min_mps, request.upstream.cas_lower_mps),
         final_cas_mps=_first_not_none(request.cfg.final.cas_min_mps, request.threshold.cas_mps),
     )
+
+
+def _managed_target_cas_mps(
+    *,
+    request: FMSRequest,
+    mode: ModeConfig,
+    s_m: float,
+    h_m: float | None = None,
+) -> float:
+    base_target_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+    target_mps = float(base_target_mps)
+    for segment in cast(tuple[ATCSpeedSegment, ...], request.atc_speed_segments):
+        if s_m <= segment.s_from_m + 1e-9 and base_target_mps > segment.cas_mps:
+            target_mps = min(target_mps, float(segment.cas_mps))
+    return target_mps
 
 
 def _cas_from_tas(
@@ -111,11 +128,17 @@ def _copy_request(
     start_s_m: float | None = None,
     stop_at_reference_path_end: bool | None = None,
 ) -> FMSRequest:
+    copied_start_s_m = float(request.start_s_m if start_s_m is None else start_s_m)
+    original_reference_start_s_m = float(
+        request.start_s_m
+        if request.atc_speed_reference_start_s_m is None
+        else request.atc_speed_reference_start_s_m
+    )
     return FMSRequest(
         cfg=request.cfg,
         perf=request.perf,
         reference_path=request.reference_path,
-        start_s_m=float(request.start_s_m if start_s_m is None else start_s_m),
+        start_s_m=copied_start_s_m,
         start_h_m=request.start_h_m,
         start_cas_mps=request.start_cas_mps,
         target_h_m=request.target_h_m,
@@ -127,6 +150,8 @@ def _copy_request(
         stop_at_reference_path_end=(
             request.stop_at_reference_path_end if stop_at_reference_path_end is None else stop_at_reference_path_end
         ),
+        atc_speed_segments=request.atc_speed_segments,
+        atc_speed_reference_start_s_m=max(original_reference_start_s_m, copied_start_s_m),
     )
 
 
@@ -188,7 +213,12 @@ def _simulate_level_segment(request: FMSRequest, *, tod_s_m: float) -> FMSResult
             t_s=0.0,
             v_cas_mps=request.start_cas_mps,
         )
-        target_cas_mps = request.speed_targets.for_mode(mode, h_m=request.start_h_m)
+        target_cas_mps = _managed_target_cas_mps(
+            request=request,
+            mode=mode,
+            s_m=start_s_m,
+            h_m=request.start_h_m,
+        )
         thrust_n = _drag(
             request=request,
             mode=mode,
@@ -253,7 +283,7 @@ def _simulate_level_segment(request: FMSRequest, *, tod_s_m: float) -> FMSResult
 
     while True:
         mode = mode_for_s(request.cfg, s_m)
-        target_cas_mps = request.speed_targets.for_mode(mode, h_m=h_m)
+        target_cas_mps = _managed_target_cas_mps(request=request, mode=mode, s_m=s_m, h_m=h_m)
         drag_n = _drag(
             request=request,
             mode=mode,

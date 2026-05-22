@@ -6,6 +6,19 @@ from typing import Any
 import pandas as pd
 
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
+from mcp_tools.scenario_manager.path_stretching import (
+    PathStretchSaveRequest,
+    PathStretchSimulationRequest,
+    apply_path_stretch_diff,
+    save_path_stretch,
+    simulate_path_stretch,
+)
+from mcp_tools.scenario_manager.speed_intervention import (
+    SpeedInterventionSaveRequest,
+    SpeedInterventionSimulationRequest,
+    save_speed_intervention,
+    simulate_speed_intervention,
+)
 from mcp_tools.scenario_manager.resources import (
     load_compressed_flights,
     load_events,
@@ -32,6 +45,8 @@ class ScenarioManager:
             else {}
         )
         self.diff: list[dict[str, Any]] = []
+        self.path_stretch_drafts: dict[str, dict[str, Any]] = {}
+        self.speed_intervention_drafts: dict[str, dict[str, Any]] = {}
         self._fix_sequence_by_flight_id = self._build_fix_sequence_index(self.fix_sequences)
 
     @staticmethod
@@ -69,6 +84,11 @@ class ScenarioManager:
                     "runway": str(row["runway"]),
                 }
             )
+            payload = self._apply_diff(payload)
+            departure_time = int(payload.get("departure_time", row["event_time"]))
+            payload["departure_time"] = departure_time
+            payload["departure_time_utc"] = self._arrival_time_utc(payload, departure_time)
+            payload["runway"] = str(payload.get("runway") or row["runway"])
             schedule.append(payload)
         return schedule
 
@@ -84,7 +104,8 @@ class ScenarioManager:
             payload = self._apply_diff(dict(trajectory))
             time_at_first_fix = int(payload.get("first_time", fix_sequence["first_time"]))
             time_at_last_event = int(payload.get("last_time", fix_sequence["last_time"]))
-            base_route = payload.get("base_route") if isinstance(payload.get("base_route"), dict) else {}
+            raw_base_route = payload.get("base_route")
+            base_route: dict[str, Any] = dict(raw_base_route) if isinstance(raw_base_route, dict) else {}
             route_fix_sequence = self._route_fix_sequence(payload, fix_sequence, base_route)
             route_fix_count = self._route_fix_count(payload, fix_sequence, base_route, route_fix_sequence)
             atc_wait_point = payload.get("atc_wait_point") or payload.get("wait_atc_point") or base_route.get("atc_point")
@@ -149,12 +170,22 @@ class ScenarioManager:
         return str(token)
 
     def _apply_diff(self, payload: dict[str, Any]) -> dict[str, Any]:
-        # Intervention patching will be implemented later. Keep the hook wired
-        # so API behavior is already centered on artifact + diff state.
-        return payload
+        return apply_path_stretch_diff(payload, self.diff)
 
     def intervention_diff(self) -> list[dict[str, Any]]:
         return list(self.diff)
+
+    def simulate_path_stretch(self, request: PathStretchSimulationRequest) -> dict[str, Any]:
+        return simulate_path_stretch(self, request)
+
+    def save_path_stretch(self, flight_id: str, request: PathStretchSaveRequest) -> dict[str, Any]:
+        return save_path_stretch(self, flight_id, request)
+
+    def simulate_speed_intervention(self, request: SpeedInterventionSimulationRequest) -> dict[str, Any]:
+        return simulate_speed_intervention(self, request)
+
+    def save_speed_intervention(self, flight_id: str, request: SpeedInterventionSaveRequest) -> dict[str, Any]:
+        return save_speed_intervention(self, flight_id, request)
 
     @staticmethod
     def _arrival_time_utc(_trajectory: dict[str, Any], arrival_time: int) -> str:
@@ -195,6 +226,7 @@ class ScenarioManager:
                 "events": self.config.events_path.as_posix(),
                 "landings_and_departures": self.config.events_path.as_posix(),
                 "fix_sequences": self.config.fix_sequences_path.as_posix(),
+                "fixes": self.config.fixes_path.as_posix(),
                 "simap_arrival_trajectories": self.config.simap_arrival_trajectories_path.as_posix(),
                 "simap_arrival_artifact_manifest": self.config.simap_arrival_artifact_manifest_path.as_posix()
                 if self.config.simap_arrival_artifact_manifest_path is not None

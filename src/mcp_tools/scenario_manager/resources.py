@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -46,7 +46,7 @@ def load_events(path: Path) -> pd.DataFrame:
     frame["icao24"] = frame["icao24"].astype(str).str.strip()
     frame["operation"] = frame["operation"].astype(str).str.strip().str.lower()
     frame["runway"] = frame["runway"].astype(str).str.strip()
-    frame["event_time"] = pd.to_numeric(frame["event_time"], errors="raise").astype("int64")
+    frame["event_time"] = cast(pd.Series, pd.to_numeric(frame["event_time"], errors="raise")).astype("int64")
     return frame
 
 
@@ -54,9 +54,9 @@ def load_fix_sequences(path: Path) -> pd.DataFrame:
     frame = load_required_csv(path, FIX_SEQUENCE_COLUMNS).copy()
     frame["flight_id"] = frame["flight_id"].astype(str).str.strip()
     frame["fix_sequence"] = frame["fix_sequence"].fillna("").astype(str)
-    frame["first_time"] = pd.to_numeric(frame["first_time"], errors="raise").astype("int64")
-    frame["last_time"] = pd.to_numeric(frame["last_time"], errors="raise").astype("int64")
-    frame["fix_count"] = pd.to_numeric(frame["fix_count"], errors="raise").astype("int64")
+    frame["first_time"] = cast(pd.Series, pd.to_numeric(frame["first_time"], errors="raise")).astype("int64")
+    frame["last_time"] = cast(pd.Series, pd.to_numeric(frame["last_time"], errors="raise")).astype("int64")
+    frame["fix_count"] = cast(pd.Series, pd.to_numeric(frame["fix_count"], errors="raise")).astype("int64")
     return frame
 
 

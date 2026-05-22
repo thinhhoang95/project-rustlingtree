@@ -38,20 +38,40 @@ KDFW_TRAJECTORY_VIEW_RADIUS_M = 50_000.0
 
 
 class TrajectoryLike(Protocol):
-    time_s: np.ndarray
-    lat_deg: np.ndarray
-    lon_deg: np.ndarray
-    altitude_m: np.ndarray
-    speed_mps: np.ndarray
+    @property
+    def time_s(self) -> np.ndarray: ...
+
+    @property
+    def lat_deg(self) -> np.ndarray: ...
+
+    @property
+    def lon_deg(self) -> np.ndarray: ...
+
+    @property
+    def altitude_m(self) -> np.ndarray: ...
+
+    @property
+    def speed_mps(self) -> np.ndarray: ...
 
 
 class SeedLike(Protocol):
-    time_s: int
-    lat_deg: float
-    lon_deg: float
-    geoaltitude_m: float
-    heading_deg: float | None
-    ground_speed_mps: float
+    @property
+    def time_s(self) -> int: ...
+
+    @property
+    def lat_deg(self) -> float: ...
+
+    @property
+    def lon_deg(self) -> float: ...
+
+    @property
+    def geoaltitude_m(self) -> float: ...
+
+    @property
+    def heading_deg(self) -> float | None: ...
+
+    @property
+    def ground_speed_mps(self) -> float: ...
 
 
 @dataclass(frozen=True)
@@ -77,12 +97,14 @@ def _fmt_unix_time(time_s: float) -> str:
 def _fmt_sample(name: str, sample: SampledTrajectory, *, speed_label: str) -> str:
     if not sample.available:
         return f"{name}: {UNAVAILABLE}"
+    altitude_ft = None if sample.altitude_m is None else m_to_ft(sample.altitude_m)
+    speed_kt = None if sample.speed_mps is None else mps_to_kts(sample.speed_mps)
     return (
         f"{name}: "
         f"lat {_fmt_maybe(sample.lat_deg, suffix='', decimals=5)}, "
         f"lon {_fmt_maybe(sample.lon_deg, suffix='', decimals=5)}, "
-        f"alt {_fmt_maybe(m_to_ft(sample.altitude_m), suffix=' ft', decimals=1)}, "
-        f"{speed_label} {_fmt_maybe(mps_to_kts(sample.speed_mps), suffix=' kt', decimals=1)}"
+        f"alt {_fmt_maybe(altitude_ft, suffix=' ft', decimals=1)}, "
+        f"{speed_label} {_fmt_maybe(speed_kt, suffix=' kt', decimals=1)}"
     )
 
 

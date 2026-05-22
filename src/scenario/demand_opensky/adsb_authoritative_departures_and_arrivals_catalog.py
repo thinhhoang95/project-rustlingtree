@@ -5,6 +5,7 @@ import datetime as dt
 import os
 import subprocess
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -180,7 +181,7 @@ def _read_catalog_csv(path: Path) -> pd.DataFrame:
     if set(LEGACY_CATALOG_COLUMNS).issubset(frame.columns):
         fallback = frame.copy()
         fallback["event_time"] = pd.NA
-        return fallback[EXPECTED_CATALOG_COLUMNS]
+        return cast(pd.DataFrame, fallback[EXPECTED_CATALOG_COLUMNS])
 
     fallback = pd.read_csv(path, header=None, names=EXPECTED_CATALOG_COLUMNS)
     if not fallback.empty:

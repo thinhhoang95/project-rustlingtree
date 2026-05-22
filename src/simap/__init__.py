@@ -10,6 +10,8 @@ from .config import (
     stall_margin_cas_mps,
 )
 from .fms import (
+    ATCSpeedSegment,
+    ATCSpeedSegmentInput,
     FMSPIConfig,
     FMSRequest,
     FMSResult,
@@ -76,6 +78,8 @@ from .weather import ConstantWeather, WeatherProvider, alongtrack_wind_mps
 
 __all__ = [
     "AircraftConfig",
+    "ATCSpeedSegment",
+    "ATCSpeedSegmentInput",
     "ConstantWeather",
     "ConstraintEnvelope",
     "EffectivePolarBackend",
