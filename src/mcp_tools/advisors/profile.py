@@ -71,10 +71,12 @@ class ProfilePlanner:
         request = profile.request
         if extra_distance_m > 0.0:
             reference_path = extend_reference_path(request.reference_path, extra_distance_m)
+            extended_start_s_m = float(request.start_s_m + extra_distance_m)
             request = replace(
                 request,
                 reference_path=reference_path,
-                start_s_m=float(request.start_s_m + extra_distance_m),
+                start_s_m=extended_start_s_m,
+                atc_speed_reference_start_s_m=extended_start_s_m,
             )
         if atc_speed_segments:
             request = replace(

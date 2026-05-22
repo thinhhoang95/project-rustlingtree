@@ -12,6 +12,8 @@ from simap.fms import (
     FMSSpeedTargets,
     HoldAwareFMSRequest,
     HoldInstruction,
+    plan_fms_descent,
+    plan_hold_aware_fms_descent,
     simulate_fms_descent,
     simulate_hold_aware_fms_descent,
 )
@@ -106,6 +108,57 @@ def test_atc_speed_segment_below_mode_lower_bound_raises_early() -> None:
             _request(),
             atc_speed_segments=(ATCSpeedSegment(s_from_m=45_000.0, cas_mps=60.0),),
         )
+
+
+def test_atc_speed_segment_can_reference_upstream_full_route_after_tod_copy() -> None:
+    request = replace(
+        _request(),
+        atc_speed_segments=(ATCSpeedSegment(s_from_m=45_000.0, cas_mps=95.0),),
+    )
+    copied = replace(
+        request,
+        start_s_m=40_000.0,
+        atc_speed_reference_start_s_m=request.atc_speed_reference_start_s_m,
+    )
+
+    assert copied.atc_speed_segments == (ATCSpeedSegment(s_from_m=45_000.0, cas_mps=95.0),)
+    assert _target_at(copied, 39_000.0) == pytest.approx(95.0)
+
+
+def test_atc_speed_segment_beyond_reference_start_raises_early() -> None:
+    with pytest.raises(ValueError, match="atc_speed_reference_start_s_m"):
+        replace(
+            _request(),
+            atc_speed_segments=(ATCSpeedSegment(s_from_m=60_000.0, cas_mps=95.0),),
+        )
+
+
+def test_plan_fms_descent_supports_atc_speed_segment_upstream_of_tod_candidate() -> None:
+    request = replace(
+        _request(),
+        atc_speed_segments=(ATCSpeedSegment(s_from_m=45_000.0, cas_mps=95.0),),
+    )
+
+    result = plan_fms_descent(request, tod_tolerance_m=25.0, max_tod_iterations=8)
+
+    assert len(result) > 0
+    assert np.any(np.isclose(result.target_cas_mps, 95.0))
+
+
+def test_hold_aware_plan_supports_atc_speed_segment_upstream_of_tod_candidate() -> None:
+    request = replace(
+        _request(),
+        atc_speed_segments=(ATCSpeedSegment(s_from_m=45_000.0, cas_mps=95.0),),
+    )
+
+    result = plan_hold_aware_fms_descent(
+        HoldAwareFMSRequest(base_request=request, holds=()),
+        tod_tolerance_m=25.0,
+        max_tod_iterations=8,
+    )
+
+    assert len(result) > 0
+    assert np.any(np.isclose(result.target_cas_mps, 95.0))
 
 
 def test_bichannel_uses_longitudinal_atc_speed_profile() -> None:

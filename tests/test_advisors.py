@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from pathlib import Path
+from typing import cast
 
+import numpy as np
 import pytest
 
 from mcp_tools.advisors import FeasibilityAdvisor, ProfilePlanner, SpeedControlAdvisor, VectoringAdvisor
@@ -82,7 +84,7 @@ class FakePlanner:
         return SimpleNamespace(
             identity=identity,
             request=SimpleNamespace(start_s_m=100_000.0),
-            threshold_m=float(arrival.get("threshold_nmi", 0.0)) * METERS_PER_NM,
+            threshold_m=_threshold_nmi(arrival) * METERS_PER_NM,
         )
 
     def plan(
@@ -109,6 +111,17 @@ class FakePlanner:
             total_time_s=1_000.0 + extra_distance_m / 100.0,
             pre_tod_ground_speed_mps=100.0,
         )
+
+
+def _threshold_nmi(arrival: dict[str, object]) -> float:
+    value = arrival.get("threshold_nmi", 0.0)
+    if not isinstance(value, (int, float)):
+        raise ValueError("threshold_nmi must be numeric")
+    return float(value)
+
+
+def _fake_planner() -> ProfilePlanner:
+    return cast(ProfilePlanner, FakePlanner())
 
 
 def test_profile_reconstruction_uses_served_route_and_cas_profile(tmp_path: Path) -> None:
@@ -144,6 +157,28 @@ def test_profile_reconstruction_replays_active_speed_advisories(tmp_path: Path) 
     assert segment.s_from_m == pytest.approx(60_000.0)
 
 
+def test_profile_plan_extends_speed_reference_with_active_speed_advisory(tmp_path: Path) -> None:
+    arrival = _arrival(cas_profile=_cas_profile(190.0))
+    arrival["speed_intervention"] = {
+        "advisories": [
+            {
+                "s_m": 60_000.0,
+                "station_nm_to_runway": 60_000.0 / METERS_PER_NM,
+                "cas_kts": 160.0,
+                "lat": 32.1,
+                "lon": -97.0,
+            }
+        ],
+        "advisory_count": 1,
+    }
+    planner = ProfilePlanner(fms_dt_s=5.0, max_tod_iterations=2)
+    profile = planner.build(arrival, _write_fixes(tmp_path))
+
+    planned = planner.plan(profile, extra_distance_m=METERS_PER_NM)
+
+    assert len(planned.result) > 0
+
+
 def test_profile_reconstruction_rejects_missing_cas_profile_by_default(tmp_path: Path) -> None:
     planner = ProfilePlanner(fms_dt_s=2.0)
 
@@ -153,8 +188,8 @@ def test_profile_reconstruction_rejects_missing_cas_profile_by_default(tmp_path:
 
 def test_extend_reference_path_adds_prefix_distance_and_keeps_threshold() -> None:
     path = ReferencePath.from_geographic(
-        lat_deg=[32.0, 32.5, 32.9],
-        lon_deg=[-97.0, -97.0, -97.0],
+        lat_deg=np.asarray([32.0, 32.5, 32.9], dtype=float),
+        lon_deg=np.asarray([-97.0, -97.0, -97.0], dtype=float),
     )
 
     extended = extend_reference_path(path, METERS_PER_NM)
@@ -171,7 +206,7 @@ def test_feasibility_advisor_searches_required_extension_and_sorts() -> None:
             _arrival(flight_id="B", threshold_nmi=4.0),
         ]
     )
-    advisor = FeasibilityAdvisor(manager, planner=FakePlanner(), initial_extension_nmi=1.0, max_extension_nmi=8.0)
+    advisor = FeasibilityAdvisor(manager, planner=_fake_planner(), initial_extension_nmi=1.0, max_extension_nmi=8.0)
 
     result = advisor.evaluate()
     filtered = advisor.evaluate(flight_id="A")
@@ -186,7 +221,7 @@ def test_feasibility_advisor_searches_required_extension_and_sorts() -> None:
 def test_feasibility_advisor_returns_zero_for_feasible_baseline() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=0.0)])
 
-    result = FeasibilityAdvisor(manager, planner=FakePlanner()).evaluate()
+    result = FeasibilityAdvisor(manager, planner=_fake_planner()).evaluate()
 
     assert result[0].miles_to_gain_nmi == 0.0
     assert result[0].minutes_to_gain == 0.0
@@ -196,7 +231,7 @@ def test_feasibility_advisor_returns_zero_for_feasible_baseline() -> None:
 def test_vectoring_advisor_reports_requested_and_required_distance() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=4.0)])
 
-    result = VectoringAdvisor(manager, planner=FakePlanner()).advise(flight_id="A", extra_distance_nmi=2.0)
+    result = VectoringAdvisor(manager, planner=_fake_planner()).advise(flight_id="A", extra_distance_nmi=2.0)
 
     assert result.miles_to_gain_nmi == 2.0
     assert result.requested_extension_m == pytest.approx(2.0 * METERS_PER_NM)
@@ -207,7 +242,7 @@ def test_vectoring_advisor_reports_requested_and_required_distance() -> None:
 def test_vectoring_advisor_zero_extension_has_zero_time_delta() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=0.0)])
 
-    result = VectoringAdvisor(manager, planner=FakePlanner()).advise(flight_id="A", extra_distance_nmi=0.0)
+    result = VectoringAdvisor(manager, planner=_fake_planner()).advise(flight_id="A", extra_distance_nmi=0.0)
 
     assert result.miles_to_gain_nmi == 0.0
     assert result.minutes_to_gain == 0.0
@@ -216,7 +251,7 @@ def test_vectoring_advisor_zero_extension_has_zero_time_delta() -> None:
 def test_speed_control_advisor_returns_actual_and_equivalent_miles() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=0.0)])
 
-    result = SpeedControlAdvisor(manager, planner=FakePlanner()).advise(
+    result = SpeedControlAdvisor(manager, planner=_fake_planner()).advise(
         flight_id="A",
         s_m=50_000.0,
         cas_kts=180.0,
@@ -231,7 +266,7 @@ def test_speed_control_advisor_rejects_invalid_station() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=0.0)])
 
     with pytest.raises(ValueError, match="s_m must lie within"):
-        SpeedControlAdvisor(manager, planner=FakePlanner()).advise(
+        SpeedControlAdvisor(manager, planner=_fake_planner()).advise(
             flight_id="A",
             s_m=150_000.0,
             cas_kts=180.0,
@@ -242,7 +277,7 @@ def test_speed_control_advisor_rejects_faster_or_equal_speed() -> None:
     manager = FakeManager([_arrival(flight_id="A", threshold_nmi=0.0)])
 
     with pytest.raises(ValueError, match="not lower than base profile"):
-        SpeedControlAdvisor(manager, planner=FakePlanner()).advise(
+        SpeedControlAdvisor(manager, planner=_fake_planner()).advise(
             flight_id="A",
             s_m=50_000.0,
             cas_kts=240.0,

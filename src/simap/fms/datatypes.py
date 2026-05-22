@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -98,6 +99,7 @@ class FMSRequest:
     max_time_s: float = 7_200.0
     stop_at_reference_path_end: bool = False
     atc_speed_segments: tuple[ATCSpeedSegmentInput, ...] = field(default_factory=tuple)
+    atc_speed_reference_start_s_m: float | None = None
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -110,6 +112,16 @@ class FMSRequest:
             raise ValueError("start_s_m must lie on the reference path")
         if self.start_cas_mps <= 0.0:
             raise ValueError("start_cas_mps must be positive")
+        atc_speed_reference_start_s_m = float(
+            self.start_s_m if self.atc_speed_reference_start_s_m is None else self.atc_speed_reference_start_s_m
+        )
+        if not np.isfinite(atc_speed_reference_start_s_m):
+            raise ValueError("atc_speed_reference_start_s_m must be finite")
+        if atc_speed_reference_start_s_m < self.start_s_m - 1e-9:
+            raise ValueError("atc_speed_reference_start_s_m must be greater than or equal to start_s_m")
+        if atc_speed_reference_start_s_m > self.reference_path.total_length_m + 1e-9:
+            raise ValueError("atc_speed_reference_start_s_m must lie on the reference path")
+        object.__setattr__(self, "atc_speed_reference_start_s_m", atc_speed_reference_start_s_m)
         segments = tuple(_coerce_atc_speed_segment(segment) for segment in self.atc_speed_segments)
         object.__setattr__(self, "atc_speed_segments", segments)
         self._validate_atc_speed_segments()
@@ -119,7 +131,10 @@ class FMSRequest:
 
     def _validate_atc_speed_segments(self) -> None:
         seen_s_from: set[float] = set()
-        for segment in self.atc_speed_segments:
+        reference_start_s_m = float(
+            self.start_s_m if self.atc_speed_reference_start_s_m is None else self.atc_speed_reference_start_s_m
+        )
+        for segment in cast(tuple[ATCSpeedSegment, ...], self.atc_speed_segments):
             s_from_m = float(segment.s_from_m)
             cas_mps = float(segment.cas_mps)
             if s_from_m in seen_s_from:
@@ -127,10 +142,10 @@ class FMSRequest:
                     f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} duplicates s_from_m"
                 )
             seen_s_from.add(s_from_m)
-            if s_from_m < 0.0 or s_from_m > self.start_s_m:
+            if s_from_m < 0.0 or s_from_m > reference_start_s_m:
                 raise ValueError(
                     f"ATC speed segment at s_from_m={s_from_m:.3f}, cas_mps={cas_mps:.3f} "
-                    "must lie within [0, start_s_m]"
+                    "must lie within [0, atc_speed_reference_start_s_m]"
                 )
 
             base_at_acceptance = self._base_target_cas_mps(s_from_m)
@@ -176,6 +191,7 @@ class FMSRequest:
         max_time_s: float = 7_200.0,
         controller: FMSPIConfig | None = None,
         atc_speed_segments: tuple[ATCSpeedSegmentInput, ...] = (),
+        atc_speed_reference_start_s_m: float | None = None,
     ) -> "FMSRequest":
         from .helpers import infer_fms_speed_targets
 
@@ -193,6 +209,7 @@ class FMSRequest:
             dt_s=dt_s,
             max_time_s=max_time_s,
             atc_speed_segments=atc_speed_segments,
+            atc_speed_reference_start_s_m=atc_speed_reference_start_s_m,
         )
 
 
