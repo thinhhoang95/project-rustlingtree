@@ -121,12 +121,34 @@ def test_profile_reconstruction_uses_served_route_and_cas_profile(tmp_path: Path
     assert profile.request.start_h_m == pytest.approx(1_500.0)
 
 
-def test_profile_reconstruction_falls_back_to_initial_trajectory_speed(tmp_path: Path) -> None:
-    planner = ProfilePlanner(fms_dt_s=2.0)
-    profile = planner.build(_arrival(cas_profile=None), _write_fixes(tmp_path))
+def test_profile_reconstruction_replays_active_speed_advisories(tmp_path: Path) -> None:
+    arrival = _arrival(cas_profile=_cas_profile(190.0))
+    arrival["speed_intervention"] = {
+        "advisories": [
+            {
+                "s_m": 60_000.0,
+                "station_nm_to_runway": 60_000.0 / METERS_PER_NM,
+                "cas_kts": 160.0,
+                "lat": 32.1,
+                "lon": -97.0,
+            }
+        ],
+        "advisory_count": 1,
+    }
 
-    assert profile.request.start_cas_mps > 0.0
-    assert profile.initial_ground_speed_mps > 0.0
+    profile = ProfilePlanner(fms_dt_s=2.0).build(arrival, _write_fixes(tmp_path))
+
+    assert len(profile.request.atc_speed_segments) == 1
+    segment = profile.request.atc_speed_segments[0]
+    assert isinstance(segment, ATCSpeedSegment)
+    assert segment.s_from_m == pytest.approx(60_000.0)
+
+
+def test_profile_reconstruction_rejects_missing_cas_profile_by_default(tmp_path: Path) -> None:
+    planner = ProfilePlanner(fms_dt_s=2.0)
+
+    with pytest.raises(ValueError, match="cas_profile.points\\[0\\].cas_kts"):
+        planner.build(_arrival(cas_profile=None), _write_fixes(tmp_path))
 
 
 def test_extend_reference_path_adds_prefix_distance_and_keeps_threshold() -> None:

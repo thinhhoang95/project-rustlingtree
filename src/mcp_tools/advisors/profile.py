@@ -6,16 +6,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-from openap import aero
-
 from mcp_tools.advisors.models import AdvisoryFlight
 from mcp_tools.scenario_manager.models import project_root
+from mcp_tools.scenario_manager.served_profile import build_served_fms_context
 from simap.fms import ATCSpeedSegmentInput, FMSRequest, FMSResult, plan_fms_descent
-from simap.nlp_colloc.tactical.builder import build_tactical_plan_request
-from simap.nlp_colloc.tactical.models import TacticalCommand, TacticalCondition
-from simap.openap_adapter import openap_dT
-from simap.path_geometry import EARTH_RADIUS_M, ReferencePath
-from simap.units import kts_to_mps, m_to_ft, mps_to_kts
+from simap.path_geometry import ReferencePath
 
 METERS_PER_NM = 1_852.0
 DEFAULT_FIXES_PATH = Path("data/kdfw_procs/airport_related_fixes.csv")
@@ -52,34 +47,17 @@ class ProfilePlanner:
     max_tod_iterations: int = DEFAULT_MAX_TOD_ITERATIONS
 
     def build(self, arrival: dict[str, Any], fixes_path: Path) -> ArrivalProfile:
-        route, upstream_identifier = _route_from_arrival(arrival)
-        first_point = _first_point(arrival)
-        altitude_m = _point_value(arrival, first_point, "geoaltitude_m")
-        initial_cas_mps = _initial_cas_mps(arrival, altitude_m=altitude_m)
-        command = TacticalCommand(
-            lateral_path=route,
-            upstream=TacticalCondition(
-                fix_identifier=upstream_identifier,
-                cas_kts=max(80.0, mps_to_kts(initial_cas_mps)),
-                altitude_ft=m_to_ft(altitude_m),
-            ),
-            altitude_constraints=(),
-        )
-        bundle = build_tactical_plan_request(command, fixes_csv=fixes_path)
-        request = FMSRequest.from_coupled_request(
-            bundle.request,
-            start_s_m=float(bundle.request.reference_path.total_length_m),
-            dt_s=self.fms_dt_s,
-        )
-        initial_ground_speed_mps = _ground_speed_from_cas(
-            cas_mps=request.start_cas_mps,
-            altitude_m=request.start_h_m,
+        context = build_served_fms_context(
+            arrival,
+            fixes_path,
+            fms_dt_s=self.fms_dt_s,
+            include_speed_advisories=True,
         )
         return ArrivalProfile(
             arrival=arrival,
             identity=_identity(arrival),
-            request=request,
-            initial_ground_speed_mps=initial_ground_speed_mps,
+            request=context.fms_request,
+            initial_ground_speed_mps=context.initial_ground_speed_mps,
         )
 
     def plan(
@@ -99,7 +77,10 @@ class ProfilePlanner:
                 start_s_m=float(request.start_s_m + extra_distance_m),
             )
         if atc_speed_segments:
-            request = replace(request, atc_speed_segments=atc_speed_segments)
+            request = replace(
+                request,
+                atc_speed_segments=tuple(request.atc_speed_segments) + tuple(atc_speed_segments),
+            )
 
         result = plan_fms_descent(
             request,
@@ -218,127 +199,6 @@ def _identity(arrival: dict[str, Any]) -> AdvisoryFlight:
     )
 
 
-def _route_from_arrival(arrival: dict[str, Any]) -> tuple[list[str | tuple[float, float]], str]:
-    base_route = arrival.get("base_route")
-    if not isinstance(base_route, dict):
-        raise ValueError(f"{_flight_label(arrival)} has missing or malformed base_route")
-    raw_route = base_route.get("lateral_path")
-    if not isinstance(raw_route, list) or len(raw_route) < 2:
-        raise ValueError(f"{_flight_label(arrival)} has missing or malformed base_route.lateral_path")
-    route = [_route_token(token, index) for index, token in enumerate(raw_route, start=1)]
-    upstream_identifier = base_route.get("upstream_identifier")
-    if isinstance(upstream_identifier, str) and upstream_identifier.strip():
-        upstream = upstream_identifier.strip().upper()
-    else:
-        first = route[0]
-        upstream = "COORD01" if isinstance(first, tuple) else str(first).upper()
-    return route, upstream
-
-
-def _route_token(token: Any, index: int) -> str | tuple[float, float]:
-    if isinstance(token, str):
-        return token.strip().upper()
-    if isinstance(token, (list, tuple)) and len(token) == 2:
-        lat_deg = _finite_number(token[0], f"base_route.lateral_path[{index - 1}].lat")
-        lon_deg = _finite_number(token[1], f"base_route.lateral_path[{index - 1}].lon")
-        return (lat_deg, lon_deg)
-    raise ValueError(f"base_route.lateral_path[{index - 1}] must be a fix identifier or [lat, lon]")
-
-
-def _first_point(arrival: dict[str, Any]) -> list[int | float]:
-    points = arrival.get("points")
-    if not isinstance(points, list) or not points:
-        raise ValueError(f"{_flight_label(arrival)} has missing or malformed points")
-    point = points[0]
-    if not isinstance(point, list):
-        raise ValueError(f"{_flight_label(arrival)} has malformed points[0]")
-    return point
-
-
-def _point_value(arrival: dict[str, Any], point: list[int | float], column: str) -> float:
-    columns = _columns(arrival)
-    index = _column_index(columns, column, _flight_label(arrival))
-    if len(point) <= index:
-        raise ValueError(f"{_flight_label(arrival)} has malformed points[0].{column}")
-    return _finite_number(point[index], f"points[0].{column}")
-
-
-def _columns(arrival: dict[str, Any]) -> list[str]:
-    columns = arrival.get("columns")
-    if not isinstance(columns, list):
-        raise ValueError(f"{_flight_label(arrival)} has missing or malformed columns")
-    return [str(column) for column in columns]
-
-
-def _column_index(columns: list[str], column: str, label: str) -> int:
-    try:
-        return columns.index(column)
-    except ValueError as exc:
-        raise ValueError(f"{label} has missing column {column}") from exc
-
-
-def _initial_cas_mps(arrival: dict[str, Any], *, altitude_m: float) -> float:
-    cas_profile = arrival.get("cas_profile")
-    if isinstance(cas_profile, dict):
-        columns = cas_profile.get("columns")
-        points = cas_profile.get("points")
-        if isinstance(columns, list) and isinstance(points, list) and points:
-            cas_index = _column_index([str(column) for column in columns], "cas_kts", _flight_label(arrival))
-            first_cas_point = points[0]
-            if isinstance(first_cas_point, list) and len(first_cas_point) > cas_index:
-                cas_kts = _finite_number(first_cas_point[cas_index], "cas_profile.points[0].cas_kts")
-                if cas_kts > 0.0:
-                    return kts_to_mps(cas_kts)
-
-    ground_speed_mps = _fallback_initial_ground_speed_mps(arrival)
-    return float(aero.tas2cas(ground_speed_mps, altitude_m, dT=openap_dT(0.0)))
-
-
-def _fallback_initial_ground_speed_mps(arrival: dict[str, Any]) -> float:
-    points = arrival.get("points")
-    if not isinstance(points, list) or len(points) < 2:
-        raise ValueError(f"{_flight_label(arrival)} needs cas_profile or at least two trajectory points")
-    first = points[0]
-    second = points[1]
-    if not isinstance(first, list) or not isinstance(second, list):
-        raise ValueError(f"{_flight_label(arrival)} has malformed trajectory points")
-    columns = _columns(arrival)
-    time_index = _column_index(columns, "time", _flight_label(arrival))
-    lat_index = _column_index(columns, "lat", _flight_label(arrival))
-    lon_index = _column_index(columns, "lon", _flight_label(arrival))
-    minimum_length = max(time_index, lat_index, lon_index) + 1
-    if len(first) < minimum_length or len(second) < minimum_length:
-        raise ValueError(f"{_flight_label(arrival)} has malformed trajectory points")
-
-    dt_s = abs(
-        _finite_number(second[time_index], "points[1].time")
-        - _finite_number(first[time_index], "points[0].time")
-    )
-    if dt_s <= 0.0:
-        raise ValueError(f"{_flight_label(arrival)} has duplicate initial trajectory times")
-    distance_m = _latlon_distance_m(
-        _finite_number(first[lat_index], "points[0].lat"),
-        _finite_number(first[lon_index], "points[0].lon"),
-        _finite_number(second[lat_index], "points[1].lat"),
-        _finite_number(second[lon_index], "points[1].lon"),
-    )
-    ground_speed_mps = distance_m / dt_s
-    if not math.isfinite(ground_speed_mps) or ground_speed_mps <= 0.0:
-        raise ValueError(f"{_flight_label(arrival)} has invalid fallback initial ground speed")
-    return float(ground_speed_mps)
-
-
-def _ground_speed_from_cas(*, cas_mps: float, altitude_m: float) -> float:
-    return float(aero.cas2tas(cas_mps, altitude_m, dT=openap_dT(0.0)))
-
-
-def _latlon_distance_m(lat_a_deg: float, lon_a_deg: float, lat_b_deg: float, lon_b_deg: float) -> float:
-    lat0_rad = math.radians(0.5 * (lat_a_deg + lat_b_deg))
-    dx_m = EARTH_RADIUS_M * math.cos(lat0_rad) * math.radians(lon_b_deg - lon_a_deg)
-    dy_m = EARTH_RADIUS_M * math.radians(lat_b_deg - lat_a_deg)
-    return float(math.hypot(dx_m, dy_m))
-
-
 def _finite_nonnegative(value: float, name: str) -> float:
     value = _finite_number(value, name)
     if value < 0.0:
@@ -353,15 +213,3 @@ def _finite_number(value: Any, name: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{name} must be a finite number")
     return number
-
-
-def _flight_label(arrival: dict[str, Any]) -> str:
-    flight_id = str(arrival.get("flight_id", ""))
-    callsign = str(arrival.get("callsign", ""))
-    if flight_id and callsign:
-        return f"flight_id={flight_id} callsign={callsign}"
-    if flight_id:
-        return f"flight_id={flight_id}"
-    if callsign:
-        return f"callsign={callsign}"
-    return "arrival"

@@ -42,6 +42,7 @@ def _fake_bichannel_result(*, elapsed_s: float, cas_kts: float) -> SimpleNamespa
 
 def _patch_simap(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
     import mcp_tools.scenario_manager.speed_intervention as speed_intervention
+    import mcp_tools.scenario_manager.served_profile as served_profile
 
     captured_segments: list[tuple] = []
 
@@ -55,7 +56,7 @@ def _patch_simap(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
             return _fake_bichannel_result(elapsed_s=180.0, cas_kts=180.0)
         return _fake_bichannel_result(elapsed_s=120.0, cas_kts=210.0)
 
-    monkeypatch.setattr(speed_intervention, "_build_request", fake_build_request)
+    monkeypatch.setattr(served_profile, "_build_request", fake_build_request)
     monkeypatch.setattr(speed_intervention, "plan_fms_bichannel", fake_plan)
     return captured_segments
 
@@ -124,6 +125,28 @@ def test_speed_intervention_save_replaces_active_intervention_and_serves_arrival
     assert arrival["speed_intervention"]["advisory_count"] == 1
     assert arrival["cas_profile"]["columns"] == ["time", "cas_kts"]
     assert arrival["simulation"]["message"] == "ok"
+
+
+def test_speed_intervention_simulate_composes_with_active_speed_intervention(tmp_path, monkeypatch) -> None:
+    manager = ScenarioManager(write_fixture_resources(tmp_path))
+    captured_segments = _patch_simap(monkeypatch)
+    first = manager.simulate_speed_intervention(
+        SpeedInterventionSimulationRequest(
+            flight_id="ARR1",
+            advisories=[SpeedInterventionAdvisoryRequest(s_m=42_000.0, cas_kts=180.0)],
+        )
+    )
+    manager.save_speed_intervention("ARR1", SpeedInterventionSaveRequest(draft_id=first["draft_id"]))
+
+    manager.simulate_speed_intervention(
+        SpeedInterventionSimulationRequest(
+            flight_id="ARR1",
+            advisories=[SpeedInterventionAdvisoryRequest(s_m=30_000.0, cas_kts=170.0)],
+        )
+    )
+
+    assert [segment.s_from_m for segment in captured_segments[2]] == [42_000.0]
+    assert [segment.s_from_m for segment in captured_segments[3]] == [42_000.0, 30_000.0]
 
 
 def test_speed_intervention_validation_rejects_bad_inputs(tmp_path, monkeypatch) -> None:

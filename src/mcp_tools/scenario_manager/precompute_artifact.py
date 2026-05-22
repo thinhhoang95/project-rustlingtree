@@ -85,6 +85,7 @@ class SeedState:
     geoaltitude_m: float
     heading_deg: float | None
     ground_speed_mps: float
+    cas_mps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -540,13 +541,18 @@ def _build_request_bundle(
     if fms_dt_s <= 0.0:
         raise ValueError("fms_dt_s must be positive")
     h_m = max(float(seed.geoaltitude_m), 1.0)
-    cas_mps = float(
-        aero.tas2cas(
-            max(seed.ground_speed_mps, 1.0),
-            h_m,
-            dT=openap_dT(0.0),
+    if seed.cas_mps is None:
+        cas_mps = float(
+            aero.tas2cas(
+                max(seed.ground_speed_mps, 1.0),
+                h_m,
+                dT=openap_dT(0.0),
+            )
         )
-    )
+    else:
+        cas_mps = float(seed.cas_mps)
+        if not np.isfinite(cas_mps) or cas_mps <= 0.0:
+            raise ValueError("seed.cas_mps must be finite and positive")
     command = TacticalCommand(
         lateral_path=route,
         upstream=TacticalCondition(

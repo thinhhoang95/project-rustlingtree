@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,13 @@ from mcp_tools.scenario_manager.path_stretching import (
     PathStretchSimulationRequest,
 )
 from tests.test_scenario_manager import write_fixture_resources
+
+
+@dataclass(frozen=True)
+class _FakeFmsRequest:
+    start_s_m: float = 60_000.0
+    atc_speed_segments: tuple = ()
+    reference_path: object | None = None
 
 
 def _fake_bichannel_result() -> SimpleNamespace:
@@ -33,14 +41,15 @@ def _fake_bichannel_result() -> SimpleNamespace:
 
 def _patch_simap(monkeypatch: pytest.MonkeyPatch) -> list[list[str | tuple[float, float]]]:
     import mcp_tools.scenario_manager.path_stretching as path_stretching
+    import mcp_tools.scenario_manager.served_profile as served_profile
 
     captured_routes: list[list[str | tuple[float, float]]] = []
 
     def fake_build_request(**kwargs):
         captured_routes.append(list(kwargs["route"]))
-        return SimpleNamespace(reference_path=None), SimpleNamespace()
+        return _FakeFmsRequest(), SimpleNamespace()
 
-    monkeypatch.setattr(path_stretching, "_build_request", fake_build_request)
+    monkeypatch.setattr(served_profile, "_build_request", fake_build_request)
     monkeypatch.setattr(path_stretching, "plan_fms_bichannel", lambda *_args, **_kwargs: _fake_bichannel_result())
     return captured_routes
 
@@ -170,6 +179,53 @@ def test_path_stretch_save_replaces_active_diff_and_served_arrival(tmp_path, mon
     assert arrival["route_type"] == "path-stretch"
     assert [32.3, -97.3] in arrival["base_route"]["lateral_path"]
     assert arrival["simulation"]["message"] == "ok"
+
+
+def test_path_stretch_simulate_preserves_active_speed_intervention_context(tmp_path, monkeypatch) -> None:
+    manager = ScenarioManager(write_fixture_resources(tmp_path))
+    _patch_simap(monkeypatch)
+    speed_advisory = {
+        "s_m": 42_000.0,
+        "station_nm_to_runway": 42_000.0 / 1_852.0,
+        "cas_kts": 180.0,
+        "lat": 32.1,
+        "lon": -97.1,
+    }
+    base_route = dict(manager.arrival_schedule()[0]["base_route"])
+    base_route["speed_advisories"] = [speed_advisory]
+    manager.diff = [
+        {
+            "id": "active-speed",
+            "flight_id": "ARR1",
+            "type": "speed-intervention",
+            "overrides": {
+                "route_type": "speed-intervention",
+                "base_route": base_route,
+                "speed_intervention": {
+                    "advisories": [speed_advisory],
+                    "advisory_count": 1,
+                },
+            },
+        }
+    ]
+
+    response = manager.simulate_path_stretch(
+        PathStretchSimulationRequest(
+            flight_id="ARR1",
+            handles=[
+                PathStretchHandleRequest(
+                    insert_after_index=1,
+                    token_type="coordinate",
+                    lat=32.2,
+                    lon=-97.2,
+                )
+            ],
+        )
+    )
+
+    assert response["trajectory"]["path_stretch"]["handle_count"] == 1
+    assert response["trajectory"]["speed_intervention"]["advisory_count"] == 1
+    assert response["trajectory"]["base_route"]["speed_advisories"] == [speed_advisory]
 
 
 def test_path_stretch_validation_rejects_bad_inputs(tmp_path, monkeypatch) -> None:

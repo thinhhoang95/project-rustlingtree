@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, replace
 from typing import Any
 from uuid import uuid4
 
@@ -9,14 +9,12 @@ from pydantic import BaseModel, Field
 
 from mcp_tools.scenario_manager.path_stretching import (
     _arrival_for,
-    _arrival_lateral_path,
     _arrival_row,
     _base_route_for_stretched_arrival,
     _finite_lat,
     _finite_lon,
     _finite_number,
     _metrics,
-    _seed_from_arrival,
     _trajectory_distance_nm,
     _utc_now,
     _wait_atc_point_for_payload,
@@ -28,14 +26,15 @@ from mcp_tools.scenario_manager.precompute_artifact import (
     DEFAULT_MAX_TOD_ITERATIONS,
     DEFAULT_TOD_TOLERANCE_M,
     METERS_PER_NM,
-    _build_request,
     _default_lateral_guidance,
     _payload_from_result,
-    _upstream_identifier_for_route,
 )
-from simap.fms import ATCSpeedSegment
+from mcp_tools.scenario_manager.served_profile import (
+    ServedSpeedAdvisory,
+    build_served_fms_context,
+    merge_speed_advisories,
+)
 from simap.fms_bichannel import FMSBiChannelRequest, plan_fms_bichannel
-from simap.units import kts_to_mps
 
 
 class SpeedInterventionAdvisoryRequest(BaseModel):
@@ -54,31 +53,6 @@ class SpeedInterventionSaveRequest(BaseModel):
     draft_id: str
 
 
-@dataclass(frozen=True)
-class _NormalizedSpeedAdvisory:
-    s_m: float
-    cas_kts: float
-    lat: float | None = None
-    lon: float | None = None
-
-    @property
-    def station_nm_to_runway(self) -> float:
-        return float(self.s_m / METERS_PER_NM)
-
-    @property
-    def atc_segment(self) -> ATCSpeedSegment:
-        return ATCSpeedSegment(s_from_m=self.s_m, cas_mps=kts_to_mps(self.cas_kts))
-
-    def to_payload(self) -> dict[str, float | None]:
-        return {
-            "s_m": self.s_m,
-            "station_nm_to_runway": self.station_nm_to_runway,
-            "cas_kts": self.cas_kts,
-            "lat": self.lat,
-            "lon": self.lon,
-        }
-
-
 def simulate_speed_intervention(
     manager: Any,
     request: SpeedInterventionSimulationRequest,
@@ -88,19 +62,21 @@ def simulate_speed_intervention(
         raise ValueError("flight_id is required")
 
     arrival = _arrival_for(manager, flight_id)
-    base_route = _arrival_lateral_path(arrival)
-    seed = _seed_from_arrival(arrival)
-    fms_request, initial_state = _build_request(
-        route=base_route,
-        upstream_identifier=_upstream_identifier_for_route(base_route),
-        seed=seed,
-        fixes_csv=manager.config.fixes_path,
+    context = build_served_fms_context(
+        arrival,
+        manager.config.fixes_path,
         fms_dt_s=DEFAULT_FMS_DT_S,
+        include_speed_advisories=True,
     )
-    advisories = _normalize_advisories(
+    base_route = context.route
+    seed = context.seed
+    fms_request = context.fms_request
+    initial_state = context.initial_state
+    requested_advisories = _normalize_advisories(
         request.advisories,
         max_s_m=float(fms_request.start_s_m),
     )
+    advisories = merge_speed_advisories(context.speed_advisories, requested_advisories)
     guidance = _default_lateral_guidance()
     baseline_result = plan_fms_bichannel(
         FMSBiChannelRequest(
@@ -222,11 +198,11 @@ def _normalize_advisories(
     advisories: list[SpeedInterventionAdvisoryRequest],
     *,
     max_s_m: float,
-) -> list[_NormalizedSpeedAdvisory]:
+) -> list[ServedSpeedAdvisory]:
     if not advisories:
         raise ValueError("at least one speed-intervention advisory is required")
 
-    normalized: list[_NormalizedSpeedAdvisory] = []
+    normalized: list[ServedSpeedAdvisory] = []
     for index, advisory in enumerate(advisories):
         s_m = _finite_number(advisory.s_m, f"advisories[{index}].s_m")
         if s_m < 0.0 or s_m > max_s_m:
@@ -237,7 +213,7 @@ def _normalize_advisories(
         lat = _finite_lat(advisory.lat, f"advisories[{index}].lat") if advisory.lat is not None else None
         lon = _finite_lon(advisory.lon, f"advisories[{index}].lon") if advisory.lon is not None else None
         normalized.append(
-            _NormalizedSpeedAdvisory(
+            ServedSpeedAdvisory(
                 s_m=s_m,
                 cas_kts=cas_kts,
                 lat=lat,
@@ -251,7 +227,7 @@ def _normalize_advisories(
 def _mark_payload_as_speed_intervention(
     payload: dict[str, Any],
     *,
-    advisories: list[_NormalizedSpeedAdvisory],
+    advisories: list[ServedSpeedAdvisory],
 ) -> None:
     advisory_payload = [advisory.to_payload() for advisory in advisories]
     base_route = payload.get("base_route")

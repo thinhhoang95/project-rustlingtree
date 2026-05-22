@@ -6,7 +6,6 @@ import math
 from typing import Any, Literal
 from uuid import uuid4
 
-import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -20,7 +19,6 @@ from mcp_tools.scenario_manager.precompute_artifact import (
     BaseRoute,
     FinalFixSelection,
     SeedState,
-    _build_request,
     _dedupe_consecutive_route_tokens,
     _default_lateral_guidance,
     _normalize_runway_identifier,
@@ -28,6 +26,12 @@ from mcp_tools.scenario_manager.precompute_artifact import (
     _route_token_payload,
     _route_token_text,
     _upstream_identifier_for_route,
+)
+from mcp_tools.scenario_manager.served_profile import (
+    ServedSpeedAdvisory,
+    arrival_lateral_path as _shared_arrival_lateral_path,
+    build_served_fms_context,
+    seed_from_served_arrival,
 )
 from simap.fms_bichannel import FMSBiChannelRequest, plan_fms_bichannel
 from simap.nlp_colloc.tactical.models import PathWaypoint
@@ -125,14 +129,16 @@ def simulate_path_stretch(
     if stretched_route == base_route:
         raise ValueError("path-stretch request did not change the lateral path")
 
-    seed = _seed_from_arrival(arrival)
-    fms_request, initial_state = _build_request(
+    context = build_served_fms_context(
+        arrival,
+        manager.config.fixes_path,
         route=stretched_route,
-        upstream_identifier=_upstream_identifier_for_route(stretched_route),
-        seed=seed,
-        fixes_csv=manager.config.fixes_path,
         fms_dt_s=DEFAULT_FMS_DT_S,
+        include_speed_advisories=True,
     )
+    seed = context.seed
+    fms_request = context.fms_request
+    initial_state = context.initial_state
     guidance = _default_lateral_guidance()
     result = plan_fms_bichannel(
         FMSBiChannelRequest(
@@ -156,7 +162,12 @@ def simulate_path_stretch(
         lateral_tolerance_m=float(arrival.get("lateral_tolerance_m", DEFAULT_LATERAL_TOLERANCE_M)),
         altitude_tolerance_m=float(arrival.get("altitude_tolerance_m", DEFAULT_ALTITUDE_TOLERANCE_M)),
     )
-    _mark_payload_as_path_stretch(payload, handles=handles, route_points=route_points)
+    _mark_payload_as_path_stretch(
+        payload,
+        handles=handles,
+        route_points=route_points,
+        speed_advisories=context.speed_advisories,
+    )
 
     metrics = _metrics(old_arrival=arrival, new_arrival=payload)
     draft_id = f"path-stretch-{flight_id}-{uuid4().hex[:12]}"
@@ -286,13 +297,7 @@ def _arrival_for(manager: Any, flight_id: str) -> dict[str, Any]:
 
 
 def _arrival_lateral_path(arrival: dict[str, Any]) -> list[str | tuple[float, float]]:
-    base_route = arrival.get("base_route")
-    if not isinstance(base_route, dict):
-        raise ValueError("arrival has missing or malformed base_route")
-    raw_route = base_route.get("lateral_path")
-    if not isinstance(raw_route, list) or len(raw_route) < 2:
-        raise ValueError("arrival has missing or malformed base_route.lateral_path")
-    return [_route_token(token, index) for index, token in enumerate(raw_route)]
+    return _shared_arrival_lateral_path(arrival)
 
 
 def _route_token(token: Any, index: int) -> str | tuple[float, float]:
@@ -404,40 +409,7 @@ def _insert_handles(
 
 
 def _seed_from_arrival(arrival: dict[str, Any]) -> SeedState:
-    columns = _columns(arrival)
-    points = arrival.get("points")
-    if not isinstance(points, list) or len(points) < 2:
-        raise ValueError("arrival requires at least two trajectory points to seed path stretching")
-    first = _point(points[0], "points[0]")
-    second = _point(points[1], "points[1]")
-    time_index = _column_index(columns, "time")
-    lat_index = _column_index(columns, "lat")
-    lon_index = _column_index(columns, "lon")
-    altitude_index = _column_index(columns, "geoaltitude_m")
-
-    first_time = _finite_number(first[time_index], "points[0].time")
-    second_time = _finite_number(second[time_index], "points[1].time")
-    dt_s = abs(second_time - first_time)
-    if dt_s <= 0.0:
-        raise ValueError("arrival initial trajectory points must have distinct times")
-
-    lat = _finite_lat(first[lat_index], "points[0].lat")
-    lon = _finite_lon(first[lon_index], "points[0].lon")
-    second_lat = _finite_lat(second[lat_index], "points[1].lat")
-    second_lon = _finite_lon(second[lon_index], "points[1].lon")
-    distance_m = _latlon_distance_m(lat, lon, second_lat, second_lon)
-    ground_speed_mps = distance_m / dt_s
-    if not math.isfinite(ground_speed_mps) or ground_speed_mps <= 1.0:
-        raise ValueError("arrival initial trajectory points imply invalid ground speed")
-
-    return SeedState(
-        time_s=int(round(first_time)),
-        lat_deg=lat,
-        lon_deg=lon,
-        geoaltitude_m=_finite_number(first[altitude_index], "points[0].geoaltitude_m"),
-        heading_deg=_bearing_deg(lat, lon, second_lat, second_lon),
-        ground_speed_mps=float(ground_speed_mps),
-    )
+    return seed_from_served_arrival(arrival)
 
 
 def _base_route_for_stretched_arrival(
@@ -476,7 +448,8 @@ def _final_fix_selection(arrival: dict[str, Any]) -> FinalFixSelection:
     identifier = str(raw_final_fix.get("identifier") or "FINAL").strip().upper()
     lat = _finite_lat(raw_final_fix.get("lat", 0.0), "final_fix.lat")
     lon = _finite_lon(raw_final_fix.get("lon", 0.0), "final_fix.lon")
-    base_route = arrival.get("base_route") if isinstance(arrival.get("base_route"), dict) else {}
+    raw_base_route = arrival.get("base_route")
+    base_route = raw_base_route if isinstance(raw_base_route, dict) else {}
     return FinalFixSelection(
         waypoint=PathWaypoint(identifier=identifier, lat_deg=lat, lon_deg=lon),
         distance_nm=float(raw_final_fix.get("distance_nm") or 0.0),
@@ -491,7 +464,9 @@ def _mark_payload_as_path_stretch(
     *,
     handles: list[_NormalizedHandle],
     route_points: list[_NormalizedRoutePoint] | None,
+    speed_advisories: tuple[ServedSpeedAdvisory, ...] = (),
 ) -> None:
+    speed_advisory_payload = [advisory.to_payload() for advisory in speed_advisories]
     base_route = payload.get("base_route")
     if isinstance(base_route, dict):
         base_route["type"] = "path-stretch"
@@ -499,6 +474,8 @@ def _mark_payload_as_path_stretch(
         base_route["handles"] = [asdict(handle) for handle in handles]
         if route_points is not None:
             base_route["route_points"] = [asdict(point) for point in route_points]
+        if speed_advisory_payload:
+            base_route["speed_advisories"] = speed_advisory_payload
     payload["route_type"] = "path-stretch"
     payload["final_fix"] = payload.get("baseline_final_fix")
     payload["path_stretch"] = {
@@ -507,6 +484,11 @@ def _mark_payload_as_path_stretch(
         "route_points": [asdict(point) for point in route_points] if route_points is not None else None,
         "route_point_count": len(route_points) if route_points is not None else None,
     }
+    if speed_advisory_payload:
+        payload["speed_intervention"] = {
+            "advisories": speed_advisory_payload,
+            "advisory_count": len(speed_advisory_payload),
+        }
 
 
 def _metrics(*, old_arrival: dict[str, Any], new_arrival: dict[str, Any]) -> dict[str, float]:
