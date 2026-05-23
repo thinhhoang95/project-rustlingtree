@@ -28,6 +28,21 @@ class BaseAdvisory:
 
 
 @dataclass(frozen=True)
+class AmanAdvisory:
+    flight_number: str
+    icao24: str
+    flight_id: str
+    runway: str
+    physical_runway: str
+    original_time_at_last_event: int
+    original_time_at_last_event_utc: str
+    advised_time_at_last_event: int
+    advised_time_at_last_event_utc: str
+    seconds_to_gain: int
+    minutes_to_gain: float
+
+
+@dataclass(frozen=True)
 class FeasibilityAdvisory(BaseAdvisory):
     miles_to_gain_m: float
     search_converged: bool

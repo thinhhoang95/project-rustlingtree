@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from mcp_tools.advisors import FeasibilityAdvisory, SpeedControlAdvisory, VectoringAdvisory
+from mcp_tools.advisors import AmanAdvisory, FeasibilityAdvisory, SpeedControlAdvisory, VectoringAdvisory
 from mcp_tools.scenario_manager.api import create_app
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
@@ -369,9 +369,31 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
                 equivalent_vectoring_m=11_112.0,
             )
 
+    class FakeAmanAdvisor:
+        def __init__(self, _manager: ScenarioManager) -> None:
+            pass
+
+        def evaluate(self) -> list[AmanAdvisory]:
+            return [
+                AmanAdvisory(
+                    flight_number="CALLARR1",
+                    icao24="arr001",
+                    flight_id="ARR1",
+                    runway="RW35C",
+                    physical_runway="17C/35C",
+                    original_time_at_last_event=500,
+                    original_time_at_last_event_utc="1970-01-01T00:08:20Z",
+                    advised_time_at_last_event=560,
+                    advised_time_at_last_event_utc="1970-01-01T00:09:20Z",
+                    seconds_to_gain=60,
+                    minutes_to_gain=1.0,
+                )
+            ]
+
     monkeypatch.setattr("mcp_tools.scenario_manager.api.FeasibilityAdvisor", FakeFeasibilityAdvisor)
     monkeypatch.setattr("mcp_tools.scenario_manager.api.VectoringAdvisor", FakeVectoringAdvisor)
     monkeypatch.setattr("mcp_tools.scenario_manager.api.SpeedControlAdvisor", FakeSpeedControlAdvisor)
+    monkeypatch.setattr("mcp_tools.scenario_manager.api.AmanAdvisor", FakeAmanAdvisor)
     app = create_app()
 
     route_paths = {str(getattr(route, "path", "")) for route in app.routes}
@@ -384,6 +406,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         "/tools/evals/conflicts",
         "/tools/evals/runway-overlaps",
         "/tools/advisors/feasibility",
+        "/tools/advisors/aman",
         "/tools/advisors/vectoring",
         "/tools/advisors/speed-control",
         "/diff",
@@ -404,6 +427,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         conflicts = client.get("/tools/evals/conflicts")
         runway_overlaps = client.get("/tools/evals/runway-overlaps")
         advisory_feasibility = client.get("/tools/advisors/feasibility", params={"flight_id": "ARR1"})
+        advisory_aman = client.get("/tools/advisors/aman")
         advisory_vectoring = client.get(
             "/tools/advisors/vectoring",
             params={"flight_id": "ARR1", "extra_distance_nmi": 2.0},
@@ -419,6 +443,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert conflicts.status_code == 200
     assert runway_overlaps.status_code == 200
     assert advisory_feasibility.status_code == 200
+    assert advisory_aman.status_code == 200
     assert advisory_vectoring.status_code == 200
     assert advisory_speed.status_code == 200
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
@@ -446,5 +471,6 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert conflicts.json() == []
     assert runway_overlaps.json() == []
     assert advisory_feasibility.json()[0]["miles_to_gain_nmi"] == 2.0
+    assert advisory_aman.json()[0]["seconds_to_gain"] == 60
     assert advisory_vectoring.json()["required_feasibility_miles_nmi"] == 4.0
     assert advisory_speed.json()["equivalent_vectoring_miles_nmi"] == 6.0

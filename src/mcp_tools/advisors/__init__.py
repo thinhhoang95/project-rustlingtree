@@ -1,8 +1,10 @@
 """Advisory tools for scenario-manager workflows."""
 
+from .aman import AmanAdvisor
 from .feasibility import FeasibilityAdvisor
 from .models import (
     AdvisoryFlight,
+    AmanAdvisory,
     BaseAdvisory,
     FeasibilityAdvisory,
     SpeedControlAdvisory,
@@ -14,6 +16,8 @@ from .vectoring import VectoringAdvisor
 
 __all__ = [
     "AdvisoryFlight",
+    "AmanAdvisor",
+    "AmanAdvisory",
     "ArrivalProfile",
     "BaseAdvisory",
     "FeasibilityAdvisor",

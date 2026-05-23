@@ -4,10 +4,10 @@ The scenario-manager API exposes advisory endpoints under `/tools/advisors/*`.
 Advisors are read-only what-if tools. They do not mutate the scenario manager or
 write intervention diffs.
 
-Unlike evaluator endpoints, advisors recompute SIMAP longitudinal profiles from
-the currently served arrival payload. This matters because the served payload is
-the active scenario-manager view: base artifact plus any future diff-applied
-trajectory state.
+Profile-based advisors recompute SIMAP longitudinal profiles from the currently
+served arrival payload. Schedule-based advisors such as AMAN read the active
+served arrival/departure schedules directly. In both cases, advisory results are
+based on the scenario-manager view after any saved diffs have been applied.
 
 ## Common Concepts
 
@@ -15,6 +15,7 @@ trajectory state.
 
 - `miles_to_gain_nmi`: nautical miles.
 - `minutes_to_gain`: minutes.
+- `seconds_to_gain`: seconds.
 - `*_m`: meters.
 - `*_s`: seconds.
 - `cas_kts`: calibrated airspeed in knots.
@@ -31,7 +32,8 @@ trajectory state.
 
 ### Baseline And What-If Profiles
 
-Every advisor response contains baseline and what-if planner status fields:
+SIMAP profile advisor responses contain baseline and what-if planner status
+fields:
 
 - `baseline_*`: result from the served arrival rebuilt as a longitudinal profile.
 - `what_if_*`: result after applying the advisory what-if.
@@ -41,7 +43,7 @@ uses the baseline profile as the what-if profile.
 
 ### Shared Response Fields
 
-All advisor responses include:
+All SIMAP profile advisor responses include:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -57,6 +59,67 @@ All advisor responses include:
 | `what_if_message` | string | Planner message for the what-if profile. |
 | `baseline_time_s` | number | Baseline profile total time in seconds. |
 | `what_if_time_s` | number | What-if profile total time in seconds. |
+
+## AMAN Advisor
+
+```text
+GET /tools/advisors/aman
+```
+
+The AMAN advisor computes arrival delays that would clear runway-use overlaps
+involving arrivals. Departures remain fixed. Arrivals are processed first-come,
+first-served per physical runway using the active served schedules, so saved
+scenario-manager diffs are reflected.
+
+It uses the same runway occupancy assumptions and physical-runway grouping as
+`/tools/evals/runway-overlaps`.
+
+### Example Request
+
+```bash
+curl "http://127.0.0.1:8000/tools/advisors/aman" | python -m json.tool
+```
+
+### Example Response
+
+Only arrivals with positive advised delay are returned.
+
+```json
+[
+  {
+    "flight_number": "AAL123",
+    "icao24": "a1b2c3",
+    "flight_id": "AAL123M1a1b2c3",
+    "runway": "RW35C",
+    "physical_runway": "17C/35C",
+    "original_time_at_last_event": 1775021200,
+    "original_time_at_last_event_utc": "2026-04-01T07:26:40Z",
+    "advised_time_at_last_event": 1775021260,
+    "advised_time_at_last_event_utc": "2026-04-01T07:27:40Z",
+    "seconds_to_gain": 60,
+    "minutes_to_gain": 1.0
+  }
+]
+```
+
+### AMAN-Specific Fields
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `physical_runway` | string | Normalized physical runway surface used for overlap grouping. |
+| `original_time_at_last_event` | integer | Current served arrival threshold time in epoch seconds. |
+| `original_time_at_last_event_utc` | string | UTC rendering of the original threshold time. |
+| `advised_time_at_last_event` | integer | Delayed threshold time that avoids arrival-involving overlaps on the runway. |
+| `advised_time_at_last_event_utc` | string | UTC rendering of the advised threshold time. |
+| `seconds_to_gain` | integer | Delay to apply to the arrival threshold time. |
+| `minutes_to_gain` | number | `seconds_to_gain / 60.0`. |
+
+### Client Interpretation
+
+- Empty list means no arrival needs runway-overlap delay advice.
+- AMAN does not attempt to resolve departure-departure overlaps.
+- If each returned arrival gained the advised delay, the runway-overlap
+  evaluator should report no remaining overlap where either use is an arrival.
 
 ## Feasibility Advisor
 
@@ -274,6 +337,8 @@ responses. Common causes:
 - Unknown `flight_id`.
 - Missing or malformed served arrival fields such as `base_route`, `points`,
   `columns`, or route fixes.
+- Missing or malformed served runway-overlap fields such as `runway`,
+  `time_at_last_event`, or `departure_time`.
 - `extra_distance_nmi < 0`.
 - `s_m < 0` or `s_m` beyond the arrival reference path.
 - `cas_kts <= 0`.
@@ -287,9 +352,11 @@ show the returned error body when available.
 
 1. Read `/arrivals` to display the active served schedule.
 2. Use `/tools/evals/feasibility` to rank currently infeasible arrivals.
-3. For a selected arrival, call `/tools/advisors/feasibility?flight_id=...` to
+3. Use `/tools/evals/runway-overlaps` and `/tools/advisors/aman` to identify
+   arrival delays needed to clear runway-use overlaps.
+4. For a selected arrival, call `/tools/advisors/feasibility?flight_id=...` to
    estimate the required extra path distance.
-4. Call `/tools/advisors/vectoring` with candidate vector lengths and compare
+5. Call `/tools/advisors/vectoring` with candidate vector lengths and compare
    `what_if_success`, `minutes_to_gain`, and `required_feasibility_miles_nmi`.
-5. Call `/tools/advisors/speed-control` for candidate lower-speed instructions
+6. Call `/tools/advisors/speed-control` for candidate lower-speed instructions
    and compare `minutes_to_gain` against vectoring alternatives.

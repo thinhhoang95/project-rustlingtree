@@ -6,10 +6,11 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 
-from mcp_tools.advisors import FeasibilityAdvisor, SpeedControlAdvisor, VectoringAdvisor
+from mcp_tools.advisors import AmanAdvisor, FeasibilityAdvisor, SpeedControlAdvisor, VectoringAdvisor
 from mcp_tools.evaluators import ConflictEvaluator, FeasibleEvaluator, RunwayOverlapEvaluator
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import (
+    AmanAdvisoryItem,
     ArrivalScheduleItem,
     ConflictEvaluationItem,
     DepartureScheduleItem,
@@ -75,6 +76,12 @@ def create_app() -> FastAPI:
         """Answer: how much extra upstream distance is needed for vertical feasibility?"""
         manager: ScenarioManager = request.app.state.scenario_manager
         return [asdict(item) for item in FeasibilityAdvisor(manager).evaluate(flight_id=flight_id)]
+
+    @app.get("/tools/advisors/aman", response_model=list[AmanAdvisoryItem])
+    def advisory_aman(request: Request) -> list[dict[str, object]]:
+        """Answer: which arrivals need delay to clear runway-use overlaps?"""
+        manager: ScenarioManager = request.app.state.scenario_manager
+        return [asdict(item) for item in AmanAdvisor(manager).evaluate()]
 
     @app.get("/tools/advisors/vectoring", response_model=VectoringAdvisoryItem)
     def advisory_vectoring(

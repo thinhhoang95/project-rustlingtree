@@ -225,6 +225,20 @@ class RunwayOverlapEvaluationItem(BaseModel):
     overlapping_duration: int
 
 
+class AmanAdvisoryItem(BaseModel):
+    flight_number: str
+    icao24: str
+    flight_id: str
+    runway: str
+    physical_runway: str
+    original_time_at_last_event: int
+    original_time_at_last_event_utc: str
+    advised_time_at_last_event: int
+    advised_time_at_last_event_utc: str
+    seconds_to_gain: int
+    minutes_to_gain: float
+
+
 class BaseAdvisoryItem(BaseModel):
     flight_number: str
     icao24: str

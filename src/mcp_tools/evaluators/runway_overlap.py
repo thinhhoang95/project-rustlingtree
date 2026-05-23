@@ -54,8 +54,8 @@ class RunwayOverlapEvaluator:
 
     def evaluate(self) -> list[RunwayOverlapEvent]:
         uses = [
-            *(_runway_use_from_arrival(arrival) for arrival in self.manager.arrival_schedule()),
-            *(_runway_use_from_departure(departure) for departure in self.manager.departure_schedule()),
+            *(runway_use_from_arrival(arrival) for arrival in self.manager.arrival_schedule()),
+            *(runway_use_from_departure(departure) for departure in self.manager.departure_schedule()),
         ]
         if len(uses) < 2:
             return []
@@ -66,7 +66,7 @@ class RunwayOverlapEvaluator:
 
         overlaps: list[RunwayOverlapEvent] = []
         for runway_uses in uses_by_runway.values():
-            runway_uses.sort(key=_runway_use_sort_key)
+            runway_uses.sort(key=runway_use_sort_key)
             overlaps.extend(_overlaps_for_runway(runway_uses))
 
         return sorted(
@@ -79,6 +79,26 @@ class RunwayOverlapEvaluator:
                 event.use_b.flight_id,
             ),
         )
+
+
+def runway_use_from_arrival(arrival: dict[str, Any]) -> RunwayUse:
+    return _runway_use_from_arrival(arrival)
+
+
+def runway_use_from_departure(departure: dict[str, Any]) -> RunwayUse:
+    return _runway_use_from_departure(departure)
+
+
+def runway_use_sort_key(use: RunwayUse) -> tuple[int, int, str, str, str]:
+    return _runway_use_sort_key(use)
+
+
+def physical_runway_key(runway: str) -> str:
+    return _physical_runway_key(runway.strip().upper())
+
+
+def time_utc(time_s: int) -> str:
+    return _time_utc(time_s)
 
 
 def _runway_use_from_arrival(arrival: dict[str, Any]) -> RunwayUse:

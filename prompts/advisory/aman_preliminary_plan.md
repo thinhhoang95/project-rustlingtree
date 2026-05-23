@@ -6,3 +6,10 @@ The basic idea is similar to any slot allocator: you divide the timeline of each
 
 Note that we will keep the departure flights fixed, so events associated with the departures are kept fixed (they are separately managed by a flow control system), so if there is an overlap between an arrival and a departure on the same runway, you just slide the arrival to after the departure. Don't slide any flight in advance (to earlier time) i.e., causing a negative delay.
 
+The output should contain all advised time-to-gain in minutes for all arrival flights affected.
+
+## Implementation location
+In `src/advisors/aman` directory. Keep the code organized, don't write all code into just one giant Python file.
+
+- Note that the results will have to depend on diff-mutated flight list in `ScenarioManager`.
+- Consistency between AMAN suggested values and the runway overlapping evaluator needs to be maintained. In other words, if the agent could achieve exactly the minutes-to-gain dictated by the AMAN, the evaluator should return zero overlapping events (scoped to arrivals only).
