@@ -357,6 +357,7 @@ Example response:
 | `flight_id` | yes | string | Arrival flight id from `/arrivals`. Leading/trailing whitespace is stripped. |
 | `route` | preferred | array | Full edited lateral route. If supplied, it replaces the legacy `handles` workflow. Requires at least two points. |
 | `handles` | legacy | array | Insert-only legacy shape. Supported for compatibility when `route` is omitted. Requires at least one handle. |
+| `vector_assist` | no | object or null | Optional provenance metadata from `/tools/sensory/vector-assist`. Generic path-stretch requests should omit it. |
 
 #### `route[]` Fields
 
@@ -390,6 +391,7 @@ Path Stretch adds these fields to the shared simulate response:
 | `old_route_tokens` | array of strings | Display tokens for the served base route before editing. Coordinate tokens are formatted as `"lat,lon"`. |
 | `new_route_tokens` | array of strings | Display tokens for the edited route sent to SIMAP after normalization and consecutive duplicate removal. |
 | `trajectory.path_stretch` | object | Edit metadata stored on the simulated trajectory payload. |
+| `trajectory.path_stretch.vector_assist` | object or omitted | Vector-assist attempt history when the request included `vector_assist` metadata. |
 | `trajectory.base_route.route_points` | array or omitted | Full normalized route-point list when the preferred `route` request shape was used. |
 | `trajectory.base_route.handles` | array | Normalized legacy handles inserted into the base route. Empty for full-route edits. |
 
@@ -402,6 +404,7 @@ Path Stretch saved `diff.command` fields:
 | `route` | array or null | Normalized full route points from the request, or `null` for legacy handle requests. |
 | `old_route` | array | Base lateral route tokens before editing. Fix tokens are strings; coordinate tokens are `[lat, lon]`. |
 | `new_route` | array | Edited lateral route tokens after normalization and duplicate removal. Fix tokens are strings; coordinate tokens are `[lat, lon]`. |
+| `vector_assist` | object or null | Optional sensory-tool provenance metadata from the simulate request. |
 
 `trajectory.path_stretch` fields:
 
@@ -411,6 +414,9 @@ Path Stretch saved `diff.command` fields:
 | `handle_count` | integer | Number of normalized legacy handles. |
 | `route_points` | array or null | Normalized full route points from the request, or `null` for legacy handle requests. |
 | `route_point_count` | integer or null | Number of full route points from the request, or `null` for legacy handle requests. |
+| `vector_assist.attempts` | array | Vector-assist attempts retained across saved vector-assist-tagged path-stretch edits. |
+| `vector_assist.attempt_count` | integer | Number of retained vector-assist attempts. |
+| `vector_assist.replaced_dogleg_count` | integer | Number of retained `replaced_dogleg` attempts. |
 
 #### Path Stretch Validation
 
@@ -426,6 +432,8 @@ The endpoint returns HTTP `400` when:
 - a `fix_identifier` is not in the configured fix catalog.
 - a coordinate is not finite or is outside valid latitude/longitude bounds.
 - a legacy `insert_after_index` does not target an existing base-route segment.
+- a vector-assist-tagged request would exceed two vectoring attempts for the flight.
+- a vector-assist-tagged request would add a second `replaced_dogleg` attempt.
 - the arrival does not have enough trajectory seed data to run SIMAP.
 
 ### Save Path Stretch

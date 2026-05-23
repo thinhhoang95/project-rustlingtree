@@ -9,6 +9,7 @@ from mcp_tools.advisors import AmanAdvisory, FeasibilityAdvisory, SpeedControlAd
 from mcp_tools.scenario_manager.api import create_app
 from mcp_tools.scenario_manager.manager import ScenarioManager
 from mcp_tools.scenario_manager.models import ScenarioResourceConfig
+from mcp_tools.sensory.models import VectorAssistResponse
 
 
 def write_fixture_resources(tmp_path: Path) -> ScenarioResourceConfig:
@@ -290,6 +291,27 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     manager = ScenarioManager(write_fixture_resources(tmp_path))
     monkeypatch.setattr("mcp_tools.scenario_manager.api.ScenarioManager", lambda _config: manager)
 
+    def fake_vector_assist(_body):
+        return VectorAssistResponse(
+            flight_number="CALLARR1",
+            icao24="arr001",
+            flight_id="ARR1",
+            runway="RW35C",
+            arrival_cluster="NE",
+            operational_mask="north",
+            target_time_gain_s=60.0,
+            attempt_status={
+                "previous_attempt_count": 0,
+                "remaining_attempts": 2,
+                "replaced_dogleg_used": False,
+                "replaced_dogleg_available": True,
+            },
+            rejected_counts={},
+            evaluated_candidate_count=0,
+        )
+
+    monkeypatch.setattr(manager, "vector_assist", fake_vector_assist)
+
     class FakeFeasibilityAdvisor:
         def __init__(self, _manager: ScenarioManager) -> None:
             pass
@@ -409,6 +431,7 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
         "/tools/advisors/aman",
         "/tools/advisors/vectoring",
         "/tools/advisors/speed-control",
+        "/tools/sensory/vector-assist",
         "/diff",
         "/tools/path-stretch/simulate",
         "/diff/path-stretch/{flight_id}",
@@ -436,6 +459,10 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
             "/tools/advisors/speed-control",
             params={"flight_id": "ARR1", "s_m": 50_000.0, "cas_kts": 180.0},
         )
+        sensory_vector = client.post(
+            "/tools/sensory/vector-assist",
+            json={"flight_id": "ARR1", "target_time_gain_s": 60.0},
+        )
 
     assert departures.status_code == 200
     assert arrivals.status_code == 200
@@ -446,6 +473,8 @@ def test_fastapi_app_exposes_scenario_routes(tmp_path: Path, monkeypatch) -> Non
     assert advisory_aman.status_code == 200
     assert advisory_vectoring.status_code == 200
     assert advisory_speed.status_code == 200
+    assert sensory_vector.status_code == 200
+    assert sensory_vector.json()["operational_mask"] == "north"
     assert departures.json()[0]["points"] == [[90, 33.0, -98.0, 300.0, 3], [140, 33.2, -98.2, 1500.0, 3]]
     assert arrivals.json()[0]["points"] == [[310, 32.0, -97.0, 1000.0, 3], [500, 32.1, -97.1, 200.0, 3]]
     assert arrivals.json()[0]["cas_profile"]["columns"] == ["time", "cas_kts"]

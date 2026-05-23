@@ -53,10 +53,21 @@ class PathStretchRouteTokenRequest(BaseModel):
     fix_identifier: str | None = None
 
 
+class PathStretchVectorAssistMetadata(BaseModel):
+    variant: Literal["sandwiched_dogleg", "replaced_dogleg"]
+    candidate_kind: Literal["identified", "free"]
+    target_time_gain_s: float
+    projected_segment_index: int
+    lat: float
+    lon: float
+    fix_identifier: str | None = None
+
+
 class PathStretchSimulationRequest(BaseModel):
     flight_id: str
     handles: list[PathStretchHandleRequest] = Field(default_factory=list)
     route: list[PathStretchRouteTokenRequest] | None = None
+    vector_assist: PathStretchVectorAssistMetadata | None = None
 
 
 class PathStretchSaveRequest(BaseModel):
@@ -102,6 +113,16 @@ class _NormalizedRoutePoint:
         return (self.lat, self.lon)
 
 
+@dataclass(frozen=True)
+class PathStretchRouteSimulation:
+    artifact: Any
+    payload: dict[str, Any]
+    metrics: dict[str, float]
+    old_route_tokens: list[str]
+    new_route_tokens: list[str]
+    simulation: dict[str, Any] | None
+
+
 def simulate_path_stretch(
     manager: Any,
     request: PathStretchSimulationRequest,
@@ -125,6 +146,81 @@ def simulate_path_stretch(
         handles = _normalize_handles(request.handles, route_length=len(base_route), fix_catalog=fix_catalog)
         stretched_route = _insert_handles(base_route, handles)
 
+    if len(stretched_route) < 2:
+        raise ValueError("path-stretch route requires at least two distinct points")
+    if stretched_route == base_route:
+        raise ValueError("path-stretch request did not change the lateral path")
+
+    vector_assist_payload = _vector_assist_payload(request.vector_assist)
+    _validate_vector_assist_attempt_limits(arrival, vector_assist_payload)
+    route_simulation = simulate_path_stretch_route(
+        manager,
+        arrival,
+        stretched_route,
+        handles=handles,
+        route_points=route_points,
+        vector_assist=vector_assist_payload,
+    )
+    payload = route_simulation.payload
+    metrics = route_simulation.metrics
+
+    draft_id = f"path-stretch-{flight_id}-{uuid4().hex[:12]}"
+    created_at_utc = _utc_now()
+    diff_record = {
+        "id": draft_id,
+        "flight_id": flight_id,
+        "created_at_utc": created_at_utc,
+        "source": "path-stretching",
+        "type": "path-stretch",
+        "command": {
+            "type": "path_stretch",
+            "handles": [asdict(handle) for handle in handles],
+            "route": [asdict(point) for point in route_points] if route_points is not None else None,
+            "old_route": [_route_token_payload(token) for token in base_route],
+            "new_route": [_route_token_payload(token) for token in stretched_route],
+            "vector_assist": vector_assist_payload,
+        },
+        "overrides": payload,
+        "base": {
+            "route_type": arrival.get("route_type"),
+            "fix_sequence": arrival.get("fix_sequence"),
+            "fix_count": arrival.get("fix_count"),
+            "base_route": arrival.get("base_route"),
+            "final_fix": arrival.get("final_fix"),
+            "baseline_final_fix": arrival.get("baseline_final_fix"),
+            "simulation": arrival.get("simulation"),
+        },
+    }
+    response = {
+        "draft_id": draft_id,
+        "flight_id": flight_id,
+        "created_at_utc": created_at_utc,
+        "trajectory": payload,
+        "metrics": metrics,
+        "old_route_tokens": route_simulation.old_route_tokens,
+        "new_route_tokens": route_simulation.new_route_tokens,
+        "simulation": route_simulation.simulation,
+    }
+    manager.path_stretch_drafts[draft_id] = {
+        "flight_id": flight_id,
+        "response": response,
+        "diff_record": diff_record,
+        "artifact": asdict(route_simulation.artifact),
+    }
+    return response
+
+
+def simulate_path_stretch_route(
+    manager: Any,
+    arrival: dict[str, Any],
+    stretched_route: list[str | tuple[float, float]],
+    *,
+    handles: list[_NormalizedHandle] | None = None,
+    route_points: list[_NormalizedRoutePoint] | None = None,
+    vector_assist: dict[str, Any] | None = None,
+) -> PathStretchRouteSimulation:
+    """Run SIMAP for a stretched route without creating a draft or mutating diffs."""
+    base_route = _arrival_lateral_path(arrival)
     if len(stretched_route) < 2:
         raise ValueError("path-stretch route requires at least two distinct points")
     if stretched_route == base_route:
@@ -165,55 +261,21 @@ def simulate_path_stretch(
     )
     _mark_payload_as_path_stretch(
         payload,
-        handles=handles,
+        arrival=arrival,
+        handles=handles or [],
         route_points=route_points,
         speed_advisories=context.speed_advisories,
+        vector_assist=vector_assist,
     )
 
-    metrics = _metrics(old_arrival=arrival, new_arrival=payload)
-    draft_id = f"path-stretch-{flight_id}-{uuid4().hex[:12]}"
-    created_at_utc = _utc_now()
-    diff_record = {
-        "id": draft_id,
-        "flight_id": flight_id,
-        "created_at_utc": created_at_utc,
-        "source": "path-stretching",
-        "type": "path-stretch",
-        "command": {
-            "type": "path_stretch",
-            "handles": [asdict(handle) for handle in handles],
-            "route": [asdict(point) for point in route_points] if route_points is not None else None,
-            "old_route": [_route_token_payload(token) for token in base_route],
-            "new_route": [_route_token_payload(token) for token in stretched_route],
-        },
-        "overrides": payload,
-        "base": {
-            "route_type": arrival.get("route_type"),
-            "fix_sequence": arrival.get("fix_sequence"),
-            "fix_count": arrival.get("fix_count"),
-            "base_route": arrival.get("base_route"),
-            "final_fix": arrival.get("final_fix"),
-            "baseline_final_fix": arrival.get("baseline_final_fix"),
-            "simulation": arrival.get("simulation"),
-        },
-    }
-    response = {
-        "draft_id": draft_id,
-        "flight_id": flight_id,
-        "created_at_utc": created_at_utc,
-        "trajectory": payload,
-        "metrics": metrics,
-        "old_route_tokens": [_display_route_token(token) for token in base_route],
-        "new_route_tokens": [_display_route_token(token) for token in stretched_route],
-        "simulation": payload.get("simulation"),
-    }
-    manager.path_stretch_drafts[draft_id] = {
-        "flight_id": flight_id,
-        "response": response,
-        "diff_record": diff_record,
-        "artifact": asdict(artifact),
-    }
-    return response
+    return PathStretchRouteSimulation(
+        artifact=artifact,
+        payload=payload,
+        metrics=_metrics(old_arrival=arrival, new_arrival=payload),
+        old_route_tokens=[_display_route_token(token) for token in base_route],
+        new_route_tokens=[_display_route_token(token) for token in stretched_route],
+        simulation=payload.get("simulation"),
+    )
 
 
 def save_path_stretch(
@@ -230,6 +292,9 @@ def save_path_stretch(
         raise ValueError("path-stretch draft does not match requested flight_id")
 
     diff_record = dict(draft["diff_record"])
+    command = diff_record.get("command")
+    vector_assist = command.get("vector_assist") if isinstance(command, dict) else None
+    _validate_vector_assist_attempt_limits(_arrival_for(manager, flight_id), vector_assist)
     manager.diff = [
         record
         for record in manager.diff
@@ -464,9 +529,11 @@ def _final_fix_selection(arrival: dict[str, Any]) -> FinalFixSelection:
 def _mark_payload_as_path_stretch(
     payload: dict[str, Any],
     *,
+    arrival: dict[str, Any],
     handles: list[_NormalizedHandle],
     route_points: list[_NormalizedRoutePoint] | None,
     speed_advisories: tuple[ServedSpeedAdvisory, ...] = (),
+    vector_assist: dict[str, Any] | None = None,
 ) -> None:
     speed_advisory_payload = [advisory.to_payload() for advisory in speed_advisories]
     base_route = payload.get("base_route")
@@ -486,11 +553,74 @@ def _mark_payload_as_path_stretch(
         "route_points": [asdict(point) for point in route_points] if route_points is not None else None,
         "route_point_count": len(route_points) if route_points is not None else None,
     }
+    attempts = _vector_assist_attempts_after(arrival, vector_assist)
+    if attempts:
+        replaced_count = sum(1 for attempt in attempts if attempt.get("variant") == "replaced_dogleg")
+        payload["path_stretch"]["vector_assist"] = {
+            "attempts": attempts,
+            "attempt_count": len(attempts),
+            "replaced_dogleg_count": replaced_count,
+        }
     if speed_advisory_payload:
         payload["speed_intervention"] = {
             "advisories": speed_advisory_payload,
             "advisory_count": len(speed_advisory_payload),
         }
+
+
+def _vector_assist_payload(metadata: PathStretchVectorAssistMetadata | None) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    payload = metadata.model_dump()
+    _finite_number(payload["target_time_gain_s"], "vector_assist.target_time_gain_s")
+    _finite_lat(payload["lat"], "vector_assist.lat")
+    _finite_lon(payload["lon"], "vector_assist.lon")
+    segment_index = int(payload["projected_segment_index"])
+    if segment_index < 0:
+        raise ValueError("vector_assist.projected_segment_index must be nonnegative")
+    payload["projected_segment_index"] = segment_index
+    if payload.get("fix_identifier") is not None:
+        fix_identifier = str(payload["fix_identifier"]).strip().upper()
+        payload["fix_identifier"] = fix_identifier or None
+    return payload
+
+
+def _existing_vector_assist_attempts(arrival: dict[str, Any]) -> list[dict[str, Any]]:
+    path_stretch = arrival.get("path_stretch")
+    if not isinstance(path_stretch, dict):
+        return []
+    vector_assist = path_stretch.get("vector_assist")
+    if not isinstance(vector_assist, dict):
+        return []
+    attempts = vector_assist.get("attempts")
+    if not isinstance(attempts, list):
+        return []
+    return [dict(attempt) for attempt in attempts if isinstance(attempt, dict)]
+
+
+def _validate_vector_assist_attempt_limits(
+    arrival: dict[str, Any],
+    vector_assist: dict[str, Any] | None,
+) -> None:
+    if vector_assist is None:
+        return
+    attempts = _existing_vector_assist_attempts(arrival)
+    if len(attempts) >= 2:
+        raise ValueError("maximum of 2 vector-assist attempts per flight has already been reached")
+    if vector_assist.get("variant") == "replaced_dogleg" and any(
+        attempt.get("variant") == "replaced_dogleg" for attempt in attempts
+    ):
+        raise ValueError("only one replaced dogleg vector-assist attempt is allowed per flight")
+
+
+def _vector_assist_attempts_after(
+    arrival: dict[str, Any],
+    vector_assist: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    attempts = _existing_vector_assist_attempts(arrival)
+    if vector_assist is not None:
+        attempts.append(dict(vector_assist))
+    return attempts
 
 
 def _metrics(*, old_arrival: dict[str, Any], new_arrival: dict[str, Any]) -> dict[str, float]:

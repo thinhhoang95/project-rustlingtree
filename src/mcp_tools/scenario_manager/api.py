@@ -30,6 +30,7 @@ from mcp_tools.scenario_manager.speed_intervention import (
     SpeedInterventionSaveRequest,
     SpeedInterventionSimulationRequest,
 )
+from mcp_tools.sensory.models import VectorAssistRequest, VectorAssistResponse
 
 
 @asynccontextmanager
@@ -114,6 +115,18 @@ def create_app() -> FastAPI:
                 cas_kts=cas_kts,
             )
         )
+
+    @app.post("/tools/sensory/vector-assist", response_model=VectorAssistResponse)
+    def sensory_vector_assist(
+        request: Request,
+        body: VectorAssistRequest,
+    ) -> VectorAssistResponse:
+        """Answer: which vectoring doglegs can gain a target amount of time?"""
+        manager: ScenarioManager = request.app.state.scenario_manager
+        try:
+            return manager.vector_assist(body)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/diff", response_model=list[dict[str, object]])
     def diff(request: Request) -> list[dict[str, object]]:

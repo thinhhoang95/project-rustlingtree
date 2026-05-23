@@ -7,6 +7,13 @@ It exposes two read-only schedule endpoints:
 - departure schedule: ADS-B compressed trajectory payload plus departure metadata
 - arrival schedule: SIMAP compressed trajectory payload plus arrival metadata
 
+Related tool documentation:
+
+- [Advisors](API_ADVISORS.md)
+- [Evaluators](API_EVAL_TOOLS.md)
+- [Edit tools](API_EDIT_TOOLS.md)
+- [Sensory tools](API_SENSORY_TOOLS.md)
+
 ## Run The API
 
 Start the server with either command:

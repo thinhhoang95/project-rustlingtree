@@ -19,6 +19,7 @@ from mcp_tools.scenario_manager.speed_intervention import (
     save_speed_intervention,
     simulate_speed_intervention,
 )
+from mcp_tools.sensory.models import VectorAssistRequest, VectorAssistResponse
 from mcp_tools.scenario_manager.resources import (
     load_compressed_flights,
     load_events,
@@ -186,6 +187,11 @@ class ScenarioManager:
 
     def save_speed_intervention(self, flight_id: str, request: SpeedInterventionSaveRequest) -> dict[str, Any]:
         return save_speed_intervention(self, flight_id, request)
+
+    def vector_assist(self, request: VectorAssistRequest) -> VectorAssistResponse:
+        from mcp_tools.sensory.vector_assist import vector_assist
+
+        return vector_assist(self, request)
 
     @staticmethod
     def _arrival_time_utc(_trajectory: dict[str, Any], arrival_time: int) -> str:

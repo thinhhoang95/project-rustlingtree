@@ -228,6 +228,82 @@ def test_path_stretch_simulate_preserves_active_speed_intervention_context(tmp_p
     assert response["trajectory"]["base_route"]["speed_advisories"] == [speed_advisory]
 
 
+def test_path_stretch_records_vector_assist_attempt_metadata(tmp_path, monkeypatch) -> None:
+    manager = ScenarioManager(write_fixture_resources(tmp_path))
+    _patch_simap(monkeypatch)
+
+    response = manager.simulate_path_stretch(
+        PathStretchSimulationRequest(
+            flight_id="ARR1",
+            route=[
+                PathStretchRouteTokenRequest(token_type="fix", fix_identifier="FIXA", lat=32.0, lon=-97.0),
+                PathStretchRouteTokenRequest(token_type="coordinate", lat=32.25, lon=-97.25),
+                PathStretchRouteTokenRequest(token_type="fix", fix_identifier="RW35C", lat=33.0, lon=-97.0),
+            ],
+            vector_assist={
+                "variant": "sandwiched_dogleg",
+                "candidate_kind": "free",
+                "target_time_gain_s": 60.0,
+                "projected_segment_index": 1,
+                "lat": 32.25,
+                "lon": -97.25,
+            },
+        )
+    )
+
+    vector_assist = response["trajectory"]["path_stretch"]["vector_assist"]
+    assert vector_assist["attempt_count"] == 1
+    assert vector_assist["attempts"][0]["variant"] == "sandwiched_dogleg"
+    assert vector_assist["attempts"][0]["target_time_gain_s"] == 60.0
+
+
+def test_path_stretch_vector_assist_limits_apply_only_to_tagged_edits(tmp_path, monkeypatch) -> None:
+    manager = ScenarioManager(write_fixture_resources(tmp_path))
+    _patch_simap(monkeypatch)
+    active_path_stretch = {
+        "vector_assist": {
+            "attempts": [
+                {"variant": "sandwiched_dogleg"},
+                {"variant": "replaced_dogleg"},
+            ]
+        }
+    }
+    manager.diff = [
+        {
+            "id": "active-vector",
+            "flight_id": "ARR1",
+            "type": "path-stretch",
+            "overrides": {"path_stretch": active_path_stretch},
+        }
+    ]
+
+    generic = manager.simulate_path_stretch(
+        PathStretchSimulationRequest(
+            flight_id="ARR1",
+            handles=[PathStretchHandleRequest(insert_after_index=1, token_type="coordinate", lat=32.2, lon=-97.2)],
+        )
+    )
+    assert generic["trajectory"]["path_stretch"]["handle_count"] == 1
+
+    with pytest.raises(ValueError, match="maximum of 2"):
+        manager.simulate_path_stretch(
+            PathStretchSimulationRequest(
+                flight_id="ARR1",
+                handles=[
+                    PathStretchHandleRequest(insert_after_index=1, token_type="coordinate", lat=32.3, lon=-97.3)
+                ],
+                vector_assist={
+                    "variant": "sandwiched_dogleg",
+                    "candidate_kind": "free",
+                    "target_time_gain_s": 60.0,
+                    "projected_segment_index": 1,
+                    "lat": 32.3,
+                    "lon": -97.3,
+                },
+            )
+        )
+
+
 def test_path_stretch_validation_rejects_bad_inputs(tmp_path, monkeypatch) -> None:
     manager = ScenarioManager(write_fixture_resources(tmp_path))
     _patch_simap(monkeypatch)
