@@ -7,7 +7,7 @@ import pandas as pd
 
 from hllrd.candidates import is_duplicate_interval
 from hllrd.cli import candidates_main, fit_main, transform_main
-from hllrd.data import filter_tracks_to_cluster, load_cluster_flights
+from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
 from hllrd.fit import HLLRDV1Config, fit_localized_low_rank, load_fit_result
 from hllrd.matrix import MatrixArtifact, MatrixBuildConfig, build_matrix_from_tracks, load_matrix_artifact, save_matrix_artifact
 
@@ -38,6 +38,36 @@ def test_filter_tracks_to_cluster_keeps_only_selected_flights() -> None:
     filtered = filter_tracks_to_cluster(tracks, flights)
 
     assert filtered["flight_id"].tolist() == ["ARR1"]
+
+
+def test_trim_tracks_from_anchor_refines_anchor_and_starts_at_closest_point() -> None:
+    tracks = pd.DataFrame(
+        [
+            {"flight_id": "A", "time": 0, "lat": 31.9, "lon": -96.0},
+            {"flight_id": "A", "time": 1, "lat": 32.245, "lon": -96.245},
+            {"flight_id": "A", "time": 2, "lat": 32.6, "lon": -96.8},
+            {"flight_id": "A", "time": 3, "lat": 32.9, "lon": -97.0},
+            {"flight_id": "B", "time": 0, "lat": 31.8, "lon": -95.8},
+            {"flight_id": "B", "time": 1, "lat": 32.255, "lon": -96.255},
+            {"flight_id": "B", "time": 2, "lat": 32.7, "lon": -96.9},
+            {"flight_id": "B", "time": 3, "lat": 32.9, "lon": -97.0},
+        ]
+    )
+
+    result = trim_tracks_from_anchor(
+        tracks,
+        anchor_lat_deg=32.25,
+        anchor_lon_deg=-96.25,
+        max_anchor_distance_nm=5.0,
+        min_points_after_anchor=3,
+        min_refinement_flights=2,
+    )
+
+    assert result.dropped_flights == ()
+    assert result.tracks.groupby("flight_id")["time"].min().to_dict() == {"A": 1, "B": 1}
+    assert abs(result.refined_anchor_lat_deg - 32.25) < 0.01
+    assert abs(result.refined_anchor_lon_deg + 96.25) < 0.01
+    assert set(result.metadata["status"]) == {"kept"}
 
 
 def test_build_matrix_from_tracks_returns_centered_normal_residuals() -> None:
