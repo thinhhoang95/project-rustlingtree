@@ -68,7 +68,7 @@ def load_cluster_flights(artifacts_path: Path, cluster: str) -> list[ClusterFlig
 
 
 def filter_tracks_to_cluster(tracks: pd.DataFrame, flights: list[ClusterFlight]) -> pd.DataFrame:
-    flight_ids = {flight.flight_id for flight in flights}
+    flight_ids = [flight.flight_id for flight in flights]
     filtered = tracks.loc[tracks["flight_id"].astype(str).isin(flight_ids)].copy()
     filtered.reset_index(drop=True, inplace=True)
     return filtered
@@ -138,27 +138,32 @@ def trim_tracks_from_anchor(
     metadata_rows: list[dict[str, Any]] = []
     dropped: list[str] = []
 
-    for row in closest.itertuples(index=False):
-        flight = clean.loc[clean["flight_id"] == row.flight_id].sort_values("time", kind="stable")
+    for row in closest.to_dict("records"):
+        flight_id = str(row["flight_id"])
+        anchor_index = int(row["anchor_index"])
+        min_anchor_distance_nm = float(row["min_anchor_distance_nm"])
+        trimmed_point_count = int(row["trimmed_point_count"])
+
+        flight = clean.loc[clean["flight_id"] == flight_id].sort_values("time", kind="stable")
         keep = (
-            float(row.min_anchor_distance_nm) <= float(max_anchor_distance_nm)
-            and int(row.trimmed_point_count) >= int(min_points_after_anchor)
+            min_anchor_distance_nm <= float(max_anchor_distance_nm)
+            and trimmed_point_count >= int(min_points_after_anchor)
         )
         status = "kept" if keep else "dropped"
         if keep:
-            trimmed_frames.append(flight.iloc[int(row.anchor_index) :].copy())
+            trimmed_frames.append(flight.iloc[anchor_index:].copy())
         else:
-            dropped.append(str(row.flight_id))
+            dropped.append(flight_id)
         metadata_rows.append(
             {
-                "flight_id": str(row.flight_id),
+                "flight_id": flight_id,
                 "status": status,
-                "original_point_count": int(row.original_point_count),
-                "anchor_index": int(row.anchor_index),
-                "trimmed_point_count": int(row.trimmed_point_count) if keep else 0,
-                "min_anchor_distance_nm": float(row.min_anchor_distance_nm),
-                "anchor_sample_lat_deg": float(row.anchor_sample_lat_deg),
-                "anchor_sample_lon_deg": float(row.anchor_sample_lon_deg),
+                "original_point_count": int(row["original_point_count"]),
+                "anchor_index": anchor_index,
+                "trimmed_point_count": trimmed_point_count if keep else 0,
+                "min_anchor_distance_nm": min_anchor_distance_nm,
+                "anchor_sample_lat_deg": float(row["anchor_sample_lat_deg"]),
+                "anchor_sample_lon_deg": float(row["anchor_sample_lon_deg"]),
                 "refined_anchor_lat_deg": refined_lat,
                 "refined_anchor_lon_deg": refined_lon,
             }

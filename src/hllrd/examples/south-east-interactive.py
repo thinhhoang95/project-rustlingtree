@@ -4,6 +4,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from matplotlib.axes import Axes
+from matplotlib.collections import PathCollection
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.text import Text
 import matplotlib.pyplot as plt
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
@@ -58,16 +63,16 @@ class SouthEastInteractive:
         self.station_distance_nm = cumulative_distance_m(self.mean_xy_m[:, 0], self.mean_xy_m[:, 1]) * NM_PER_M
         self.current_event_index = 0
 
-        self.fig: plt.Figure
-        self.ax: plt.Axes
+        self.fig: Figure
+        self.ax: Axes
         self.event_radio: RadioButtons
         self.z1_slider: Slider
         self.z2_slider: Slider
-        self.response_line = None
-        self.response_segment_line = None
-        self.window_line = None
-        self.window_endpoints = None
-        self.title_text = None
+        self.response_line: Line2D
+        self.response_segment_line: Line2D
+        self.window_line: Line2D
+        self.window_endpoints: PathCollection
+        self.title_text: Text
 
     def _mean_xy_m(self) -> np.ndarray:
         mean_normal_m = np.mean(self.matrix.X, axis=0)
@@ -166,7 +171,9 @@ class SouthEastInteractive:
         self.ax.set_xlabel("longitude")
         self.ax.set_ylabel("latitude")
 
-    def on_event_selected(self, label: str) -> None:
+    def on_event_selected(self, label: str | None) -> None:
+        if label is None:
+            return
         self.update_event(int(label))
 
     def update_event(self, event_index: int) -> None:
