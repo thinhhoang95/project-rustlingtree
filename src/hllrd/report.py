@@ -37,6 +37,8 @@ def write_model_summary_json(path: Path, result: HLLRDFitResult) -> None:
         "K": len(result.events),
         "explained_fraction": result.explained_fraction,
         "sigma_hat": result.sigma_hat,
+        "activation_energy_floor": result.activation_energy_floor,
+        "activation_rms_floor": float(np.sqrt(max(0.0, result.activation_energy_floor))),
         "average_active_events_per_flight": _average_active_events_per_flight(result),
         "events": event_summary(result),
         "metadata": result.metadata,

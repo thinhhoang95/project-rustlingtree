@@ -271,7 +271,7 @@ def _add_fit_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--kappa-peak", type=float, default=2.0)
     parser.add_argument("--min-peak-distance", type=int, default=None)
     parser.add_argument("--smoothing-window", type=int, default=5)
-    parser.add_argument("--tau-z", type=float, default=None)
+    parser.add_argument("--activation-scale", type=float, default=1.0)
     parser.add_argument("--n-min", type=int, default=None)
     parser.add_argument("--K-max", dest="K_max", type=int, default=None)
     parser.add_argument("--epsilon-gain", type=float, default=0.001)
@@ -336,7 +336,7 @@ def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
         kappa_peak=args.kappa_peak,
         min_peak_distance=args.min_peak_distance,
         smoothing_window=args.smoothing_window,
-        tau_z=args.tau_z,
+        activation_scale=args.activation_scale,
         n_min=args.n_min,
         K_max=args.K_max,
         epsilon_gain=args.epsilon_gain,

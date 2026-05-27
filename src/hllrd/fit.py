@@ -26,7 +26,7 @@ class HLLRDV1Config:
     kappa_peak: float = 2.0
     min_peak_distance: int | None = None
     smoothing_window: int = 5
-    tau_z: float | None = None
+    activation_scale: float = 1.0
     n_min: int | None = None
     K_max: int | None = None
     epsilon_gain: float = 0.001
@@ -75,6 +75,7 @@ class HLLRDFitResult:
     residual: np.ndarray
     explained_fraction: float
     sigma_hat: float
+    activation_energy_floor: float
     column_center: np.ndarray
     config: HLLRDV1Config
     metadata: dict[str, Any]
@@ -112,6 +113,7 @@ def fit_localized_low_rank(
     sigma_hat = estimate_noise_sigma(X_centered)
     lengths = length_grid(M, cfg.L_min, cfg.L_max)
     L_min = min(lengths)
+    activation_energy_floor = quiet_window_energy_floor(X_centered, L_min)
     min_peak_distance = int(cfg.min_peak_distance or np.ceil(0.5 * L_min))
     n_min = int(cfg.n_min or max(5, np.ceil(0.01 * n)))
     K_max = int(cfg.K_max or min(25, np.ceil(M / L_min)))
@@ -135,6 +137,7 @@ def fit_localized_low_rank(
                     peak_index=int(peak),
                     length=int(length),
                     sigma_hat=sigma_hat,
+                    activation_energy_floor=activation_energy_floor,
                     n_min=n_min,
                     config=cfg,
                 )
@@ -148,6 +151,7 @@ def fit_localized_low_rank(
                     peak_index=int(peak),
                     length=int(lengths[accepted_index + 1]),
                     sigma_hat=sigma_hat,
+                    activation_energy_floor=activation_energy_floor,
                     n_min=n_min,
                     config=cfg,
                 )
@@ -171,7 +175,15 @@ def fit_localized_low_rank(
         best = max(candidates, key=lambda item: item.score)
         if best.score <= 0.0:
             break
-        trimmed = _trim_candidate(best, R, sigma_hat=sigma_hat, n_min=n_min, L_min=L_min, config=cfg)
+        trimmed = _trim_candidate(
+            best,
+            R,
+            sigma_hat=sigma_hat,
+            activation_energy_floor=activation_energy_floor,
+            n_min=n_min,
+            L_min=L_min,
+            config=cfg,
+        )
         if trimmed.score <= 0.0:
             break
 
@@ -190,7 +202,12 @@ def fit_localized_low_rank(
         refit_events: tuple[HLLRDEvent, ...] = ()
     else:
         coefficients = refit_coefficients(X_centered, dictionary, ridge=cfg.ridge)
-        coefficients = apply_activation_threshold(coefficients, event_count=len(selected), tau_z=cfg.tau_z, sigma_hat=sigma_hat)
+        coefficients = apply_activation_threshold(
+            coefficients,
+            event_lengths=[event.length for event in selected],
+            activation_energy_floor=activation_energy_floor,
+            activation_scale=cfg.activation_scale,
+        )
         reconstruction = coefficients @ dictionary.T
         residual = X_centered - reconstruction
         explained_fraction = _explained_fraction(X_centered, residual)
@@ -204,6 +221,7 @@ def fit_localized_low_rank(
         residual=residual,
         explained_fraction=float(explained_fraction),
         sigma_hat=float(sigma_hat),
+        activation_energy_floor=float(activation_energy_floor),
         column_center=column_center,
         config=cfg,
         metadata=metadata or {},
@@ -230,9 +248,9 @@ def transform_with_model(
         coefficients = refit_coefficients(X_centered, model.dictionary, ridge=model.config.ridge)
         coefficients = apply_activation_threshold(
             coefficients,
-            event_count=len(model.events),
-            tau_z=model.config.tau_z,
-            sigma_hat=model.sigma_hat,
+            event_lengths=[event.length for event in model.events],
+            activation_energy_floor=model.activation_energy_floor,
+            activation_scale=model.config.activation_scale,
         )
         reconstruction = coefficients @ model.dictionary.T
     residual = X_centered - reconstruction
@@ -263,6 +281,7 @@ def generate_candidate_summary(
     sigma_hat = estimate_noise_sigma(matrix)
     lengths = length_grid(M, cfg.L_min, cfg.L_max)
     L_min = min(lengths)
+    activation_energy_floor = quiet_window_energy_floor(matrix, L_min)
     n_min = int(cfg.n_min or max(5, np.ceil(0.01 * n)))
     min_peak_distance = int(cfg.min_peak_distance or np.ceil(0.5 * L_min))
     peaks = find_residual_energy_peaks(
@@ -279,6 +298,7 @@ def generate_candidate_summary(
                 peak_index=int(peak),
                 length=int(length),
                 sigma_hat=sigma_hat,
+                activation_energy_floor=activation_energy_floor,
                 n_min=n_min,
                 config=cfg,
             )
@@ -313,17 +333,36 @@ def refit_coefficients(X: np.ndarray, dictionary: np.ndarray, *, ridge: float) -
     return np.linalg.solve(regularized, dictionary.T @ X.T).T
 
 
+def quiet_window_energy_floor(X: np.ndarray, min_length: int) -> float:
+    matrix = np.asarray(X, dtype=float)
+    if matrix.ndim != 2:
+        raise ValueError("X must be a 2D matrix")
+    if matrix.shape[1] == 0:
+        return 0.0
+    width = max(1, min(int(min_length), matrix.shape[1]))
+    energy = np.mean(matrix * matrix, axis=0)
+    if width == 1:
+        return float(np.min(energy))
+    kernel = np.ones(width, dtype=float) / float(width)
+    rolling = np.convolve(energy, kernel, mode="valid")
+    return float(np.min(rolling)) if rolling.size else 0.0
+
+
+def activation_threshold_for_length(length: int, activation_energy_floor: float, activation_scale: float) -> float:
+    return float(activation_scale) * np.sqrt(max(1, int(length)) * max(0.0, float(activation_energy_floor)))
+
+
 def apply_activation_threshold(
     coefficients: np.ndarray,
     *,
-    event_count: int,
-    tau_z: float | None,
-    sigma_hat: float,
+    event_lengths: list[int],
+    activation_energy_floor: float,
+    activation_scale: float,
 ) -> np.ndarray:
     activated = coefficients.copy()
-    threshold = 2.45 * float(sigma_hat) if tau_z is None else float(tau_z)
-    for event_index in range(event_count):
+    for event_index, length in enumerate(event_lengths):
         block = activated[:, 2 * event_index : 2 * event_index + 2]
+        threshold = activation_threshold_for_length(length, activation_energy_floor, activation_scale)
         inactive = np.linalg.norm(block, axis=1) <= threshold
         block[inactive, :] = 0.0
     return activated
@@ -371,6 +410,7 @@ def save_fit_result(path: Path, result: HLLRDFitResult, *, flight_ids: tuple[str
     metrics = {
         "explained_fraction": result.explained_fraction,
         "sigma_hat": result.sigma_hat,
+        "activation_energy_floor": result.activation_energy_floor,
         "events": event_summary(result),
         "metadata": result.metadata,
     }
@@ -393,7 +433,9 @@ def save_fit_result(path: Path, result: HLLRDFitResult, *, flight_ids: tuple[str
 
 def load_fit_result(path: Path) -> HLLRDFitResult:
     with np.load(path, allow_pickle=False) as data:
-        config = HLLRDV1Config(**json.loads(str(np.asarray(data["config"]).item())))
+        config_payload = json.loads(str(np.asarray(data["config"]).item()))
+        config_payload.pop("tau_z", None)
+        config = HLLRDV1Config(**config_payload)
         metrics = json.loads(str(np.asarray(data["metrics"]).item()))
         basis_stack = np.asarray(data["basis"], dtype=float)
         event_coefficients = np.asarray(data["event_coefficients"], dtype=float)
@@ -425,6 +467,7 @@ def load_fit_result(path: Path) -> HLLRDFitResult:
             residual=np.asarray(data["residual"], dtype=float),
             explained_fraction=float(metrics.get("explained_fraction", 0.0)),
             sigma_hat=float(metrics.get("sigma_hat", 0.0)),
+            activation_energy_floor=float(metrics.get("activation_energy_floor", 0.0)),
             column_center=np.asarray(data["column_center"], dtype=float),
             config=config,
             metadata=dict(metrics.get("metadata", {})),
@@ -437,20 +480,21 @@ def _score_interval(
     peak_index: int,
     length: int,
     sigma_hat: float,
+    activation_energy_floor: float,
     n_min: int,
     config: HLLRDV1Config,
 ) -> CandidateFit:
     n, M = R.shape
     start, end = centered_interval(peak_index, length, M)
     threshold = analytic_null_threshold(end - start, n, sigma_hat, config.c_null)
+    activation_threshold = activation_threshold_for_length(end - start, activation_energy_floor, config.activation_scale)
     return local_rank2_candidate(
         R,
         peak_index=peak_index,
         start=start,
         end=end,
-        sigma_hat=sigma_hat,
+        activation_threshold=activation_threshold,
         threshold=threshold,
-        tau_z=config.tau_z,
         n_min=n_min,
         lambda_i=config.lambda_i,
         lambda_activation=config.lambda_activation,
@@ -462,6 +506,7 @@ def _trim_candidate(
     R: np.ndarray,
     *,
     sigma_hat: float,
+    activation_energy_floor: float,
     n_min: int,
     L_min: int,
     config: HLLRDV1Config,
@@ -489,14 +534,14 @@ def _trim_candidate(
         return candidate
     peak = min(max(candidate.peak_index, start + left), start + right - 1)
     threshold = analytic_null_threshold(right - left, R.shape[0], sigma_hat, config.c_null)
+    activation_threshold = activation_threshold_for_length(right - left, activation_energy_floor, config.activation_scale)
     return local_rank2_candidate(
         R,
         peak_index=peak,
         start=start + left,
         end=start + right,
-        sigma_hat=sigma_hat,
+        activation_threshold=activation_threshold,
         threshold=threshold,
-        tau_z=config.tau_z,
         n_min=n_min,
         lambda_i=config.lambda_i,
         lambda_activation=config.lambda_activation,

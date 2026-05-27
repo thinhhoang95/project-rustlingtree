@@ -8,7 +8,13 @@ import pandas as pd
 from hllrd.candidates import is_duplicate_interval
 from hllrd.cli import candidates_main, fit_main, transform_main
 from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
-from hllrd.fit import HLLRDV1Config, fit_localized_low_rank, load_fit_result
+from hllrd.fit import (
+    HLLRDV1Config,
+    activation_threshold_for_length,
+    fit_localized_low_rank,
+    load_fit_result,
+    quiet_window_energy_floor,
+)
 from hllrd.matrix import MatrixArtifact, MatrixBuildConfig, build_matrix_from_tracks, load_matrix_artifact, save_matrix_artifact
 
 
@@ -126,6 +132,21 @@ def test_fit_rejects_single_flight_outlier_when_n_min_is_high() -> None:
 
     assert result.events == ()
     assert result.explained_fraction == 0.0
+
+
+def test_activation_threshold_uses_quiet_window_energy_floor() -> None:
+    X = np.asarray(
+        [
+            [10.0, 10.0, 2.0, 2.0, 8.0],
+            [-10.0, -10.0, -2.0, -2.0, -8.0],
+        ]
+    )
+
+    floor = quiet_window_energy_floor(X, min_length=2)
+    threshold = activation_threshold_for_length(8, floor, activation_scale=1.5)
+
+    assert floor == 4.0
+    assert threshold == 1.5 * np.sqrt(8 * 4.0)
 
 
 def test_duplicate_interval_rule_allows_nested_but_rejects_near_identical() -> None:

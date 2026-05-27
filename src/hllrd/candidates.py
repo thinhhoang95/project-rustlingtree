@@ -100,9 +100,8 @@ def local_rank2_candidate(
     peak_index: int,
     start: int,
     end: int,
-    sigma_hat: float,
+    activation_threshold: float,
     threshold: float,
-    tau_z: float | None = None,
     n_min: int = 5,
     lambda_i: float = 0.0,
     lambda_activation: float = 0.0,
@@ -122,9 +121,8 @@ def local_rank2_candidate(
 
     coefficients = local @ local_basis
     raw_gain = float(np.sum(singular_values[:rank] ** 2))
-    threshold_z = 2.45 * float(sigma_hat) if tau_z is None else float(tau_z)
     norms = np.linalg.norm(coefficients, axis=1)
-    active_mask = norms > threshold_z
+    active_mask = norms > float(activation_threshold)
     if int(np.count_nonzero(active_mask)) < int(n_min):
         active_mask = np.zeros(n, dtype=bool)
     active_coefficients = coefficients.copy()
