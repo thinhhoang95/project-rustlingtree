@@ -698,7 +698,13 @@ It provides:
 - one slider for `Z1`;
 - one slider for `Z2`;
 - one active event at a time;
-- a deformed trajectory over faint observed flight trajectories.
+- a deformed trajectory over faint raw ADS-B flight trajectories by default.
+
+The grey background tracks are loaded from the raw ADS-B directory recorded in
+the matrix artifact metadata, split using the same gap rule as matrix building,
+filtered to the matrix flight IDs, and trimmed from the merge anchor when trim
+metadata is present. Use `--background-source matrix` to show the old
+matrix-derived background instead.
 
 Run from the repository root:
 
@@ -858,4 +864,3 @@ HLLRD makes a sequence of pragmatic V1 choices:
   amplitude rather than adjacent-sample wiggle.
 - Provide notebook and interactive visualization because event coefficients are
   best understood geometrically.
-

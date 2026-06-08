@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from multiprocessing import cpu_count
 from pathlib import Path
 
 from matplotlib.axes import Axes
@@ -28,73 +29,29 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from hllrd.fit import load_fit_result  # noqa: E402
+from hllrd.data import trim_tracks_from_anchor  # noqa: E402
 from hllrd.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
 from hllrd.matrix import load_matrix_artifact  # noqa: E402
+from scenario.trajectory_compressor.io import load_raw_adsb, split_tracks_by_gap  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "hllrd" / "south-east"
 DEFAULT_MATRIX = DEFAULT_OUTPUT_DIR / "matrix_SE_from_merge.npz"
 DEFAULT_MODEL = DEFAULT_OUTPUT_DIR / "model_from_merge_L40_K6.npz"
+DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
 NM_PER_M = 1.0 / 1852.0
-
-
-def _simplify_xy_by_point_count(xy_m: np.ndarray, approximation_points: int) -> tuple[np.ndarray, int]:
-    points = np.asarray(xy_m, dtype=float)
-    if points.ndim != 2 or points.shape[1] != 2:
-        raise ValueError("xy_m must have shape N x 2")
-    if points.shape[0] <= 2:
-        return points.copy(), 0
-
-    target_points = max(0, min(int(approximation_points), points.shape[0] - 2))
-    retained = [0, points.shape[0] - 1]
-    _error, fitted = _piecewise_linear_xy(points, retained)
-    while len(retained) - 2 < target_points:
-        best_index: int | None = None
-        best_error = np.inf
-        best_fitted = fitted
-        retained_set = set(retained)
-        for index in range(1, points.shape[0] - 1):
-            if index in retained_set:
-                continue
-            candidate_error, candidate_fitted = _piecewise_linear_xy(points, [*retained, index])
-            if candidate_error < best_error:
-                best_index = index
-                best_error = candidate_error
-                best_fitted = candidate_fitted
-        if best_index is None:
-            break
-        retained.append(best_index)
-        retained.sort()
-        fitted = best_fitted
-    return fitted, len(retained) - 2
-
-
-def _piecewise_linear_xy(xy_m: np.ndarray, retained_indices: list[int]) -> tuple[float, np.ndarray]:
-    points = np.asarray(xy_m, dtype=float)
-    retained = sorted(set(int(index) for index in retained_indices))
-    if retained[0] != 0 or retained[-1] != points.shape[0] - 1:
-        raise ValueError("retained_indices must include both endpoints")
-
-    fitted = np.empty_like(points, dtype=float)
-    x = np.arange(points.shape[0], dtype=float)
-    for start, end in zip(retained[:-1], retained[1:], strict=True):
-        fraction = (x[start : end + 1] - float(start)) / float(end - start)
-        fitted[start : end + 1] = (1.0 - fraction[:, None]) * points[start] + fraction[:, None] * points[end]
-    residual = points - fitted
-    return float(np.sum(residual * residual)), fitted
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Interactive South-East HLLRD event response viewer.")
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX, help="Path to matrix_SE_from_merge.npz.")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Path to model_from_merge_L40_K6.npz.")
+    parser.add_argument("--raw-adsb-dir", type=Path, default=None, help="Raw ADS-B directory for grey background tracks.")
+    parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
+    parser.add_argument("--processes", type=int, default=max(cpu_count() - 1, 1))
+    parser.add_argument("--background-source", choices=["raw", "matrix"], default="raw")
     parser.add_argument("--background-alpha", type=float, default=0.08, help="Transparency for all-flight background paths.")
     parser.add_argument("--background-linewidth", type=float, default=0.35, help="Line width for all-flight background paths.")
-    parser.add_argument(
-        "--raw-basis-response",
-        action="store_true",
-        help="Show the raw rank-2 basis response instead of the simplified local response.",
-    )
     return parser
 
 
@@ -104,9 +61,12 @@ class SouthEastInteractive:
         matrix_path: Path,
         model_path: Path,
         *,
+        raw_adsb_dir: Path | None,
+        split_gap_seconds: int,
+        processes: int,
+        background_source: str,
         background_alpha: float,
         background_linewidth: float,
-        raw_basis_response: bool,
     ) -> None:
         self.matrix = load_matrix_artifact(matrix_path)
         self.result = load_fit_result(model_path)
@@ -117,11 +77,15 @@ class SouthEastInteractive:
 
         self.background_alpha = float(background_alpha)
         self.background_linewidth = float(background_linewidth)
-        self.raw_basis_response = bool(raw_basis_response)
-        self.current_display_approximation_points: int | None = None
+        self.background_source = str(background_source)
         self.projection = LocalProjection(self.matrix.origin_lat_deg, self.matrix.origin_lon_deg)
         self.mean_xy_m = self._mean_xy_m()
         self.station_distance_nm = cumulative_distance_m(self.mean_xy_m[:, 0], self.mean_xy_m[:, 1]) * NM_PER_M
+        self.raw_background_tracks = (
+            self._load_raw_background_tracks(raw_adsb_dir, split_gap_seconds, processes)
+            if self.background_source == "raw"
+            else None
+        )
         self.current_event_index = 0
 
         self.fig: Figure
@@ -145,42 +109,51 @@ class SouthEastInteractive:
     def flight_xy_m(self, flight_row: int) -> np.ndarray:
         return self.matrix.reference_xy_m + self.matrix.X[flight_row, :, None] * self.matrix.normals_xy
 
+    def _load_raw_background_tracks(
+        self,
+        raw_adsb_dir: Path | None,
+        split_gap_seconds: int,
+        processes: int,
+    ) -> dict[str, np.ndarray]:
+        source_dir = raw_adsb_dir or self._raw_adsb_dir_from_matrix()
+        tracks = load_raw_adsb(source_dir, int(processes))
+        tracks = split_tracks_by_gap(tracks, int(split_gap_seconds))
+        flight_ids = set(self.matrix.flight_ids)
+        tracks = tracks.loc[tracks["flight_id"].astype(str).isin(flight_ids)].copy()
+        if tracks.empty:
+            raise RuntimeError(f"No raw ADS-B rows matched matrix flight IDs under {source_dir}")
+
+        trim_info = self.matrix.metadata.get("trim", {})
+        if trim_info:
+            tracks = trim_tracks_from_anchor(
+                tracks,
+                anchor_lat_deg=float(trim_info.get("refined_anchor_lat_deg", trim_info["coarse_anchor_lat_deg"])),
+                anchor_lon_deg=float(trim_info.get("refined_anchor_lon_deg", trim_info["coarse_anchor_lon_deg"])),
+                max_anchor_distance_nm=float(trim_info.get("max_anchor_distance_nm", 15.0)),
+                min_points_after_anchor=int(self.matrix.metadata.get("config", {}).get("min_points_per_flight", 3)),
+                refine_anchor=False,
+            ).tracks
+
+        background: dict[str, np.ndarray] = {}
+        for flight_id, flight in tracks.groupby("flight_id", sort=False):
+            ordered = flight.sort_values("time", kind="stable")
+            lat_lon = ordered.loc[:, ["lat", "lon"]].to_numpy(dtype=float)
+            if lat_lon.shape[0] >= 2:
+                background[str(flight_id)] = lat_lon
+        if not background:
+            raise RuntimeError("Raw ADS-B background contains no drawable tracks")
+        return background
+
+    def _raw_adsb_dir_from_matrix(self) -> Path:
+        raw_adsb_dir = self.matrix.metadata.get("raw_adsb_dir")
+        if not raw_adsb_dir:
+            raise RuntimeError("matrix metadata does not include raw_adsb_dir; pass --raw-adsb-dir")
+        return Path(str(raw_adsb_dir))
+
     def event_response_xy_m(self, z: np.ndarray) -> np.ndarray:
         event = self.result.events[self.current_event_index]
         normal_offset_m = event.basis @ z
-        xy_m = self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
-        if not self.raw_basis_response:
-            xy_m, self.current_display_approximation_points = self._simplified_display_xy(
-                xy_m,
-                normal_offset_m,
-                event.start,
-                event.end,
-                event.simplifier,
-            )
-        else:
-            self.current_display_approximation_points = None
-        return xy_m
-
-    def _simplified_display_xy(
-        self,
-        xy_m: np.ndarray,
-        normal_offset_m: np.ndarray,
-        start: int,
-        end: int,
-        simplifier: dict[str, object],
-    ) -> tuple[np.ndarray, int | None]:
-        if not simplifier.get("enabled", False):
-            return xy_m, None
-        local_offset = np.asarray(normal_offset_m[start:end], dtype=float)
-        local_xy = np.asarray(xy_m[start:end], dtype=float)
-        if local_xy.shape[0] <= 2 or np.allclose(local_offset, 0.0):
-            return xy_m, 0
-        approximation_points = int(round(float(simplifier.get("median_approximation_points", 0.0))))
-        approximation_points = max(0, min(approximation_points, int(simplifier.get("max_approximation_points", 4))))
-        simplified_xy, used_points = _simplify_xy_by_point_count(local_xy, approximation_points)
-        displayed = np.asarray(xy_m, dtype=float).copy()
-        displayed[start:end] = simplified_xy
-        return displayed, used_points
+        return self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
 
     def active_coefficients(self, event_index: int) -> np.ndarray:
         event = self.result.events[event_index]
@@ -244,10 +217,21 @@ class SouthEastInteractive:
     def plot_static_layers(self) -> None:
         mean_lat, mean_lon = self.xy_to_latlon(self.mean_xy_m)
         self.ax.plot(mean_lon, mean_lat, color="#303030", linewidth=2.0, alpha=0.82, label="mean trajectory", zorder=3)
-        for row_index in range(len(self.matrix.flight_ids)):
-            xy_m = self.flight_xy_m(row_index)
-            lat, lon = self.xy_to_latlon(xy_m)
-            self.ax.plot(lon, lat, color="#555555", linewidth=self.background_linewidth, alpha=self.background_alpha, zorder=1)
+        if self.raw_background_tracks is not None:
+            for lat_lon in self.raw_background_tracks.values():
+                self.ax.plot(
+                    lat_lon[:, 1],
+                    lat_lon[:, 0],
+                    color="#555555",
+                    linewidth=self.background_linewidth,
+                    alpha=self.background_alpha,
+                    zorder=1,
+                )
+        else:
+            for row_index in range(len(self.matrix.flight_ids)):
+                xy_m = self.flight_xy_m(row_index)
+                lat, lon = self.xy_to_latlon(xy_m)
+                self.ax.plot(lon, lat, color="#555555", linewidth=self.background_linewidth, alpha=self.background_alpha, zorder=1)
 
         trim_info = self.matrix.metadata.get("trim", {})
         refined_lat = trim_info.get("refined_anchor_lat_deg")
@@ -304,17 +288,9 @@ class SouthEastInteractive:
         self.title_text.set_text(
             f"Event {self.current_event_index}: {start_nm:.1f}-{end_nm:.1f} NM from merge | "
             f"active {active_count}/{len(self.matrix.flight_ids)} ({active_fraction:.1f}%) | "
-            f"Z=({z[0]:.1f}, {z[1]:.1f}) | "
-            f"{self._display_mode_label()}"
+            f"Z=({z[0]:.1f}, {z[1]:.1f})"
         )
         self.fig.canvas.draw_idle()
-
-    def _display_mode_label(self) -> str:
-        if self.raw_basis_response:
-            return "raw basis"
-        if self.current_display_approximation_points is None:
-            return "raw basis"
-        return f"approx pts: {self.current_display_approximation_points}"
 
     def show(self) -> None:
         self.create()
@@ -326,9 +302,12 @@ def main(argv: list[str] | None = None) -> None:
     app = SouthEastInteractive(
         args.matrix,
         args.model,
+        raw_adsb_dir=args.raw_adsb_dir,
+        split_gap_seconds=args.split_gap_seconds,
+        processes=args.processes,
+        background_source=args.background_source,
         background_alpha=args.background_alpha,
         background_linewidth=args.background_linewidth,
-        raw_basis_response=args.raw_basis_response,
     )
     app.show()
 
