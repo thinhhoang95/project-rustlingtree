@@ -20,6 +20,8 @@ class CandidateFit:
     score: float
     threshold: float
     simplifier: dict[str, Any] = field(default_factory=dict)
+    lag_offsets: np.ndarray | None = None
+    extension_offsets: np.ndarray | None = None
 
     @property
     def length(self) -> int:

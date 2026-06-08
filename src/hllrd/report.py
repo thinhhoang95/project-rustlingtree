@@ -35,6 +35,20 @@ def write_event_summary_csv(path: Path, result: HLLRDFitResult) -> None:
         "local_simplifier_residual_error_m2",
         "local_simplifier_reduced_error_m2",
         "local_simplifier_point_count_histogram",
+        "lag_registered",
+        "lag_min",
+        "lag_max",
+        "lag_mean",
+        "lag_median",
+        "lag_abs_mean",
+        "lag_histogram",
+        "extension_registered",
+        "extension_min",
+        "extension_max",
+        "extension_mean",
+        "extension_median",
+        "extension_abs_mean",
+        "extension_histogram",
     ]
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")

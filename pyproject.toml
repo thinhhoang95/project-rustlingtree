@@ -36,6 +36,8 @@ hllrd-candidates = "hllrd.cli:candidates_main"
 hllrd-fit = "hllrd.cli:fit_main"
 hllrd-report = "hllrd.cli:report_main"
 hllrd-transform = "hllrd.cli:transform_main"
+hllrd-evaluate-event = "hllrd.cli:evaluate_event_main"
+hllrd-augment-trace = "hllrd.cli:augment_trace_main"
 scenario-manager-api = "mcp_tools.scenario_manager.server:main"
 scenario-manager-precompute-artifact = "mcp_tools.scenario_manager.precompute_artifact:main"
 

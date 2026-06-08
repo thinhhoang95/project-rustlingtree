@@ -13,9 +13,18 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
-from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, normalize_cluster
+from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, normalize_cluster, trim_tracks_from_anchor
+from hllrd.evaluate import (
+    center_path_xy,
+    closest_raw_track_points_to_matrix_stations,
+    evaluate_event_trace_match,
+    plot_event_trace_overlay,
+    trace_tangent_residual_from_samples,
+)
 from hllrd.fit import (
     HLLRDV1Config,
+    HLLRDV2Config,
+    augment_with_trace_tangent_lift,
     fit_localized_low_rank,
     generate_candidate_summary,
     load_fit_result,
@@ -61,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_args(report_parser)
     report_parser.set_defaults(func=run_report)
 
+    evaluate_parser = subparsers.add_parser("evaluate-event", description="Evaluate one fitted event against ADS-B traces.")
+    _add_evaluate_event_args(evaluate_parser)
+    evaluate_parser.set_defaults(func=run_evaluate_event)
+
+    augment_trace_parser = subparsers.add_parser("augment-trace", description="Store a tangential ADS-B trace lift in a fitted model.")
+    _add_augment_trace_args(augment_trace_parser)
+    augment_trace_parser.set_defaults(func=run_augment_trace)
+
     run_parser = subparsers.add_parser("run", description="Run build-matrix, candidates, fit, and report.")
     _add_run_args(run_parser)
     run_parser.set_defaults(func=run_pipeline)
@@ -101,6 +118,18 @@ def report_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Generate HLLRD model reports.")
     _add_report_args(parser)
     run_report(parser.parse_args(argv))
+
+
+def evaluate_event_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Evaluate one HLLRD event against ADS-B traces.")
+    _add_evaluate_event_args(parser)
+    run_evaluate_event(parser.parse_args(argv))
+
+
+def augment_trace_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Store a tangential ADS-B trace lift in a fitted HLLRD model.")
+    _add_augment_trace_args(parser)
+    run_augment_trace(parser.parse_args(argv))
 
 
 def run_build_matrix(args: argparse.Namespace) -> None:
@@ -193,6 +222,16 @@ def run_transform(args: argparse.Namespace) -> None:
         reconstruction=transform.reconstruction,
         residual=transform.residual,
         active_counts=transform.active_counts,
+        lag_offsets=(
+            transform.lag_offsets
+            if transform.lag_offsets is not None
+            else np.zeros((matrix.X.shape[0], len(model.events)), dtype=int)
+        ),
+        extension_offsets=(
+            transform.extension_offsets
+            if transform.extension_offsets is not None
+            else np.zeros((matrix.X.shape[0], len(model.events)), dtype=int)
+        ),
         explained_fraction=np.asarray(transform.explained_fraction, dtype=float),
         matrix=np.asarray(args.matrix.as_posix(), dtype=str),
         model=np.asarray(args.model.as_posix(), dtype=str),
@@ -221,6 +260,73 @@ def run_report(args: argparse.Namespace) -> None:
         matrix = load_matrix_artifact(args.matrix)
         plot_residual_energy(args.output_dir / "residual_energy.png", matrix.X_centered, result)
     Console().print(f"[green]Wrote[/green] report files to {args.output_dir}")
+
+
+def run_evaluate_event(args: argparse.Namespace) -> None:
+    matrix = load_matrix_artifact(args.matrix)
+    model = load_fit_result(args.model)
+    raw_tracks = None
+    if args.trace_source == "raw":
+        raw_tracks = _load_raw_tracks_for_event_evaluation(matrix, args)
+    result = evaluate_event_trace_match(
+        matrix,
+        model,
+        event_index=args.event,
+        raw_tracks=raw_tracks,
+        active_only=not args.include_inactive,
+        trace_lift=args.trace_lift,
+    )
+    _write_rows_csv(args.output, result.row_dicts())
+    if args.summary is not None:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        with args.summary.open("w", encoding="utf-8") as stream:
+            json.dump(result.summary, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    if args.plot is not None:
+        plot_event_trace_overlay(
+            args.plot,
+            matrix,
+            model,
+            event_index=args.event,
+            raw_tracks=raw_tracks,
+            max_flights=args.plot_max_flights,
+            trace_lift=args.trace_lift,
+        )
+    message = (
+        f"[green]Wrote[/green] {len(result.rows):,} event-trace rows to {args.output} "
+        f"(event RMSE {result.summary['event_trace_rmse_m']:.1f} m, "
+        f"model RMSE {result.summary['model_trace_rmse_m']:.1f} m"
+    )
+    if args.trace_lift != "none":
+        message += f", lifted model RMSE {result.summary['lifted_model_trace_rmse_m']:.1f} m"
+    Console().print(message + ")")
+
+
+def run_augment_trace(args: argparse.Namespace) -> None:
+    matrix = load_matrix_artifact(args.matrix)
+    model = load_fit_result(args.model)
+    raw_tracks = _load_raw_tracks_for_event_evaluation(matrix, args)
+    actual_xy_by_flight = closest_raw_track_points_to_matrix_stations(raw_tracks, matrix)
+    tangent_residual = trace_tangent_residual_from_samples(
+        matrix,
+        center_xy=center_path_xy(matrix, model),
+        actual_xy_by_flight=actual_xy_by_flight,
+    )
+    augmented = augment_with_trace_tangent_lift(
+        model,
+        tangent_residual,
+        center_method=args.trace_center_method,
+        ridge=args.trace_ridge,
+        extra_residual_config=_trace_extra_residual_config_from_args(args),
+    )
+    save_fit_result(args.output, augmented, flight_ids=matrix.flight_ids)
+    if args.summary is not None:
+        write_model_summary_json(args.summary, augmented)
+    info = augmented.metadata.get("trace_tangent_lift", {})
+    Console().print(
+        f"[green]Wrote[/green] trace-augmented model to {args.output} "
+        f"(tangent explained {float(info.get('explained_fraction', 0.0)):.3%})"
+    )
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
@@ -287,6 +393,15 @@ def _add_fit_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-local-simplifier", dest="local_simplifier_enabled", action="store_false")
     parser.add_argument("--local-simplifier-gain-sigma", type=float, default=128.0)
     parser.add_argument("--local-simplifier-max-points", type=int, default=4)
+    parser.add_argument("--lag-registered", action="store_true", help="Enable V2 per-flight station-lag registration.")
+    parser.add_argument("--max-lag-stations", type=int, default=0)
+    parser.add_argument("--lag-direction", choices=["both", "nonnegative", "nonpositive"], default="both")
+    parser.add_argument("--lag-penalty", type=float, default=0.0)
+    parser.add_argument("--max-extend-stations", type=int, default=0)
+    parser.add_argument("--extend-direction", choices=["both", "nonnegative", "nonpositive"], default="nonnegative")
+    parser.add_argument("--extend-penalty", type=float, default=0.0)
+    parser.add_argument("--registration-iterations", type=int, default=5)
+    parser.add_argument("--registration-tolerance", type=int, default=0)
 
 
 def _add_candidates_args(parser: argparse.ArgumentParser) -> None:
@@ -314,6 +429,43 @@ def _add_transform_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--already-centered", action="store_true")
 
 
+def _add_evaluate_event_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--matrix", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--event", type=int, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--summary", type=Path, default=None)
+    parser.add_argument("--trace-source", choices=["raw", "matrix"], default="raw")
+    parser.add_argument(
+        "--trace-lift",
+        choices=["none", "stored", "registered-dictionary"],
+        default="none",
+        help="Optionally reconstruct tangential displacement from raw ADS-B or from a stored model lift.",
+    )
+    parser.add_argument("--raw-adsb-dir", type=Path, default=None)
+    parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
+    parser.add_argument("--processes", type=int, default=1)
+    parser.add_argument("--include-inactive", action="store_true")
+    parser.add_argument("--plot", type=Path, default=None)
+    parser.add_argument("--plot-max-flights", type=int, default=60)
+
+
+def _add_augment_trace_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--matrix", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--summary", type=Path, default=None)
+    parser.add_argument("--raw-adsb-dir", type=Path, default=None)
+    parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
+    parser.add_argument("--processes", type=int, default=1)
+    parser.add_argument("--trace-center-method", choices=["median", "mean", "none"], default="median")
+    parser.add_argument("--trace-ridge", type=float, default=None)
+    parser.add_argument("--trace-extra-events", action="store_true")
+    parser.add_argument("--trace-extra-L-min", dest="trace_extra_L_min", type=int, default=10)
+    parser.add_argument("--trace-extra-L-max", dest="trace_extra_L_max", type=int, default=10)
+    parser.add_argument("--trace-extra-K-max", dest="trace_extra_K_max", type=int, default=20)
+
+
 def _add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--matrix", type=Path, default=None)
@@ -335,7 +487,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
-    return HLLRDV1Config(
+    base_kwargs = dict(
         L_min=args.L_min,
         L_max=args.L_max,
         kappa_peak=args.kappa_peak,
@@ -358,6 +510,64 @@ def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
         local_simplifier_gain_sigma=args.local_simplifier_gain_sigma,
         local_simplifier_max_points=args.local_simplifier_max_points,
     )
+    if bool(args.lag_registered) or int(args.max_lag_stations) > 0 or int(args.max_extend_stations) > 0:
+        return HLLRDV2Config(
+            **base_kwargs,
+            lag_enabled=bool(args.lag_registered) or int(args.max_lag_stations) > 0 or int(args.max_extend_stations) > 0,
+            max_lag_stations=args.max_lag_stations,
+            lag_direction=args.lag_direction,
+            lag_penalty=args.lag_penalty,
+            max_extend_stations=args.max_extend_stations,
+            extend_direction=args.extend_direction,
+            extend_penalty=args.extend_penalty,
+            registration_iterations=args.registration_iterations,
+            registration_tolerance=args.registration_tolerance,
+        )
+    return HLLRDV1Config(**base_kwargs)
+
+
+def _trace_extra_residual_config_from_args(args: argparse.Namespace) -> HLLRDV1Config | None:
+    if not bool(args.trace_extra_events):
+        return None
+    return HLLRDV1Config(
+        L_min=args.trace_extra_L_min,
+        L_max=args.trace_extra_L_max,
+        K_max=args.trace_extra_K_max,
+        kappa_peak=0.0,
+        n_min=5,
+        c_null=0.0,
+        epsilon_gain=0.0,
+        activation_scale=0.0,
+        peak_backtrack_enabled=False,
+        local_simplifier_enabled=False,
+    )
+
+
+def _load_raw_tracks_for_event_evaluation(matrix: Any, args: argparse.Namespace) -> Any:
+    raw_adsb_dir = args.raw_adsb_dir
+    if raw_adsb_dir is None:
+        metadata_dir = matrix.metadata.get("raw_adsb_dir")
+        if not metadata_dir:
+            raise SystemExit("matrix metadata does not include raw_adsb_dir; pass --raw-adsb-dir")
+        raw_adsb_dir = Path(str(metadata_dir))
+    tracks = load_raw_adsb(raw_adsb_dir, int(args.processes))
+    tracks = split_tracks_by_gap(tracks, int(args.split_gap_seconds))
+    flight_ids = set(matrix.flight_ids)
+    tracks = tracks.loc[tracks["flight_id"].astype(str).isin(flight_ids)].copy()
+    if tracks.empty:
+        raise SystemExit(f"No raw ADS-B rows matched matrix flight IDs under {raw_adsb_dir}")
+
+    trim_info = matrix.metadata.get("trim", {})
+    if trim_info:
+        tracks = trim_tracks_from_anchor(
+            tracks,
+            anchor_lat_deg=float(trim_info.get("refined_anchor_lat_deg", trim_info["coarse_anchor_lat_deg"])),
+            anchor_lon_deg=float(trim_info.get("refined_anchor_lon_deg", trim_info["coarse_anchor_lon_deg"])),
+            max_anchor_distance_nm=float(trim_info.get("max_anchor_distance_nm", 15.0)),
+            min_points_after_anchor=int(matrix.metadata.get("config", {}).get("min_points_per_flight", 3)),
+            refine_anchor=False,
+        ).tracks
+    return tracks
 
 
 def _write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -383,7 +593,8 @@ def _print_matrix_summary(console: Console, artifact: Any, output: Path) -> None
 
 
 def _print_fit_summary(console: Console, result: Any, output: Path) -> None:
-    table = Table(title="HLLRD V1 fit")
+    model_name = "HLLRD V2 fit" if isinstance(result.config, HLLRDV2Config) else "HLLRD V1 fit"
+    table = Table(title=model_name)
     table.add_column("Metric")
     table.add_column("Value", justify="right")
     table.add_row("Events", f"{len(result.events):,}")

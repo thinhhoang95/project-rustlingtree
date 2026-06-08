@@ -7,16 +7,30 @@ import numpy as np
 import pandas as pd
 
 from hllrd.candidates import backtrack_peak_rise_start, is_duplicate_interval
-from hllrd.cli import candidates_main, fit_main, transform_main
+from hllrd.cli import candidates_main, evaluate_event_main, fit_main, transform_main
 from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
+from hllrd.evaluate import (
+    evaluate_event_trace_match,
+    _raw_polyline_window,
+    _tangents_from_normals,
+    _trace_lift_tangent_reconstruction,
+)
 from hllrd.fit import (
+    HLLRDEvent,
+    HLLRDFitResult,
     HLLRDV1Config,
+    HLLRDV2Config,
     activation_threshold_for_length,
+    augment_with_trace_tangent_lift,
+    fit_lag_registered_low_rank,
     fit_localized_low_rank,
     load_fit_result,
     quiet_window_energy_floor,
+    _row_event_basis,
     save_fit_result,
+    transform_with_model,
 )
+from hllrd.geometry import LocalProjection
 from hllrd.matrix import (
     MatrixArtifact,
     MatrixBuildConfig,
@@ -148,6 +162,353 @@ def test_fit_localized_low_rank_recovers_planted_event() -> None:
     assert result.explained_fraction > 0.9
     assert any(max(event.start, 35) < min(event.end, 49) for event in result.events)
     assert result.events[0].simplifier["enabled"]
+
+
+def test_lag_registered_v2_matches_v1_when_max_lag_is_zero() -> None:
+    rng = np.random.default_rng(7)
+    n = 50
+    M = 90
+    X = rng.normal(0.0, 0.05, size=(n, M))
+    local = np.column_stack(
+        [
+            np.sin(np.linspace(0.0, np.pi, 14)),
+            np.cos(np.linspace(0.0, np.pi, 14)),
+        ]
+    )
+    local_basis, _ = np.linalg.qr(local)
+    basis = np.zeros((M, 2))
+    basis[35:49, :] = local_basis
+    coefficients = rng.normal(0.0, 5.0, size=(n, 2))
+    X += coefficients @ basis.T
+    common = dict(
+        kappa_peak=0.5,
+        K_max=3,
+        n_min=5,
+        epsilon_gain=0.0,
+        local_simplifier_enabled=False,
+    )
+
+    v1 = fit_localized_low_rank(X, HLLRDV1Config(**common))
+    v2 = fit_lag_registered_low_rank(
+        X,
+        HLLRDV2Config(**common, max_lag_stations=0, lag_enabled=True),
+    )
+
+    assert [(event.start, event.end, event.peak_index) for event in v2.events] == [
+        (event.start, event.end, event.peak_index) for event in v1.events
+    ]
+    np.testing.assert_allclose(v2.reconstruction, v1.reconstruction)
+    assert all(event.lag_offsets is None for event in v2.events)
+
+
+def test_lag_registered_v2_recovers_randomly_delayed_trombone() -> None:
+    X, injected_delays = _lagged_trombone_matrix()
+    L = 12
+    common = dict(
+        L_min=L,
+        L_max=L,
+        K_max=1,
+        kappa_peak=0.0,
+        n_min=5,
+        c_null=0.0,
+        epsilon_gain=0.0,
+        activation_scale=0.0,
+        peak_backtrack_enabled=False,
+        local_simplifier_enabled=False,
+    )
+
+    v1 = fit_localized_low_rank(X, HLLRDV1Config(**common), already_centered=True)
+    v2 = fit_lag_registered_low_rank(
+        X,
+        HLLRDV2Config(**common, max_lag_stations=8, lag_direction="both"),
+        already_centered=True,
+    )
+
+    assert v2.events
+    event = v2.events[0]
+    assert event.lag_offsets is not None
+    offset = int(round(float(np.median(event.lag_offsets - injected_delays))))
+    lag_mae = float(np.mean(np.abs((event.lag_offsets - offset) - injected_delays)))
+    assert lag_mae <= 1.0
+    assert v2.explained_fraction > 0.98
+    assert v2.explained_fraction > v1.explained_fraction + 0.10
+    assert len(set(event.lag_offsets.tolist())) > 3
+
+
+def test_extension_registered_v2_recovers_delayed_action_trombone() -> None:
+    X, _injected_extensions = _extended_trombone_matrix()
+    L = 12
+    common = dict(
+        L_min=L,
+        L_max=L,
+        K_max=1,
+        kappa_peak=0.0,
+        n_min=5,
+        c_null=0.0,
+        epsilon_gain=0.0,
+        activation_scale=0.0,
+        peak_backtrack_enabled=False,
+        local_simplifier_enabled=False,
+    )
+
+    v1 = fit_localized_low_rank(X, HLLRDV1Config(**common), already_centered=True)
+    v2 = fit_lag_registered_low_rank(
+        X,
+        HLLRDV2Config(
+            **common,
+            max_lag_stations=0,
+            max_extend_stations=8,
+            extend_direction="nonnegative",
+        ),
+        already_centered=True,
+    )
+
+    assert v2.events
+    event = v2.events[0]
+    assert event.extension_offsets is not None
+    assert int(np.max(event.extension_offsets)) >= 5
+    assert len(set(event.extension_offsets.tolist())) > 3
+    assert v2.explained_fraction > 0.99
+    assert v2.explained_fraction > v1.explained_fraction + 0.05
+
+
+def test_lag_registered_v2_round_trips_and_transforms(tmp_path) -> None:
+    X, _injected_delays = _lagged_trombone_matrix()
+    result = fit_lag_registered_low_rank(
+        X,
+        HLLRDV2Config(
+            L_min=12,
+            L_max=12,
+            K_max=1,
+            kappa_peak=0.0,
+            n_min=5,
+            c_null=0.0,
+            epsilon_gain=0.0,
+            activation_scale=0.0,
+            peak_backtrack_enabled=False,
+            local_simplifier_enabled=False,
+            max_lag_stations=8,
+        ),
+        already_centered=True,
+    )
+    model_path = tmp_path / "v2_model.npz"
+
+    save_fit_result(model_path, result)
+    loaded = load_fit_result(model_path)
+    transformed = transform_with_model(X, loaded, already_centered=True)
+
+    assert isinstance(loaded.config, HLLRDV2Config)
+    assert loaded.events[0].lag_offsets is not None
+    np.testing.assert_array_equal(loaded.events[0].lag_offsets, result.events[0].lag_offsets)
+    assert transformed.lag_offsets is not None
+    assert transformed.explained_fraction > 0.98
+
+
+def test_extension_registered_v2_round_trips_and_transforms(tmp_path) -> None:
+    X, _injected_extensions = _extended_trombone_matrix()
+    result = fit_lag_registered_low_rank(
+        X,
+        HLLRDV2Config(
+            L_min=12,
+            L_max=12,
+            K_max=1,
+            kappa_peak=0.0,
+            n_min=5,
+            c_null=0.0,
+            epsilon_gain=0.0,
+            activation_scale=0.0,
+            peak_backtrack_enabled=False,
+            local_simplifier_enabled=False,
+            max_lag_stations=0,
+            max_extend_stations=8,
+            extend_direction="nonnegative",
+        ),
+        already_centered=True,
+    )
+    model_path = tmp_path / "v2_extension_model.npz"
+
+    save_fit_result(model_path, result)
+    loaded = load_fit_result(model_path)
+    transformed = transform_with_model(X, loaded, already_centered=True)
+
+    assert isinstance(loaded.config, HLLRDV2Config)
+    assert loaded.events[0].extension_offsets is not None
+    np.testing.assert_array_equal(loaded.events[0].extension_offsets, result.events[0].extension_offsets)
+    assert transformed.extension_offsets is not None
+    assert transformed.explained_fraction > 0.99
+
+
+def test_event_trace_evaluator_matches_exact_shifted_event(tmp_path) -> None:
+    matrix, model = _exact_shifted_event_artifacts()
+
+    result = evaluate_event_trace_match(matrix, model, event_index=0)
+    raw_result = evaluate_event_trace_match(
+        matrix,
+        model,
+        event_index=0,
+        raw_tracks=_raw_tracks_from_matrix_paths(matrix),
+    )
+
+    assert result.summary["active_flight_count"] == 2
+    assert result.summary["event_trace_rmse_m"] == 0.0
+    assert result.summary["model_trace_rmse_m"] == 0.0
+    assert raw_result.summary["event_trace_rmse_m"] < 1.0e-9
+    assert raw_result.summary["model_trace_rmse_m"] < 1.0e-9
+    assert result.summary["center_trace_rmse_m"] > 0.0
+    assert result.summary["event_trace_rmse_reduction_fraction"] == 1.0
+    assert result.summary["event_improves_center_fraction"] == 1.0
+    assert result.summary["center_normal_rmse_m"] > 0.0
+    assert result.summary["event_normal_rmse_m"] == 0.0
+    assert result.summary["event_normal_rmse_reduction_fraction"] == 1.0
+
+    matrix_path = tmp_path / "matrix.npz"
+    model_path = tmp_path / "model.npz"
+    rows_path = tmp_path / "event_rows.csv"
+    summary_path = tmp_path / "event_summary.json"
+    plot_path = tmp_path / "event_overlay.png"
+    save_matrix_artifact(matrix_path, matrix)
+    save_fit_result(model_path, model, flight_ids=matrix.flight_ids)
+    evaluate_event_main(
+        [
+            "--matrix",
+            str(matrix_path),
+            "--model",
+            str(model_path),
+            "--event",
+            "0",
+            "--trace-source",
+            "matrix",
+            "--output",
+            str(rows_path),
+            "--summary",
+            str(summary_path),
+            "--plot",
+            str(plot_path),
+        ]
+    )
+
+    assert rows_path.exists()
+    assert plot_path.exists()
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert payload["event_trace_rmse_m"] == 0.0
+
+
+def test_event_trace_evaluator_matches_exact_extended_event() -> None:
+    matrix, model = _exact_extended_event_artifacts()
+
+    result = evaluate_event_trace_match(matrix, model, event_index=0)
+    raw_result = evaluate_event_trace_match(
+        matrix,
+        model,
+        event_index=0,
+        raw_tracks=_raw_tracks_from_matrix_paths(matrix),
+    )
+
+    assert result.summary["active_flight_count"] == 2
+    assert result.summary["event_trace_rmse_m"] == 0.0
+    assert result.summary["model_trace_rmse_m"] == 0.0
+    assert raw_result.summary["event_trace_rmse_m"] < 1.0e-9
+    assert raw_result.summary["model_trace_rmse_m"] < 1.0e-9
+    assert {row.extension_offset for row in result.rows} == {0, 2}
+
+
+def test_raw_polyline_window_keeps_contiguous_segment_between_matching_vertices() -> None:
+    polyline = np.column_stack((np.arange(8, dtype=float), np.zeros(8, dtype=float)))
+    stations = np.column_stack((np.arange(8, dtype=float), np.zeros(8, dtype=float)))
+    stations[4] = [100.0, 0.0]
+
+    window = _raw_polyline_window(polyline, stations, station_start=4, station_end=5)
+
+    assert 4.0 in window[:, 0]
+    np.testing.assert_allclose(np.diff(window[:, 0]), 1.0)
+
+
+def test_trace_lift_recovers_tangential_residual_with_registered_dictionary() -> None:
+    matrix, model = _exact_extended_event_artifacts()
+    event = replace(
+        model.events[0],
+        extension_offsets=np.asarray([2, 2], dtype=int),
+        simplifier={"extension_registered": True},
+    )
+    model = replace(model, events=(event,))
+    center_xy = matrix.reference_xy_m.copy()
+    tangents = _tangents_from_normals(matrix.normals_xy)
+    tangent_residual = np.zeros_like(matrix.X)
+    for row_index, extension in enumerate(event.extension_offsets):
+        row_basis = _row_event_basis(event, matrix.X.shape[1], lag=0, extension=int(extension))
+        tangent_residual[row_index, :] = event.coefficients[row_index] @ row_basis.T
+    actual_xy_by_flight = {
+        flight_id: center_xy + tangent_residual[row_index, :, None] * tangents
+        for row_index, flight_id in enumerate(matrix.flight_ids)
+    }
+
+    lifted = _trace_lift_tangent_reconstruction(
+        matrix,
+        model,
+        center_xy=center_xy,
+        actual_xy_by_flight=actual_xy_by_flight,
+        mode="registered-dictionary",
+    )
+
+    assert lifted is not None
+    np.testing.assert_allclose(lifted, tangent_residual, atol=1.0e-5)
+
+
+def test_trace_lift_round_trips_as_model_artifact(tmp_path) -> None:
+    matrix, model = _exact_extended_event_artifacts()
+    center_xy = matrix.reference_xy_m.copy()
+    tangents = _tangents_from_normals(matrix.normals_xy)
+    event = model.events[0]
+    tangent_residual = np.zeros_like(matrix.X)
+    for row_index, extension in enumerate(event.extension_offsets):
+        row_basis = _row_event_basis(event, matrix.X.shape[1], lag=0, extension=int(extension))
+        tangent_residual[row_index, :] = event.coefficients[row_index] @ row_basis.T
+    augmented = augment_with_trace_tangent_lift(model, tangent_residual, center_method="none")
+    model_path = tmp_path / "trace_augmented_model.npz"
+
+    save_fit_result(model_path, augmented, flight_ids=matrix.flight_ids)
+    loaded = load_fit_result(model_path)
+    result = evaluate_event_trace_match(matrix, loaded, event_index=0, trace_lift="stored")
+
+    assert loaded.trace_tangent_reconstruction is not None
+    assert loaded.trace_tangent_center is not None
+    assert loaded.trace_tangent_coefficients is not None
+    np.testing.assert_allclose(loaded.trace_tangent_reconstruction, tangent_residual, atol=2.0e-5)
+    assert loaded.metadata["trace_tangent_lift"]["enabled"]
+    assert "lifted_model_trace_rmse_m" in result.summary
+
+
+def test_trace_lift_extra_residual_events_reduce_unmodeled_tangent_signal() -> None:
+    rng = np.random.default_rng(21)
+    matrix, model = _exact_extended_event_artifacts()
+    tangent_residual = rng.normal(0.0, 0.01, size=matrix.X.shape)
+    tangent_residual[:, 14:19] += np.asarray([[8.0], [-6.0]]) * np.asarray([0.0, 1.0, 2.0, 1.0, 0.0])
+
+    base = augment_with_trace_tangent_lift(model, tangent_residual, center_method="none")
+    extra = augment_with_trace_tangent_lift(
+        model,
+        tangent_residual,
+        center_method="none",
+        extra_residual_config=HLLRDV1Config(
+            L_min=5,
+            L_max=5,
+            K_max=1,
+            kappa_peak=0.0,
+            n_min=1,
+            c_null=0.0,
+            epsilon_gain=0.0,
+            activation_scale=0.0,
+            peak_backtrack_enabled=False,
+            local_simplifier_enabled=False,
+        ),
+    )
+
+    assert base.trace_tangent_reconstruction is not None
+    assert extra.trace_tangent_reconstruction is not None
+    base_rmse = float(np.sqrt(np.mean((tangent_residual - base.trace_tangent_reconstruction) ** 2)))
+    extra_rmse = float(np.sqrt(np.mean((tangent_residual - extra.trace_tangent_reconstruction) ** 2)))
+    assert extra_rmse < base_rmse * 0.75
+    assert extra.metadata["trace_tangent_lift"]["extra_residual_events"]["enabled"]
 
 
 def test_local_simplifier_reduces_dogleg_to_one_approximation_point() -> None:
@@ -376,6 +737,200 @@ def load_cluster_flights_from_rows(rows: list[dict[str, object]], cluster: str):
         path = Path(directory) / "arrivals.jsonl"
         path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
         return load_cluster_flights(path, cluster)
+
+
+def _lagged_trombone_matrix() -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(3)
+    n = 48
+    M = 100
+    start = 32
+    length = 12
+    max_delay = 8
+    source_shape = np.asarray([0.0, 1.0, 4.0, 8.0, 9.0, 5.0, 1.0, 0.0])
+    shape = np.interp(
+        np.linspace(0.0, 1.0, length),
+        np.linspace(0.0, 1.0, source_shape.size),
+        source_shape,
+    )
+    shape = shape / np.linalg.norm(shape)
+    X = rng.normal(0.0, 0.01, size=(n, M))
+    delays = rng.integers(0, max_delay + 1, size=n)
+    amplitudes = rng.normal(80.0, 8.0, size=n) * rng.choice([-1.0, 1.0], size=n)
+    for row_index, (delay, amplitude) in enumerate(zip(delays, amplitudes, strict=True)):
+        X[row_index, start + delay : start + delay + length] += amplitude * shape
+    return X, delays
+
+
+def _extended_trombone_matrix() -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(11)
+    n = 54
+    M = 110
+    start = 34
+    length = 12
+    max_extension = 8
+    source_shape = np.asarray([0.0, 1.0, 4.0, 8.0, 9.0, 8.0, 5.0, 1.0, 0.0])
+    shape = np.interp(
+        np.linspace(0.0, 1.0, length),
+        np.linspace(0.0, 1.0, source_shape.size),
+        source_shape,
+    )
+    shape = shape / np.linalg.norm(shape)
+    pivot = int(np.argmax(shape))
+    X = rng.normal(0.0, 0.01, size=(n, M))
+    extensions = rng.integers(0, max_extension + 1, size=n)
+    amplitudes = rng.normal(90.0, 6.0, size=n) * rng.choice([-1.0, 1.0], size=n)
+    for row_index, (extension, amplitude) in enumerate(zip(extensions, amplitudes, strict=True)):
+        extended_shape = np.concatenate(
+            [
+                shape[: pivot + 1],
+                np.repeat(shape[pivot], int(extension)),
+                shape[pivot + 1 :],
+            ]
+        )
+        X[row_index, start : start + extended_shape.size] += amplitude * extended_shape
+    return X, extensions
+
+
+def _exact_shifted_event_artifacts() -> tuple[MatrixArtifact, HLLRDFitResult]:
+    n = 2
+    M = 20
+    start = 5
+    end = 9
+    reference_xy_m = np.column_stack((100.0 * np.arange(M, dtype=float), np.zeros(M, dtype=float)))
+    normals_xy = np.tile(np.asarray([0.0, 1.0]), (M, 1))
+    local_shape = np.asarray([1.0, 2.0, 2.0, 1.0])
+    local_shape = local_shape / np.linalg.norm(local_shape)
+    basis = np.zeros((M, 2), dtype=float)
+    basis[start:end, 0] = local_shape
+    coefficients = np.asarray([[30.0, 0.0], [-20.0, 0.0]])
+    lag_offsets = np.asarray([2, -1], dtype=int)
+    reconstruction = np.zeros((n, M), dtype=float)
+    for row_index, lag in enumerate(lag_offsets):
+        shifted = np.zeros_like(basis)
+        if lag > 0:
+            shifted[lag:, :] = basis[:-lag, :]
+        elif lag < 0:
+            shifted[:lag, :] = basis[-lag:, :]
+        else:
+            shifted = basis.copy()
+        reconstruction[row_index, :] = coefficients[row_index] @ shifted.T
+    event = HLLRDEvent(
+        start=start,
+        end=end,
+        basis=basis,
+        coefficients=coefficients,
+        active_mask=np.asarray([True, True]),
+        raw_gain=float(np.sum(coefficients * coefficients)),
+        active_gain=float(np.sum(coefficients * coefficients)),
+        score=float(np.sum(coefficients * coefficients)),
+        threshold=0.0,
+        peak_index=7,
+        simplifier={"lag_registered": True},
+        lag_offsets=lag_offsets,
+    )
+    matrix = MatrixArtifact(
+        X=reconstruction.copy(),
+        X_centered=reconstruction.copy(),
+        column_center=np.zeros(M, dtype=float),
+        flight_ids=("A", "B"),
+        stations=np.linspace(0.0, 1.0, M),
+        reference_xy_m=reference_xy_m,
+        normals_xy=normals_xy,
+        origin_lat_deg=0.0,
+        origin_lon_deg=0.0,
+        cluster="SE",
+    )
+    model = HLLRDFitResult(
+        events=(event,),
+        dictionary=np.column_stack((basis[:, 0], basis[:, 1])),
+        coefficients=coefficients.copy(),
+        reconstruction=reconstruction.copy(),
+        residual=np.zeros_like(reconstruction),
+        explained_fraction=1.0,
+        sigma_hat=0.0,
+        activation_energy_floor=0.0,
+        column_center=np.zeros(M, dtype=float),
+        config=HLLRDV2Config(max_lag_stations=4),
+        metadata={},
+    )
+    return matrix, model
+
+
+def _exact_extended_event_artifacts() -> tuple[MatrixArtifact, HLLRDFitResult]:
+    n = 2
+    M = 22
+    start = 5
+    end = 9
+    reference_xy_m = np.column_stack((100.0 * np.arange(M, dtype=float), np.zeros(M, dtype=float)))
+    normals_xy = np.tile(np.asarray([0.0, 1.0]), (M, 1))
+    local_shape = np.asarray([1.0, 2.0, 2.0, 1.0])
+    local_shape = local_shape / np.linalg.norm(local_shape)
+    basis = np.zeros((M, 2), dtype=float)
+    basis[start:end, 0] = local_shape
+    coefficients = np.asarray([[30.0, 0.0], [-20.0, 0.0]])
+    extension_offsets = np.asarray([2, 0], dtype=int)
+    event = HLLRDEvent(
+        start=start,
+        end=end,
+        basis=basis,
+        coefficients=coefficients,
+        active_mask=np.asarray([True, True]),
+        raw_gain=float(np.sum(coefficients * coefficients)),
+        active_gain=float(np.sum(coefficients * coefficients)),
+        score=float(np.sum(coefficients * coefficients)),
+        threshold=0.0,
+        peak_index=6,
+        simplifier={"extension_registered": True},
+        extension_offsets=extension_offsets,
+    )
+    reconstruction = np.zeros((n, M), dtype=float)
+    for row_index, extension in enumerate(extension_offsets):
+        row_basis = _row_event_basis(event, M, lag=0, extension=int(extension))
+        reconstruction[row_index, :] = coefficients[row_index] @ row_basis.T
+    matrix = MatrixArtifact(
+        X=reconstruction.copy(),
+        X_centered=reconstruction.copy(),
+        column_center=np.zeros(M, dtype=float),
+        flight_ids=("A", "B"),
+        stations=np.linspace(0.0, 1.0, M),
+        reference_xy_m=reference_xy_m,
+        normals_xy=normals_xy,
+        origin_lat_deg=0.0,
+        origin_lon_deg=0.0,
+        cluster="SE",
+    )
+    model = HLLRDFitResult(
+        events=(event,),
+        dictionary=np.column_stack((basis[:, 0], basis[:, 1])),
+        coefficients=coefficients.copy(),
+        reconstruction=reconstruction.copy(),
+        residual=np.zeros_like(reconstruction),
+        explained_fraction=1.0,
+        sigma_hat=0.0,
+        activation_energy_floor=0.0,
+        column_center=np.zeros(M, dtype=float),
+        config=HLLRDV2Config(max_lag_stations=0, max_extend_stations=2),
+        metadata={},
+    )
+    return matrix, model
+
+
+def _raw_tracks_from_matrix_paths(matrix: MatrixArtifact) -> pd.DataFrame:
+    projection = LocalProjection(matrix.origin_lat_deg, matrix.origin_lon_deg)
+    rows: list[dict[str, object]] = []
+    for row_index, flight_id in enumerate(matrix.flight_ids):
+        xy_m = matrix.reference_xy_m + matrix.X[row_index, :, None] * matrix.normals_xy
+        lat, lon = projection.unproject(xy_m[:, 0], xy_m[:, 1])
+        for station_index, (lat_deg, lon_deg) in enumerate(zip(lat, lon, strict=True)):
+            rows.append(
+                {
+                    "flight_id": str(flight_id),
+                    "time": float(station_index),
+                    "lat": float(lat_deg),
+                    "lon": float(lon_deg),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def _straight_track_frame(offsets: list[float]) -> pd.DataFrame:
