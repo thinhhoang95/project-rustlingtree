@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from multiprocessing import cpu_count
 from pathlib import Path
 
 from matplotlib.axes import Axes
@@ -48,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Path to model_from_merge_L40_K6.npz.")
     parser.add_argument("--raw-adsb-dir", type=Path, default=None, help="Raw ADS-B directory for grey background tracks.")
     parser.add_argument("--split-gap-seconds", type=int, default=DEFAULT_SPLIT_GAP_SECONDS)
-    parser.add_argument("--processes", type=int, default=max(cpu_count() - 1, 1))
+    parser.add_argument("--processes", type=int, default=1, help="Raw ADS-B loading worker count. Defaults to 1 for GUI launch reliability.")
     parser.add_argument("--background-source", choices=["raw", "matrix"], default="raw")
     parser.add_argument("--background-alpha", type=float, default=0.08, help="Transparency for all-flight background paths.")
     parser.add_argument("--background-linewidth", type=float, default=0.35, help="Line width for all-flight background paths.")
@@ -115,7 +114,12 @@ class SouthEastInteractive:
         processes: int,
     ) -> dict[str, np.ndarray]:
         source_dir = raw_adsb_dir or self._raw_adsb_dir_from_matrix()
-        tracks = load_raw_adsb(source_dir, int(processes))
+        try:
+            tracks = load_raw_adsb(source_dir, int(processes))
+        except FileNotFoundError:
+            if int(processes) <= 1:
+                raise
+            tracks = load_raw_adsb(source_dir, 1)
         tracks = split_tracks_by_gap(tracks, int(split_gap_seconds))
         flight_ids = set(self.matrix.flight_ids)
         tracks = tracks.loc[tracks["flight_id"].astype(str).isin(flight_ids)].copy()
