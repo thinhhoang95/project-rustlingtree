@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import numpy as np
 import pandas as pd
 
-from hllrd.candidates import is_duplicate_interval
+from hllrd.candidates import backtrack_peak_rise_start, is_duplicate_interval
 from hllrd.cli import candidates_main, fit_main, transform_main
 from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
 from hllrd.fit import (
@@ -252,6 +253,55 @@ def test_activation_threshold_uses_quiet_window_energy_floor() -> None:
 def test_duplicate_interval_rule_allows_nested_but_rejects_near_identical() -> None:
     assert is_duplicate_interval((10, 30), (11, 31))
     assert not is_duplicate_interval((15, 20), (10, 30))
+
+
+def test_peak_backtrack_finds_rising_shoulder() -> None:
+    energy = np.asarray([1.0, 1.0, 1.2, 2.0, 5.0, 12.0, 20.0, 18.0, 4.0])
+
+    start = backtrack_peak_rise_start(energy, 6, baseline=1.0, rise_fraction=0.10)
+
+    assert start == 4
+
+
+def test_fit_backtracks_late_peak_window_to_cover_rise() -> None:
+    n = 24
+    M = 80
+    shape = np.zeros(M, dtype=float)
+    shape[45:71] = np.linspace(0.0, 1.0, 26)
+    shape[71:] = np.linspace(0.9, 0.1, 9)
+    amplitudes = np.linspace(-80.0, 80.0, n)
+    X = amplitudes[:, None] * shape[None, :]
+
+    config = HLLRDV1Config(
+        L_min=20,
+        L_max=20,
+        K_max=1,
+        kappa_peak=0.0,
+        n_min=5,
+        c_null=0.0,
+        epsilon_gain=0.0,
+        peak_backtrack_rise_fraction=0.05,
+        local_simplifier_enabled=False,
+    )
+    result = fit_localized_low_rank(
+        X,
+        config,
+        already_centered=True,
+    )
+    centered = fit_localized_low_rank(
+        X,
+        replace(config, peak_backtrack_enabled=False),
+        already_centered=True,
+    )
+
+    assert result.events
+    assert centered.events
+    event = result.events[0]
+    centered_event = centered.events[0]
+    assert event.peak_index >= 65
+    assert event.start < centered_event.start
+    assert event.start <= centered_event.start - 5
+    assert event.end == centered_event.end
 
 
 def test_matrix_artifact_round_trips(tmp_path) -> None:

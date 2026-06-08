@@ -374,6 +374,8 @@ Current behavior:
 - For each peak, lengths are tested from shortest to longest.
 - The first length with positive score is accepted.
 - This is the "narrowest over threshold" rule.
+- The start can be expanded upstream by peak-rise backtracking, so an accepted
+  interval can be slightly longer than the nominal grid length.
 
 This explains why many fitted event windows have exactly `L_min`.
 
@@ -418,6 +420,33 @@ Important interpretation detail:
   matrix energy.
 - The fitter uses a changing residual `R`, so later events may not correspond
   to obvious peaks in the initial energy curve.
+
+### Peak-Rise Backtracking
+
+For each detected peak, HLLRD optionally backtracks on the smoothed residual
+energy curve to find the start of the peak's rising shoulder. The default rule
+uses:
+
+```text
+rise_threshold = median(smoothed_energy)
+                 + peak_backtrack_rise_fraction
+                   * (peak_energy - median(smoothed_energy))
+```
+
+with `peak_backtrack_rise_fraction = 0.05`.
+
+If this rising-shoulder index is earlier than the centered interval start, the
+candidate start is expanded upstream while keeping the centered interval end.
+
+Motivation:
+
+- Some operational variations build gradually and peak late.
+- A strictly peak-centered window can start after the variation has already
+  begun.
+- When the window starts too late, the local basis may reduce residual by
+  creating an artificial sharp turn near the support boundary.
+- Backtracking biases the event window to cover the ramp-up region instead of
+  only the high-energy tail of the peak.
 
 ## Stage 7: Local Rank-2 Candidate Scoring
 
@@ -518,15 +547,16 @@ Only candidates with positive score are eligible.
 The fitter repeats the following loop:
 
 1. Find residual-energy peaks in current residual `R`.
-2. For each peak, test candidate lengths from shortest to longest.
-3. Keep the first positive-scoring length for that peak.
-4. Optionally keep the next longer candidate if `keep_next_longer=True`.
-5. Remove candidates that duplicate previously selected intervals.
-6. Select the remaining candidate with largest score.
-7. Optionally trim weak-energy endpoints.
-8. Add the event.
-9. Subtract its active reconstruction from `R`.
-10. Stop if there are no candidates, if score is nonpositive, if `K_max` is
+2. Optionally backtrack each peak to its rising shoulder.
+3. For each peak, test candidate lengths from shortest to longest.
+4. Keep the first positive-scoring length for that peak.
+5. Optionally keep the next longer candidate if `keep_next_longer=True`.
+6. Remove candidates that duplicate previously selected intervals.
+7. Select the remaining candidate with largest score.
+8. Optionally trim weak-energy endpoints.
+9. Add the event.
+10. Subtract its active reconstruction from `R`.
+11. Stop if there are no candidates, if score is nonpositive, if `K_max` is
     reached, or if incremental gain falls below `epsilon_gain`.
 
 Motivation:
@@ -777,6 +807,9 @@ Useful tuning parameters:
 - `--lambda-activation`: active-flight penalty.
 - `--epsilon-gain`: early stop threshold for incremental event gain.
 - `--keep-next-longer`: keep one backup candidate per peak.
+- `--no-peak-backtrack`: disable peak-rise backtracking.
+- `--peak-backtrack-rise-fraction`: rising-shoulder threshold as a fraction of
+  peak energy above baseline.
 
 ## Interpretation of Outputs
 
@@ -836,7 +869,8 @@ The V1 implementation is intentionally limited:
 - It models normal residuals only.
 - It uses fixed rank 2 for every event.
 - It uses greedy residual pursuit, not global optimization.
-- It searches only peak-centered intervals from a short length grid.
+- It searches peak-driven intervals from a short length grid, with optional
+  upstream expansion from peak-rise backtracking.
 - It accepts the first positive length for each peak, so event lengths often
   equal `L_min`.
 - Endpoint peaks are only included by fallback behavior in the peak finder.

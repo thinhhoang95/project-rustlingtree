@@ -10,11 +10,13 @@ import numpy as np
 from hllrd.candidates import (
     CandidateFit,
     analytic_null_threshold,
+    backtrack_peak_rise_start,
     centered_interval,
     find_residual_energy_peaks,
     is_duplicate_interval,
     length_grid,
     local_rank2_candidate,
+    smooth_energy,
 )
 from hllrd.matrix import estimate_noise_sigma, robust_center_columns
 from hllrd.simplifier import simplify_local_deviation_block
@@ -39,6 +41,8 @@ class HLLRDV1Config:
     duplicate_iou_threshold: float = 0.8
     keep_next_longer: bool = False
     center_method: str = "median"
+    peak_backtrack_enabled: bool = True
+    peak_backtrack_rise_fraction: float = 0.05
     local_simplifier_enabled: bool = True
     local_simplifier_gain_sigma: float = 128.0
     local_simplifier_max_points: int = 4
@@ -133,6 +137,7 @@ def fit_localized_low_rank(
             min_peak_distance=min_peak_distance,
             smoothing_window=cfg.smoothing_window,
         )
+        peak_start_indices = _peak_backtrack_starts(R, peaks, config=cfg)
         candidates: list[CandidateFit] = []
         for peak in peaks:
             accepted_index: int | None = None
@@ -140,6 +145,7 @@ def fit_localized_low_rank(
                 candidate = _score_interval(
                     R,
                     peak_index=int(peak),
+                    peak_start_index=peak_start_indices.get(int(peak)),
                     length=int(length),
                     sigma_hat=sigma_hat,
                     activation_energy_floor=activation_energy_floor,
@@ -154,6 +160,7 @@ def fit_localized_low_rank(
                 backup = _score_interval(
                     R,
                     peak_index=int(peak),
+                    peak_start_index=peak_start_indices.get(int(peak)),
                     length=int(lengths[accepted_index + 1]),
                     sigma_hat=sigma_hat,
                     activation_energy_floor=activation_energy_floor,
@@ -303,12 +310,14 @@ def generate_candidate_summary(
         min_peak_distance=min_peak_distance,
         smoothing_window=cfg.smoothing_window,
     )
+    peak_start_indices = _peak_backtrack_starts(matrix, peaks, config=cfg)
     rows: list[dict[str, float | int]] = []
     for peak in peaks:
         for length in lengths:
             candidate = _score_interval(
                 matrix,
                 peak_index=int(peak),
+                peak_start_index=peak_start_indices.get(int(peak)),
                 length=int(length),
                 sigma_hat=sigma_hat,
                 activation_energy_floor=activation_energy_floor,
@@ -504,6 +513,7 @@ def _score_interval(
     R: np.ndarray,
     *,
     peak_index: int,
+    peak_start_index: int | None = None,
     length: int,
     sigma_hat: float,
     activation_energy_floor: float,
@@ -512,6 +522,8 @@ def _score_interval(
 ) -> CandidateFit:
     n, M = R.shape
     start, end = centered_interval(peak_index, length, M)
+    if config.peak_backtrack_enabled and peak_start_index is not None:
+        start = min(start, max(0, min(int(peak_start_index), int(peak_index))))
     return _score_explicit_interval(
         R,
         peak_index=peak_index,
@@ -522,6 +534,29 @@ def _score_interval(
         n_min=n_min,
         config=config,
     )
+
+
+def _peak_backtrack_starts(
+    R: np.ndarray,
+    peaks: np.ndarray,
+    *,
+    config: HLLRDV1Config,
+) -> dict[int, int]:
+    if not config.peak_backtrack_enabled or len(peaks) == 0:
+        return {}
+    residual = np.asarray(R, dtype=float)
+    energy = np.mean(residual * residual, axis=0)
+    smoothed = smooth_energy(energy, config.smoothing_window)
+    baseline = float(np.median(smoothed)) if smoothed.size else 0.0
+    return {
+        int(peak): backtrack_peak_rise_start(
+            smoothed,
+            int(peak),
+            baseline=baseline,
+            rise_fraction=config.peak_backtrack_rise_fraction,
+        )
+        for peak in peaks
+    }
 
 
 def _score_explicit_interval(

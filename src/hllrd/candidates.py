@@ -85,6 +85,32 @@ def find_residual_energy_peaks(
     return peaks[np.argsort(smoothed[peaks])[::-1]]
 
 
+def backtrack_peak_rise_start(
+    energy: np.ndarray,
+    peak_index: int,
+    *,
+    baseline: float | None = None,
+    rise_fraction: float = 0.05,
+) -> int:
+    values = np.asarray(energy, dtype=float)
+    if values.ndim != 1:
+        raise ValueError("energy must be a 1D array")
+    if values.size == 0:
+        raise ValueError("energy must be non-empty")
+    peak = int(np.clip(int(peak_index), 0, values.size - 1))
+    reference = float(np.median(values)) if baseline is None else float(baseline)
+    peak_value = float(values[peak])
+    if not np.isfinite(peak_value) or peak_value <= reference:
+        return peak
+
+    fraction = max(0.0, min(1.0, float(rise_fraction)))
+    threshold = reference + fraction * (peak_value - reference)
+    start = peak
+    while start > 0 and float(values[start - 1]) >= threshold:
+        start -= 1
+    return int(start)
+
+
 def centered_interval(peak_index: int, length: int, M: int) -> tuple[int, int]:
     width = max(1, min(int(length), int(M)))
     start = int(peak_index) - width // 2
