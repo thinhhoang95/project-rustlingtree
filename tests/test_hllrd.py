@@ -14,8 +14,10 @@ from hllrd.fit import (
     fit_localized_low_rank,
     load_fit_result,
     quiet_window_energy_floor,
+    save_fit_result,
 )
 from hllrd.matrix import MatrixArtifact, MatrixBuildConfig, build_matrix_from_tracks, load_matrix_artifact, save_matrix_artifact
+from hllrd.simplifier import simplify_local_deviation_block, simplify_series_by_gain
 
 
 def test_load_cluster_flights_filters_artifact_jsonl(tmp_path) -> None:
@@ -118,6 +120,104 @@ def test_fit_localized_low_rank_recovers_planted_event() -> None:
     assert result.events
     assert result.explained_fraction > 0.9
     assert any(max(event.start, 35) < min(event.end, 49) for event in result.events)
+    assert result.events[0].simplifier["enabled"]
+
+
+def test_local_simplifier_reduces_dogleg_to_one_approximation_point() -> None:
+    dogleg = np.asarray([0.0, 5.0, 10.0, 5.0, 0.0])
+
+    result = simplify_series_by_gain(
+        dogleg,
+        min_gain_per_point_m2=1.0,
+        max_approximation_points=4,
+    )
+
+    assert result.approximation_points == 1
+    assert result.retained_indices.tolist() == [0, 2, 4]
+    np.testing.assert_allclose(result.values, dogleg)
+
+
+def test_local_simplifier_keeps_two_points_for_trombone_like_pattern() -> None:
+    trombone = np.asarray([0.0, 1.0, 4.0, 8.0, 9.0, 5.0, 1.0, 0.0])
+
+    result = simplify_series_by_gain(
+        trombone,
+        min_gain_per_point_m2=2.0,
+        max_approximation_points=4,
+    )
+
+    assert result.approximation_points == 2
+    assert result.retained_indices[0] == 0
+    assert result.retained_indices[-1] == len(trombone) - 1
+    assert result.residual_error_m2 < result.initial_error_m2
+
+
+def test_local_simplifier_only_simplifies_active_local_rows() -> None:
+    block = np.asarray(
+        [
+            [0.0, 4.0, 8.0, 4.0, 0.0],
+            [100.0, 50.0, 0.0, 50.0, 100.0],
+        ]
+    )
+
+    result = simplify_local_deviation_block(
+        block,
+        active_mask=np.asarray([True, False]),
+        min_gain_per_point_m2=1.0,
+        max_approximation_points=4,
+    )
+
+    np.testing.assert_allclose(result.values[0], block[0])
+    np.testing.assert_allclose(result.values[1], np.zeros(5))
+    assert result.diagnostics["point_count_histogram"] == {"0": 0, "1": 1, "2": 0, "3": 0, "4": 0}
+
+
+def test_fit_local_simplifier_can_be_disabled(tmp_path) -> None:
+    X = np.zeros((12, 50), dtype=float)
+    shape = np.asarray([0.0, 2.0, 6.0, 10.0, 6.0, 2.0, 0.0])
+    for row in range(X.shape[0]):
+        X[row, 20:27] = (row + 1) * shape
+
+    enabled = fit_localized_low_rank(
+        X,
+        HLLRDV1Config(
+            L_min=10,
+            L_max=10,
+            K_max=1,
+            n_min=2,
+            kappa_peak=0.0,
+            c_null=0.0,
+            epsilon_gain=0.0,
+            local_simplifier_gain_sigma=0.0,
+        ),
+        already_centered=True,
+    )
+    disabled = fit_localized_low_rank(
+        X,
+        HLLRDV1Config(
+            L_min=10,
+            L_max=10,
+            K_max=1,
+            n_min=2,
+            kappa_peak=0.0,
+            c_null=0.0,
+            epsilon_gain=0.0,
+            local_simplifier_enabled=False,
+        ),
+        already_centered=True,
+    )
+
+    assert enabled.events
+    assert enabled.events[0].simplifier["enabled"]
+    assert disabled.events
+    assert disabled.events[0].simplifier == {}
+
+    model_path = tmp_path / "simplified_model.npz"
+    save_fit_result(model_path, enabled)
+    loaded = load_fit_result(model_path)
+    assert loaded.config.local_simplifier_enabled
+    assert loaded.events[0].simplifier["enabled"]
+    assert loaded.events[0].simplifier["point_count_histogram"]
 
 
 def test_fit_rejects_single_flight_outlier_when_n_min_is_high() -> None:

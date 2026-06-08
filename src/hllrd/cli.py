@@ -282,6 +282,9 @@ def _add_fit_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--endpoint-trim-threshold", type=float, default=0.05)
     parser.add_argument("--duplicate-iou-threshold", type=float, default=0.8)
     parser.add_argument("--keep-next-longer", action="store_true")
+    parser.add_argument("--no-local-simplifier", dest="local_simplifier_enabled", action="store_false")
+    parser.add_argument("--local-simplifier-gain-sigma", type=float, default=128.0)
+    parser.add_argument("--local-simplifier-max-points", type=int, default=4)
 
 
 def _add_candidates_args(parser: argparse.ArgumentParser) -> None:
@@ -347,6 +350,9 @@ def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
         endpoint_trim_threshold=args.endpoint_trim_threshold,
         duplicate_iou_threshold=args.duplicate_iou_threshold,
         keep_next_longer=args.keep_next_longer,
+        local_simplifier_enabled=args.local_simplifier_enabled,
+        local_simplifier_gain_sigma=args.local_simplifier_gain_sigma,
+        local_simplifier_max_points=args.local_simplifier_max_points,
     )
 
 

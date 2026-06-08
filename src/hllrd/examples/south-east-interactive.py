@@ -38,17 +38,76 @@ DEFAULT_MODEL = DEFAULT_OUTPUT_DIR / "model_from_merge_L40_K6.npz"
 NM_PER_M = 1.0 / 1852.0
 
 
+def _simplify_xy_by_point_count(xy_m: np.ndarray, approximation_points: int) -> tuple[np.ndarray, int]:
+    points = np.asarray(xy_m, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2:
+        raise ValueError("xy_m must have shape N x 2")
+    if points.shape[0] <= 2:
+        return points.copy(), 0
+
+    target_points = max(0, min(int(approximation_points), points.shape[0] - 2))
+    retained = [0, points.shape[0] - 1]
+    _error, fitted = _piecewise_linear_xy(points, retained)
+    while len(retained) - 2 < target_points:
+        best_index: int | None = None
+        best_error = np.inf
+        best_fitted = fitted
+        retained_set = set(retained)
+        for index in range(1, points.shape[0] - 1):
+            if index in retained_set:
+                continue
+            candidate_error, candidate_fitted = _piecewise_linear_xy(points, [*retained, index])
+            if candidate_error < best_error:
+                best_index = index
+                best_error = candidate_error
+                best_fitted = candidate_fitted
+        if best_index is None:
+            break
+        retained.append(best_index)
+        retained.sort()
+        fitted = best_fitted
+    return fitted, len(retained) - 2
+
+
+def _piecewise_linear_xy(xy_m: np.ndarray, retained_indices: list[int]) -> tuple[float, np.ndarray]:
+    points = np.asarray(xy_m, dtype=float)
+    retained = sorted(set(int(index) for index in retained_indices))
+    if retained[0] != 0 or retained[-1] != points.shape[0] - 1:
+        raise ValueError("retained_indices must include both endpoints")
+
+    fitted = np.empty_like(points, dtype=float)
+    x = np.arange(points.shape[0], dtype=float)
+    for start, end in zip(retained[:-1], retained[1:], strict=True):
+        fraction = (x[start : end + 1] - float(start)) / float(end - start)
+        fitted[start : end + 1] = (1.0 - fraction[:, None]) * points[start] + fraction[:, None] * points[end]
+    residual = points - fitted
+    return float(np.sum(residual * residual)), fitted
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Interactive South-East HLLRD event response viewer.")
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX, help="Path to matrix_SE_from_merge.npz.")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Path to model_from_merge_L40_K6.npz.")
     parser.add_argument("--background-alpha", type=float, default=0.08, help="Transparency for all-flight background paths.")
     parser.add_argument("--background-linewidth", type=float, default=0.35, help="Line width for all-flight background paths.")
+    parser.add_argument(
+        "--raw-basis-response",
+        action="store_true",
+        help="Show the raw rank-2 basis response instead of the simplified local response.",
+    )
     return parser
 
 
 class SouthEastInteractive:
-    def __init__(self, matrix_path: Path, model_path: Path, *, background_alpha: float, background_linewidth: float) -> None:
+    def __init__(
+        self,
+        matrix_path: Path,
+        model_path: Path,
+        *,
+        background_alpha: float,
+        background_linewidth: float,
+        raw_basis_response: bool,
+    ) -> None:
         self.matrix = load_matrix_artifact(matrix_path)
         self.result = load_fit_result(model_path)
         if not self.result.events:
@@ -58,6 +117,8 @@ class SouthEastInteractive:
 
         self.background_alpha = float(background_alpha)
         self.background_linewidth = float(background_linewidth)
+        self.raw_basis_response = bool(raw_basis_response)
+        self.current_display_approximation_points: int | None = None
         self.projection = LocalProjection(self.matrix.origin_lat_deg, self.matrix.origin_lon_deg)
         self.mean_xy_m = self._mean_xy_m()
         self.station_distance_nm = cumulative_distance_m(self.mean_xy_m[:, 0], self.mean_xy_m[:, 1]) * NM_PER_M
@@ -87,7 +148,39 @@ class SouthEastInteractive:
     def event_response_xy_m(self, z: np.ndarray) -> np.ndarray:
         event = self.result.events[self.current_event_index]
         normal_offset_m = event.basis @ z
-        return self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
+        xy_m = self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
+        if not self.raw_basis_response:
+            xy_m, self.current_display_approximation_points = self._simplified_display_xy(
+                xy_m,
+                normal_offset_m,
+                event.start,
+                event.end,
+                event.simplifier,
+            )
+        else:
+            self.current_display_approximation_points = None
+        return xy_m
+
+    def _simplified_display_xy(
+        self,
+        xy_m: np.ndarray,
+        normal_offset_m: np.ndarray,
+        start: int,
+        end: int,
+        simplifier: dict[str, object],
+    ) -> tuple[np.ndarray, int | None]:
+        if not simplifier.get("enabled", False):
+            return xy_m, None
+        local_offset = np.asarray(normal_offset_m[start:end], dtype=float)
+        local_xy = np.asarray(xy_m[start:end], dtype=float)
+        if local_xy.shape[0] <= 2 or np.allclose(local_offset, 0.0):
+            return xy_m, 0
+        approximation_points = int(round(float(simplifier.get("median_approximation_points", 0.0))))
+        approximation_points = max(0, min(approximation_points, int(simplifier.get("max_approximation_points", 4))))
+        simplified_xy, used_points = _simplify_xy_by_point_count(local_xy, approximation_points)
+        displayed = np.asarray(xy_m, dtype=float).copy()
+        displayed[start:end] = simplified_xy
+        return displayed, used_points
 
     def active_coefficients(self, event_index: int) -> np.ndarray:
         event = self.result.events[event_index]
@@ -211,9 +304,17 @@ class SouthEastInteractive:
         self.title_text.set_text(
             f"Event {self.current_event_index}: {start_nm:.1f}-{end_nm:.1f} NM from merge | "
             f"active {active_count}/{len(self.matrix.flight_ids)} ({active_fraction:.1f}%) | "
-            f"Z=({z[0]:.1f}, {z[1]:.1f})"
+            f"Z=({z[0]:.1f}, {z[1]:.1f}) | "
+            f"{self._display_mode_label()}"
         )
         self.fig.canvas.draw_idle()
+
+    def _display_mode_label(self) -> str:
+        if self.raw_basis_response:
+            return "raw basis"
+        if self.current_display_approximation_points is None:
+            return "raw basis"
+        return f"approx pts: {self.current_display_approximation_points}"
 
     def show(self) -> None:
         self.create()
@@ -227,6 +328,7 @@ def main(argv: list[str] | None = None) -> None:
         args.model,
         background_alpha=args.background_alpha,
         background_linewidth=args.background_linewidth,
+        raw_basis_response=args.raw_basis_response,
     )
     app.show()
 

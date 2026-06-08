@@ -25,9 +25,19 @@ def write_event_summary_csv(path: Path, result: HLLRDFitResult) -> None:
         "active_gain",
         "score",
         "explained_fraction",
+        "local_simplifier_enabled",
+        "local_simplifier_active_count",
+        "local_simplifier_min_gain_per_point_m2",
+        "local_simplifier_mean_points",
+        "local_simplifier_median_points",
+        "local_simplifier_max_points",
+        "local_simplifier_initial_error_m2",
+        "local_simplifier_residual_error_m2",
+        "local_simplifier_reduced_error_m2",
+        "local_simplifier_point_count_histogram",
     ]
     with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer = csv.DictWriter(stream, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

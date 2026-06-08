@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from hllrd.candidates import (
     local_rank2_candidate,
 )
 from hllrd.matrix import estimate_noise_sigma, robust_center_columns
+from hllrd.simplifier import simplify_local_deviation_block
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class HLLRDV1Config:
     duplicate_iou_threshold: float = 0.8
     keep_next_longer: bool = False
     center_method: str = "median"
+    local_simplifier_enabled: bool = True
+    local_simplifier_gain_sigma: float = 128.0
+    local_simplifier_max_points: int = 4
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class HLLRDEvent:
     score: float
     threshold: float
     peak_index: int
+    simplifier: dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
@@ -187,10 +192,18 @@ def fit_localized_low_rank(
         if trimmed.score <= 0.0:
             break
 
-        event = _event_from_candidate(trimmed)
+        committed = _simplify_candidate_for_commit(
+            trimmed,
+            R,
+            sigma_hat=sigma_hat,
+            activation_energy_floor=activation_energy_floor,
+            n_min=n_min,
+            config=cfg,
+        )
+        event = _event_from_candidate(committed)
         selected.append(event)
-        R = R - event.coefficients @ event.basis.T
-        if original_energy <= 0.0 or event.active_gain / original_energy < cfg.epsilon_gain:
+        R = R - trimmed.coefficients @ trimmed.basis.T
+        if original_energy <= 0.0 or trimmed.active_gain / original_energy < cfg.epsilon_gain:
             break
 
     dictionary = build_dictionary(tuple(selected), M)
@@ -368,9 +381,9 @@ def apply_activation_threshold(
     return activated
 
 
-def event_summary(result: HLLRDFitResult) -> list[dict[str, float | int]]:
+def event_summary(result: HLLRDFitResult) -> list[dict[str, Any]]:
     total_energy = float(np.sum((result.reconstruction + result.residual) ** 2))
-    rows: list[dict[str, float | int]] = []
+    rows: list[dict[str, Any]] = []
     for index, event in enumerate(result.events):
         event_reconstruction = event.coefficients @ event.basis.T
         event_energy = float(np.sum(event_reconstruction * event_reconstruction))
@@ -387,6 +400,18 @@ def event_summary(result: HLLRDFitResult) -> list[dict[str, float | int]]:
                 "active_gain": event.active_gain,
                 "score": event.score,
                 "explained_fraction": event_energy / total_energy if total_energy > 0.0 else 0.0,
+                "local_simplifier_enabled": int(bool(event.simplifier.get("enabled", False))),
+                "local_simplifier_active_count": int(event.simplifier.get("active_count", 0)),
+                "local_simplifier_min_gain_per_point_m2": float(
+                    event.simplifier.get("min_gain_per_point_m2", 0.0)
+                ),
+                "local_simplifier_mean_points": float(event.simplifier.get("mean_approximation_points", 0.0)),
+                "local_simplifier_median_points": float(event.simplifier.get("median_approximation_points", 0.0)),
+                "local_simplifier_max_points": int(event.simplifier.get("max_observed_approximation_points", 0)),
+                "local_simplifier_initial_error_m2": float(event.simplifier.get("initial_error_m2", 0.0)),
+                "local_simplifier_residual_error_m2": float(event.simplifier.get("residual_error_m2", 0.0)),
+                "local_simplifier_reduced_error_m2": float(event.simplifier.get("reduced_error_m2", 0.0)),
+                "local_simplifier_point_count_histogram": event.simplifier.get("point_count_histogram", {}),
             }
         )
     return rows
@@ -457,6 +482,7 @@ def load_fit_result(path: Path) -> HLLRDFitResult:
                     active_gain=float(metric.get("active_gain", 0.0)),
                     score=float(metric.get("score", 0.0)),
                     threshold=0.0,
+                    simplifier=_simplifier_from_metric(metric),
                 )
             )
         return HLLRDFitResult(
@@ -486,6 +512,30 @@ def _score_interval(
 ) -> CandidateFit:
     n, M = R.shape
     start, end = centered_interval(peak_index, length, M)
+    return _score_explicit_interval(
+        R,
+        peak_index=peak_index,
+        start=start,
+        end=end,
+        sigma_hat=sigma_hat,
+        activation_energy_floor=activation_energy_floor,
+        n_min=n_min,
+        config=config,
+    )
+
+
+def _score_explicit_interval(
+    R: np.ndarray,
+    *,
+    peak_index: int,
+    start: int,
+    end: int,
+    sigma_hat: float,
+    activation_energy_floor: float,
+    n_min: int,
+    config: HLLRDV1Config,
+) -> CandidateFit:
+    n, _M = R.shape
     threshold = analytic_null_threshold(end - start, n, sigma_hat, config.c_null)
     activation_threshold = activation_threshold_for_length(end - start, activation_energy_floor, config.activation_scale)
     return local_rank2_candidate(
@@ -533,19 +583,62 @@ def _trim_candidate(
     if left == 0 and right == station_energy.size:
         return candidate
     peak = min(max(candidate.peak_index, start + left), start + right - 1)
-    threshold = analytic_null_threshold(right - left, R.shape[0], sigma_hat, config.c_null)
-    activation_threshold = activation_threshold_for_length(right - left, activation_energy_floor, config.activation_scale)
-    return local_rank2_candidate(
+    return _score_explicit_interval(
         R,
         peak_index=peak,
         start=start + left,
         end=start + right,
+        sigma_hat=sigma_hat,
+        activation_energy_floor=activation_energy_floor,
+        n_min=n_min,
+        config=config,
+    )
+
+
+def _simplify_candidate_for_commit(
+    candidate: CandidateFit,
+    R: np.ndarray,
+    *,
+    sigma_hat: float,
+    activation_energy_floor: float,
+    n_min: int,
+    config: HLLRDV1Config,
+) -> CandidateFit:
+    if not config.local_simplifier_enabled or candidate.score <= 0.0:
+        return candidate
+
+    start = candidate.start
+    end = candidate.end
+    local_basis = candidate.basis[start:end, :]
+    local_fit = candidate.coefficients @ local_basis.T
+    min_gain = _local_simplifier_min_gain_per_point(config, sigma_hat)
+    simplified = simplify_local_deviation_block(
+        local_fit,
+        active_mask=candidate.active_mask,
+        min_gain_per_point_m2=min_gain,
+        max_approximation_points=config.local_simplifier_max_points,
+    )
+    simplified_basis = _rank2_basis_from_local_block(simplified.values)
+    activation_threshold = activation_threshold_for_length(end - start, activation_energy_floor, config.activation_scale)
+    simplified_candidate = _candidate_from_local_basis(
+        R,
+        peak_index=candidate.peak_index,
+        start=start,
+        end=end,
+        local_basis=simplified_basis,
         activation_threshold=activation_threshold,
-        threshold=threshold,
+        threshold=candidate.threshold,
         n_min=n_min,
         lambda_i=config.lambda_i,
         lambda_activation=config.lambda_activation,
+        simplifier={
+            "enabled": True,
+            **simplified.diagnostics,
+        },
     )
+    if simplified_candidate.score <= 0.0:
+        return candidate
+    return simplified_candidate
 
 
 def _event_from_candidate(candidate: CandidateFit) -> HLLRDEvent:
@@ -560,6 +653,7 @@ def _event_from_candidate(candidate: CandidateFit) -> HLLRDEvent:
         score=candidate.score,
         threshold=candidate.threshold,
         peak_index=candidate.peak_index,
+        simplifier=dict(candidate.simplifier),
     )
 
 
@@ -584,9 +678,94 @@ def _events_with_refit_coefficients(
                 score=event.score,
                 threshold=event.threshold,
                 peak_index=event.peak_index,
+                simplifier=dict(event.simplifier),
             )
         )
     return tuple(refit)
+
+
+def _local_simplifier_min_gain_per_point(config: HLLRDV1Config, sigma_hat: float) -> float:
+    gain_sigma = max(0.0, float(config.local_simplifier_gain_sigma))
+    sigma = max(0.0, float(sigma_hat))
+    return float((gain_sigma * sigma) ** 2)
+
+
+def _rank2_basis_from_local_block(local: np.ndarray) -> np.ndarray:
+    block = np.asarray(local, dtype=float)
+    if block.ndim != 2:
+        raise ValueError("local must be a 2D matrix")
+    basis = np.zeros((block.shape[1], 2), dtype=float)
+    if block.size == 0:
+        return basis
+    _U, _singular_values, Wt = np.linalg.svd(block, full_matrices=False)
+    rank = min(2, Wt.shape[0])
+    if rank:
+        basis[:, :rank] = Wt[:rank, :].T
+    return basis
+
+
+def _candidate_from_local_basis(
+    R: np.ndarray,
+    *,
+    peak_index: int,
+    start: int,
+    end: int,
+    local_basis: np.ndarray,
+    activation_threshold: float,
+    threshold: float,
+    n_min: int,
+    lambda_i: float,
+    lambda_activation: float,
+    simplifier: dict[str, Any],
+) -> CandidateFit:
+    residual = np.asarray(R, dtype=float)
+    basis_local = np.asarray(local_basis, dtype=float)
+    if basis_local.shape != (end - start, 2):
+        raise ValueError("local_basis must have shape interval_length x 2")
+    basis = np.zeros((residual.shape[1], 2), dtype=float)
+    basis[start:end, :] = basis_local
+    coefficients = residual[:, start:end] @ basis_local
+    raw_gain = float(np.sum(coefficients * coefficients))
+    norms = np.linalg.norm(coefficients, axis=1)
+    active_mask = norms > float(activation_threshold)
+    if int(np.count_nonzero(active_mask)) < int(n_min):
+        active_mask = np.zeros(residual.shape[0], dtype=bool)
+    active_coefficients = coefficients.copy()
+    active_coefficients[~active_mask, :] = 0.0
+    active_gain = float(np.sum(active_coefficients * active_coefficients))
+    score = active_gain - float(threshold) - float(lambda_i) * (end - start) - float(lambda_activation) * int(
+        np.count_nonzero(active_mask)
+    )
+    return CandidateFit(
+        peak_index=int(peak_index),
+        start=int(start),
+        end=int(end),
+        basis=basis,
+        coefficients=active_coefficients,
+        active_mask=active_mask,
+        raw_gain=raw_gain,
+        active_gain=active_gain,
+        score=float(score),
+        threshold=float(threshold),
+        simplifier=simplifier,
+    )
+
+
+def _simplifier_from_metric(metric: dict[str, Any]) -> dict[str, Any]:
+    if not metric.get("local_simplifier_enabled", False):
+        return {}
+    return {
+        "enabled": True,
+        "active_count": int(metric.get("local_simplifier_active_count", 0)),
+        "min_gain_per_point_m2": float(metric.get("local_simplifier_min_gain_per_point_m2", 0.0)),
+        "mean_approximation_points": float(metric.get("local_simplifier_mean_points", 0.0)),
+        "median_approximation_points": float(metric.get("local_simplifier_median_points", 0.0)),
+        "max_observed_approximation_points": int(metric.get("local_simplifier_max_points", 0)),
+        "initial_error_m2": float(metric.get("local_simplifier_initial_error_m2", 0.0)),
+        "residual_error_m2": float(metric.get("local_simplifier_residual_error_m2", 0.0)),
+        "reduced_error_m2": float(metric.get("local_simplifier_reduced_error_m2", 0.0)),
+        "point_count_histogram": dict(metric.get("local_simplifier_point_count_histogram", {}) or {}),
+    }
 
 
 def _explained_fraction(X: np.ndarray, residual: np.ndarray) -> float:

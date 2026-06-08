@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from scipy.signal import find_peaks
@@ -18,6 +19,7 @@ class CandidateFit:
     active_gain: float
     score: float
     threshold: float
+    simplifier: dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
