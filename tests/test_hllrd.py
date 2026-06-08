@@ -17,7 +17,14 @@ from hllrd.fit import (
     quiet_window_energy_floor,
     save_fit_result,
 )
-from hllrd.matrix import MatrixArtifact, MatrixBuildConfig, build_matrix_from_tracks, load_matrix_artifact, save_matrix_artifact
+from hllrd.matrix import (
+    MatrixArtifact,
+    MatrixBuildConfig,
+    _normal_residuals_at_reference_stations,
+    build_matrix_from_tracks,
+    load_matrix_artifact,
+    save_matrix_artifact,
+)
 from hllrd.simplifier import simplify_local_deviation_block, simplify_series_by_gain
 
 
@@ -94,6 +101,25 @@ def test_build_matrix_from_tracks_returns_centered_normal_residuals() -> None:
     assert np.all(np.isfinite(artifact.X_centered))
     assert np.allclose(np.linalg.norm(artifact.normals_xy, axis=1), 1.0)
     assert artifact.cluster == "SE"
+
+
+def test_reference_station_residual_ignores_alongtrack_polyline_timing() -> None:
+    reference = np.column_stack((np.zeros(6), np.linspace(0.0, 1_000.0, 6)))
+    normals = np.tile(np.asarray([-1.0, 0.0]), (6, 1))
+    polyline = np.asarray(
+        [
+            [100.0, 0.0],
+            [100.0, 80.0],
+            [160.0, 120.0],
+            [100.0, 200.0],
+            [100.0, 650.0],
+            [100.0, 1_000.0],
+        ]
+    )
+
+    residual = _normal_residuals_at_reference_stations(polyline, reference, normals)
+
+    np.testing.assert_allclose(residual, -100.0, atol=1.0e-9)
 
 
 def test_fit_localized_low_rank_recovers_planted_event() -> None:

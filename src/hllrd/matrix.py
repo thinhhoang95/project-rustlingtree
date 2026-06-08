@@ -10,7 +10,6 @@ import pandas as pd
 
 from hllrd.geometry import (
     LocalProjection,
-    normal_deviation_m,
     projection_from_latlon,
     reference_tangent_normal,
     resample_polyline_by_fraction,
@@ -103,24 +102,35 @@ def build_matrix_from_tracks(
     projection = projection_from_latlon(clean["lat"].to_numpy(dtype=float), clean["lon"].to_numpy(dtype=float))
     stations = np.linspace(0.0, 1.0, cfg.station_count)
 
-    samples: list[np.ndarray] = []
+    reference_samples: list[np.ndarray] = []
+    flight_polylines: list[np.ndarray] = []
     flight_ids: list[str] = []
     skipped: list[str] = []
     for flight_id, flight in clean.groupby("flight_id", sort=False):
-        sampled = _sample_flight(flight, projection, stations, cfg.min_points_per_flight)
+        polyline = _flight_polyline_xy_m(flight, projection, cfg.min_points_per_flight)
+        if polyline is None:
+            skipped.append(str(flight_id))
+            continue
+        sampled = _resample_flight_polyline(polyline, stations)
         if sampled is None:
             skipped.append(str(flight_id))
             continue
         flight_ids.append(str(flight_id))
-        samples.append(sampled)
+        flight_polylines.append(polyline)
+        reference_samples.append(sampled)
 
-    if not samples:
+    if not reference_samples:
         raise ValueError("no flights had enough valid trajectory points to build a matrix")
 
-    sample_stack = np.stack(samples, axis=0)
+    sample_stack = np.stack(reference_samples, axis=0)
     reference_xy = np.median(sample_stack, axis=0)
     _tangents, normals = reference_tangent_normal(reference_xy)
-    X = np.vstack([normal_deviation_m(sample, reference_xy, normals) for sample in sample_stack])
+    X = np.vstack(
+        [
+            _normal_residuals_at_reference_stations(polyline, reference_xy, normals)
+            for polyline in flight_polylines
+        ]
+    )
     X_centered, column_center = robust_center_columns(X, method=cfg.center_method)
     sigma_hat = estimate_noise_sigma(X_centered)
 
@@ -144,10 +154,9 @@ def build_matrix_from_tracks(
     )
 
 
-def _sample_flight(
+def _flight_polyline_xy_m(
     flight: pd.DataFrame,
     projection: LocalProjection,
-    stations: np.ndarray,
     min_points: int,
 ) -> np.ndarray | None:
     deduped = flight.sort_values("time", kind="stable").drop_duplicates("time", keep="last")
@@ -159,11 +168,53 @@ def _sample_flight(
     if int(finite.sum()) < min_points:
         return None
     x_m, y_m = projection.project(lat[finite], lon[finite])
+    return np.column_stack((x_m, y_m))
+
+
+def _resample_flight_polyline(polyline_xy_m: np.ndarray, stations: np.ndarray) -> np.ndarray | None:
+    polyline = np.asarray(polyline_xy_m, dtype=float)
     try:
-        sample_x, sample_y = resample_polyline_by_fraction(x_m, y_m, stations)
+        sample_x, sample_y = resample_polyline_by_fraction(polyline[:, 0], polyline[:, 1], stations)
     except ValueError:
         return None
     return np.column_stack((sample_x, sample_y))
+
+
+def _normal_residuals_at_reference_stations(
+    polyline_xy_m: np.ndarray,
+    reference_xy_m: np.ndarray,
+    normals_xy: np.ndarray,
+) -> np.ndarray:
+    polyline = np.asarray(polyline_xy_m, dtype=float)
+    reference = np.asarray(reference_xy_m, dtype=float)
+    normals = np.asarray(normals_xy, dtype=float)
+    if polyline.ndim != 2 or polyline.shape[1] != 2:
+        raise ValueError("polyline_xy_m must have shape N x 2")
+    if reference.shape != normals.shape or reference.ndim != 2 or reference.shape[1] != 2:
+        raise ValueError("reference_xy_m and normals_xy must share shape M x 2")
+    if polyline.shape[0] < 2:
+        raise ValueError("polyline_xy_m must contain at least two points")
+
+    start = polyline[:-1]
+    segment = polyline[1:] - start
+    segment_length2 = np.sum(segment * segment, axis=1)
+    valid = segment_length2 > 1.0e-12
+    if not np.any(valid):
+        raise ValueError("polyline_xy_m must contain at least one nonzero segment")
+    start = start[valid]
+    segment = segment[valid]
+    segment_length2 = segment_length2[valid]
+
+    residuals = np.zeros(reference.shape[0], dtype=float)
+    for station_index, station_xy in enumerate(reference):
+        delta = station_xy - start
+        fraction = np.sum(delta * segment, axis=1) / segment_length2
+        fraction = np.clip(fraction, 0.0, 1.0)
+        closest = start + fraction[:, None] * segment
+        distances2 = np.sum((closest - station_xy) ** 2, axis=1)
+        closest_xy = closest[int(np.argmin(distances2))]
+        residuals[station_index] = float(np.dot(closest_xy - station_xy, normals[station_index]))
+    return residuals
 
 
 def save_matrix_artifact(path: Path, artifact: MatrixArtifact) -> None:

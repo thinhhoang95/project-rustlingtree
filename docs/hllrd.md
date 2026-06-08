@@ -210,7 +210,7 @@ Motivation:
 - A local planar approximation is sufficient for the cluster-sized KDFW arrival
   geometry and is much simpler than operating directly on geodetic coordinates.
 
-### 3.3 Station Resampling
+### 3.3 Initial Station Resampling
 
 Every flight is resampled onto:
 
@@ -220,17 +220,17 @@ stations = linspace(0, 1, station_count)
 
 The default station count is `200`.
 
-`resample_polyline_by_fraction()` computes cumulative path length for each
-flight, normalizes it to `[0, 1]`, and interpolates `x, y` at the common station
-fractions.
+`resample_polyline_by_fraction()` computes cumulative path length for each raw
+flight, normalizes it to `[0, 1]`, and interpolates `x, y` at common fractions.
+This first resampling pass is used only to build the initial reference path.
 
 Motivation:
 
 - Raw ADS-B samples are irregular in time and count.
-- Low-rank matrix methods require each flight to have values at the same column
-  locations.
-- Fractional station alignment gives a simple first-order alignment that is
-  robust to different speeds and sample rates.
+- The median reference path needs one approximate point from each flight at
+  each nominal station.
+- Fractional station alignment is a simple first-order way to initialize that
+  reference before measuring residuals against reference stations.
 
 ### 3.4 Reference Path
 
@@ -250,18 +250,21 @@ Motivation:
 ### 3.5 Normal Residuals
 
 HLLRD computes tangent and normal vectors along the reference path. Each
-flight's residual is the signed projection of its displacement onto the local
-normal:
+flight's residual is then measured at reference stations, not at the flight's
+own path-fraction stations. For each reference station, the implementation
+finds the closest point on the original trimmed ADS-B polyline and projects
+that displacement onto the local reference normal:
 
 ```text
-X[i, j] = dot(sample_xy[i, j] - reference_xy[j], normal_xy[j])
+closest_xy[i, j] = closest point on raw flight polyline to reference_xy[j]
+X[i, j] = dot(closest_xy[i, j] - reference_xy[j], normal_xy[j])
 ```
 
 Motivation:
 
 - Normal residuals represent lateral deviation from the stream centerline.
-- They suppress along-track timing differences that are less relevant to route
-  shape.
+- Measuring at reference stations avoids confusing along-track station mismatch
+  with lateral deviation.
 - A single scalar per station keeps V1 tractable and interpretable.
 
 ### 3.6 Column Centering

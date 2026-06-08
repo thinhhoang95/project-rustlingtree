@@ -100,8 +100,7 @@ class SouthEastInteractive:
         self.title_text: Text
 
     def _mean_xy_m(self) -> np.ndarray:
-        mean_normal_m = np.mean(self.matrix.X, axis=0)
-        return self.matrix.reference_xy_m + mean_normal_m[:, None] * self.matrix.normals_xy
+        return self.matrix.reference_xy_m + self.result.column_center[:, None] * self.matrix.normals_xy
 
     def xy_to_latlon(self, xy_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return self.projection.unproject(xy_m[:, 0], xy_m[:, 1])
@@ -204,7 +203,7 @@ class SouthEastInteractive:
             label="active event segment",
             zorder=6,
         )[0]
-        self.window_line = self.ax.plot([], [], color="black", linewidth=5.0, alpha=0.9, solid_capstyle="round", label="window on mean", zorder=4)[0]
+        self.window_line = self.ax.plot([], [], color="black", linewidth=5.0, alpha=0.9, solid_capstyle="round", label="window on center", zorder=4)[0]
         self.window_endpoints = self.ax.scatter([], [], s=24, color="black", edgecolor="white", linewidth=0.5, zorder=7)
         self.title_text = self.ax.set_title("")
 
@@ -216,7 +215,7 @@ class SouthEastInteractive:
 
     def plot_static_layers(self) -> None:
         mean_lat, mean_lon = self.xy_to_latlon(self.mean_xy_m)
-        self.ax.plot(mean_lon, mean_lat, color="#303030", linewidth=2.0, alpha=0.82, label="mean trajectory", zorder=3)
+        self.ax.plot(mean_lon, mean_lat, color="#303030", linewidth=2.0, alpha=0.82, label="model center trajectory", zorder=3)
         if self.raw_background_tracks is not None:
             for lat_lon in self.raw_background_tracks.values():
                 self.ax.plot(
