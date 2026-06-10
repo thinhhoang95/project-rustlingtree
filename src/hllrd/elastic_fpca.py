@@ -95,12 +95,19 @@ def extract_event_functions(
     event: HLLRDEvent,
     event_index: int,
     flight_ids: tuple[str, ...],
+    X_centered: np.ndarray,
 ) -> ElasticEventFPCA:
-    """Extract active event-local normal-offset functions for fdasrsf."""
+    """Extract active event-local observed normal-offset functions for fdasrsf."""
 
+    centered = np.asarray(X_centered, dtype=float)
+    if centered.ndim != 2:
+        raise ValueError("X_centered must be a 2D matrix")
+    if centered.shape[0] != event.active_mask.shape[0]:
+        raise ValueError("X_centered flight count does not match event active mask")
+    if centered.shape[1] < event.end:
+        raise ValueError("X_centered station count does not cover event interval")
     active_rows = np.flatnonzero(event.active_mask)
-    reconstruction = event.coefficients @ event.basis.T
-    functions = reconstruction[active_rows, event.start : event.end].T
+    functions = centered[active_rows, event.start : event.end].T
     if functions.ndim != 2:
         raise ValueError("extracted event functions must be a 2D array")
     if not np.all(np.isfinite(functions)):
@@ -144,13 +151,14 @@ def fit_elastic_event_fpca(
     expected_stations = np.linspace(0.0, 1.0, matrix.X.shape[1])
     if matrix.stations.shape != expected_stations.shape or not np.allclose(matrix.stations, expected_stations):
         raise ValueError("elastic FPCA requires a uniform constant-speed station grid")
+    X_centered = _center_matrix_for_model(matrix, model)
 
     fs = _import_fdasrsf()
     std_grid = np.asarray(cfg.std_grid, dtype=float)
     events: list[ElasticEventFPCA] = []
     skipped: list[dict[str, Any]] = []
     for event_index, hllrd_event in enumerate(model.events):
-        extracted = extract_event_functions(hllrd_event, event_index, matrix.flight_ids)
+        extracted = extract_event_functions(hllrd_event, event_index, matrix.flight_ids, X_centered)
         if extracted.active_count < cfg.min_active_flights:
             skipped.append(
                 {
@@ -160,9 +168,16 @@ def fit_elastic_event_fpca(
                 }
             )
             continue
-        component_count = min(cfg.components, extracted.length, extracted.active_count)
+        effective_rank = _function_sample_rank(extracted.functions)
+        component_count = min(cfg.components, extracted.length, extracted.active_count - 1, effective_rank)
         if component_count < 1:
-            skipped.append({"event": event_index, "reason": "no_components"})
+            skipped.append(
+                {
+                    "event": event_index,
+                    "reason": "rank_deficient",
+                    "effective_rank": effective_rank,
+                }
+            )
             continue
 
         warp = fs.fdawarp(np.ascontiguousarray(extracted.functions), extracted.time)
@@ -418,6 +433,27 @@ def _validate_event_artifact_shapes(event: ElasticEventFPCA) -> None:
         raise ValueError(f"event {event.event_index} vertical coefficient rows must match active_count")
     if event.horizontal_coefficients.shape[0] != active_count:
         raise ValueError(f"event {event.event_index} horizontal coefficient rows must match active_count")
+
+
+def _center_matrix_for_model(matrix: MatrixArtifact, model: HLLRDFitResult) -> np.ndarray:
+    if model.column_center.shape != (matrix.X.shape[1],):
+        raise ValueError("model column center length does not match matrix station count")
+    centered = np.asarray(matrix.X, dtype=float) - model.column_center
+    if not np.all(np.isfinite(centered)):
+        raise ValueError("matrix contains non-finite centered values")
+    return centered
+
+
+def _function_sample_rank(functions: np.ndarray) -> int:
+    values = np.asarray(functions, dtype=float)
+    if values.ndim != 2 or values.shape[1] < 2:
+        return 0
+    centered = values - np.mean(values, axis=1, keepdims=True)
+    singular_values = np.linalg.svd(centered, compute_uv=False)
+    if singular_values.size == 0:
+        return 0
+    tolerance = max(np.finfo(float).eps * max(centered.shape), 1.0e-10) * float(singular_values[0])
+    return int(np.count_nonzero(singular_values > tolerance))
 
 
 def _import_fdasrsf() -> Any:

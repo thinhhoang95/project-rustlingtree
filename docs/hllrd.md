@@ -302,7 +302,7 @@ sigma_hat = MAD(diff(X_centered, axis=station)) / (0.6745 * sqrt(2))
 Motivation:
 
 - This estimates high-frequency residual wiggle.
-- It is used in the analytic null threshold for candidate score.
+- It is used in the analytic fallback floor for candidate score.
 - It is not used for activation in the current implementation.
 
 Why not use it for activation?
@@ -523,12 +523,24 @@ The score is:
 
 ```text
 score = active_gain
-        - analytic_null_threshold
+        - null_threshold(length)
         - lambda_i * length
         - lambda_activation * active_count
 ```
 
-where:
+The default `null_threshold(length)` is a length-specific empirical threshold
+computed from quiet background windows. For each candidate length, HLLRD:
+
+1. finds the quietest windows by rolling station energy;
+2. scores those windows with the same SVD, quiet-window activation, and
+   `n_min` rule;
+3. takes the configured quantile of their active gains.
+
+This calibrates the score against the same post-activation statistic used for
+real candidates without treating shifted copies of real localized events as
+background.
+
+The analytic threshold remains a fallback floor:
 
 ```text
 analytic_null_threshold = c_null * sigma_hat^2 * (n + length)
@@ -537,8 +549,10 @@ analytic_null_threshold = c_null * sigma_hat^2 * (n + length)
 Motivation:
 
 - `active_gain` rewards explained residual energy.
-- `analytic_null_threshold` discourages selecting windows explainable by local
-  noise.
+- The empirical null discourages selecting windows explainable by smooth
+  background variation or activation-selection effects.
+- The analytic null floor keeps behavior defined when empirical null repeats are
+  disabled.
 - `lambda_i` can penalize long windows.
 - `lambda_activation` can penalize overly broad activation, although the
   default is zero.
@@ -806,6 +820,9 @@ Useful tuning parameters:
 - `--activation-scale`: multiplier for quiet-window activation threshold.
 - `--n-min`: minimum active flight count for a candidate.
 - `--c-null`: analytic null threshold multiplier.
+- `--empirical-null-repeats`: quiet windows per length; set to `0` to use only
+  the analytic threshold.
+- `--empirical-null-quantile`: quantile of quiet-window active gains.
 - `--lambda-i`: length penalty.
 - `--lambda-activation`: active-flight penalty.
 - `--epsilon-gain`: early stop threshold for incremental event gain.
@@ -813,6 +830,9 @@ Useful tuning parameters:
 - `--no-peak-backtrack`: disable peak-rise backtracking.
 - `--peak-backtrack-rise-fraction`: rising-shoulder threshold as a fraction of
   peak energy above baseline.
+- `--local-simplifier`: enable local piecewise-linear event simplification.
+- `--local-simplifier-max-relative-loss`: maximum allowed relative
+  reconstruction loss before the fitter keeps the raw candidate basis.
 
 ## Interpretation of Outputs
 

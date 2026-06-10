@@ -19,6 +19,7 @@ from hllrd.elastic_fpca import (
     load_elastic_fpca_result,
     save_elastic_fpca_result,
     vertical_component_delta,
+    _function_sample_rank,
 )
 from hllrd.fit import HLLRDEvent, HLLRDFitResult, HLLRDV1Config, save_fit_result
 from hllrd.matrix import MatrixArtifact, save_matrix_artifact
@@ -26,19 +27,25 @@ from hllrd.matrix import MatrixArtifact, save_matrix_artifact
 
 def test_extract_event_functions_uses_only_active_flights() -> None:
     event = _synthetic_hllrd_event(active_mask=np.asarray([True, False, True, False]))
+    X_centered = np.arange(4 * 12, dtype=float).reshape(4, 12)
 
-    extracted = extract_event_functions(event, 3, ("A", "B", "C", "D"))
+    extracted = extract_event_functions(event, 3, ("A", "B", "C", "D"), X_centered)
 
     assert extracted.event_index == 3
     assert extracted.functions.shape == (event.length, 2)
     assert extracted.active_rows.tolist() == [0, 2]
     assert extracted.active_flight_ids == ("A", "C")
+    np.testing.assert_allclose(extracted.functions, X_centered[[0, 2], event.start : event.end].T)
     assert np.all(np.isfinite(extracted.functions))
 
 
 def test_fit_elastic_event_fpca_synthetic_smoke() -> None:
-    matrix = _synthetic_matrix(flight_count=8, station_count=40)
     model = _synthetic_fit_result(flight_count=8, station_count=40)
+    matrix = replace(
+        _synthetic_matrix(flight_count=8, station_count=40),
+        X=model.reconstruction.copy(),
+        X_centered=model.reconstruction.copy(),
+    )
 
     result = fit_elastic_event_fpca(
         matrix,
@@ -54,6 +61,33 @@ def test_fit_elastic_event_fpca_synthetic_smoke() -> None:
     assert event.horizontal_coefficients.shape == (8, 2)
     np.testing.assert_allclose(vertical_component_delta(event, 0, 0.0, result.config.std_grid), 0.0)
     np.testing.assert_allclose(horizontal_component_delta(event, 0, 0.0, result.config.std_grid), 0.0)
+
+
+def test_fit_elastic_event_fpca_caps_components_to_effective_data_rank() -> None:
+    matrix = _synthetic_matrix(flight_count=8, station_count=20)
+    rows = np.arange(8, dtype=float)
+    shape = np.sin(np.linspace(0.0, np.pi, 10))
+    X = np.zeros_like(matrix.X)
+    X[:, 5:15] = rows[:, None] * shape[None, :]
+    model = _synthetic_fit_result(flight_count=8, station_count=20)
+    matrix = replace(matrix, X=X, X_centered=X.copy())
+
+    result = fit_elastic_event_fpca(
+        matrix,
+        model,
+        config=ElasticFPCAConfig(components=3, std_grid=(-1.0, 0.0, 1.0), min_active_flights=4),
+    )
+
+    assert len(result.events) == 1
+    assert result.events[0].component_count == 1
+
+
+def test_function_sample_rank_uses_centered_sample_rank() -> None:
+    shape = np.sin(np.linspace(0.0, np.pi, 8))
+    amplitudes = np.asarray([-2.0, -1.0, 0.0, 1.0, 2.0])
+    functions = shape[:, None] * amplitudes[None, :] + 100.0
+
+    assert _function_sample_rank(functions) == 1
 
 
 def test_elastic_fpca_artifact_round_trips(tmp_path: Path) -> None:
@@ -109,8 +143,12 @@ def test_elastic_fpca_artifact_rejects_inconsistent_event_shapes(tmp_path: Path)
 
 
 def test_elastic_fpca_cli_smoke(tmp_path: Path) -> None:
-    matrix = _synthetic_matrix(flight_count=8, station_count=40)
     model = _synthetic_fit_result(flight_count=8, station_count=40)
+    matrix = replace(
+        _synthetic_matrix(flight_count=8, station_count=40),
+        X=model.reconstruction.copy(),
+        X_centered=model.reconstruction.copy(),
+    )
     matrix_path = tmp_path / "matrix.npz"
     model_path = tmp_path / "model.npz"
     output_path = tmp_path / "elastic_cli.npz"

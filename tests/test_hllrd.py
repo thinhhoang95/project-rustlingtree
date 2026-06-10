@@ -157,7 +157,7 @@ def test_fit_localized_low_rank_recovers_planted_event() -> None:
 
     result = fit_localized_low_rank(
         X,
-        HLLRDV1Config(kappa_peak=0.5, K_max=5, n_min=5, epsilon_gain=0.0),
+        HLLRDV1Config(kappa_peak=0.5, K_max=5, n_min=5, epsilon_gain=0.0, local_simplifier_enabled=True),
     )
 
     assert result.events
@@ -231,7 +231,9 @@ def test_fit_local_simplifier_can_be_disabled(tmp_path) -> None:
             kappa_peak=0.0,
             c_null=0.0,
             epsilon_gain=0.0,
+            local_simplifier_enabled=True,
             local_simplifier_gain_sigma=0.0,
+            local_simplifier_max_relative_loss=1.0,
         ),
         already_centered=True,
     )
@@ -275,6 +277,37 @@ def test_fit_rejects_single_flight_outlier_when_n_min_is_high() -> None:
 
     assert result.events == ()
     assert result.explained_fraction == 0.0
+
+
+def test_empirical_null_threshold_exceeds_analytic_threshold_for_smooth_background() -> None:
+    rng = np.random.default_rng(42)
+    X = np.cumsum(rng.normal(size=(40, 60)), axis=1)
+    for _ in range(4):
+        X[:, 1:-1] = (X[:, :-2] + X[:, 1:-1] + X[:, 2:]) / 3.0
+    X *= 100.0 / np.std(X)
+    config = HLLRDV1Config(
+        L_min=10,
+        L_max=10,
+        K_max=1,
+        kappa_peak=0.0,
+        n_min=5,
+        local_simplifier_enabled=False,
+    )
+
+    analytic = fit_localized_low_rank(
+        X,
+        replace(config, empirical_null_repeats=0),
+        already_centered=True,
+    )
+    empirical = fit_localized_low_rank(
+        X,
+        replace(config, empirical_null_repeats=12, empirical_null_quantile=0.95),
+        already_centered=True,
+    )
+
+    analytic_threshold = analytic.metadata["null_thresholds_by_length"]["10"]
+    empirical_threshold = empirical.metadata["null_thresholds_by_length"]["10"]
+    assert empirical_threshold > analytic_threshold
 
 
 def test_activation_threshold_uses_quiet_window_energy_floor() -> None:

@@ -49,28 +49,29 @@ The simplifier runs only after a candidate interval has been selected and
 trimmed. In implementation terms, this happens in
 `src/hllrd/fit.py::_simplify_candidate_for_commit()`.
 
-The pursuit loop still uses the raw, unsimplified candidate for residual
-bookkeeping:
+The pursuit loop subtracts the committed candidate from residual bookkeeping:
 
 ```text
-R <- R - raw_candidate_reconstruction
+R <- R - committed_candidate_reconstruction
 ```
 
-but it commits the simplified candidate basis into the final dictionary:
+If simplification is enabled and the simplified reconstruction is close enough
+to the raw candidate, the committed candidate is simplified:
 
 ```text
 dictionary <- simplified_event_basis
 ```
 
+If the simplified reconstruction would lose too much of the raw candidate,
+HLLRD keeps the raw candidate basis instead.
+
 ### Motivation
 
-This separation is important. If HLLRD subtracts the simplified event from the
-residual during greedy pursuit, the search can under-explain the original
-matrix and stop too early. In the South-East cluster, that naive approach
-collapsed the fit from six events to two events and dropped explained fraction
-to roughly `0.66`. Keeping raw residual bookkeeping preserves event discovery,
-while committing simplified bases keeps the final event representation easier
-to interpret.
+Residual pursuit should match the final dictionary. Subtracting a richer raw
+candidate while committing a simplified basis can delete energy from the pursuit
+residual that the saved model cannot reconstruct. The relative-loss gate keeps
+the simplifier useful for near-lossless regularization while preserving the raw
+basis when simplification would materially change the fitted event.
 
 ## One-Dimensional Series Simplification
 
@@ -231,6 +232,26 @@ If an event wants more than four interior points, HLLRD should usually represent
 that as multiple events or the analyst should inspect whether the interval is
 too broad.
 
+## Relative Reconstruction Loss Gate
+
+After building the simplified rank-2 basis, HLLRD compares the simplified
+candidate reconstruction with the raw candidate reconstruction over active
+rows:
+
+```text
+relative_loss = ||raw_fit - simplified_fit||_F^2 / ||raw_fit||_F^2
+```
+
+The default gate is:
+
+```python
+HLLRDV1Config.local_simplifier_max_relative_loss = 0.05
+```
+
+If `relative_loss` exceeds the gate, HLLRD commits the raw candidate basis. This
+prevents the final dictionary and greedy residual update from diverging when a
+candidate is not well represented by the simplified basis.
+
 ## Final Basis Construction
 
 After simplifying active local reconstructions, HLLRD computes a rank-2 basis
@@ -297,17 +318,18 @@ event may mix multiple local behaviors.
 
 ## CLI Controls
 
-The simplifier is enabled by default in the HLLRD fit CLI.
+The simplifier is opt-in in the HLLRD fit CLI. This keeps greedy residual
+pursuit aligned with the committed dictionary by default.
 
-Disable it:
+Enable it:
 
 ```bash
 hllrd-fit \
   --matrix data/hllrd/south-east/matrix_SE_from_merge.npz \
-  --output data/hllrd/south-east/model_raw.npz \
+  --output data/hllrd/south-east/model_simplified.npz \
   --L-min 40 \
   --K-max 6 \
-  --no-local-simplifier
+  --local-simplifier
 ```
 
 Change the gain threshold:
@@ -318,6 +340,7 @@ hllrd-fit \
   --output data/hllrd/south-east/model_simplified.npz \
   --L-min 40 \
   --K-max 6 \
+  --local-simplifier \
   --local-simplifier-gain-sigma 128
 ```
 
@@ -329,6 +352,7 @@ hllrd-fit \
   --output data/hllrd/south-east/model_simplified.npz \
   --L-min 40 \
   --K-max 6 \
+  --local-simplifier \
   --local-simplifier-max-points 4
 ```
 
@@ -420,8 +444,10 @@ The simplifier's design choices are:
 - Marginal gain per point: directly balances complexity and residual error.
 - Noise-scaled default threshold: adapts to ADS-B data quality.
 - Small maximum point count: preserves operational interpretability.
-- Raw pursuit, simplified commit: preserves event discovery while regularizing
-  the final event dictionary.
+- Committed residual update: keeps greedy pursuit aligned with the saved event
+  dictionary.
+- Relative-loss gate: uses simplified bases only when they remain close to the
+  raw candidate reconstruction.
 - Explicit diagnostics: exposes whether an event is truly dogleg-like or hides
   mixed local behaviors.
 - Raw interactive reconstruction: keeps the visualized event response faithful

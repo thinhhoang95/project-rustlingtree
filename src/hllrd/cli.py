@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_normalize_std_grid_argv(argv))
     args.func(args)
 
 
@@ -114,7 +114,7 @@ def report_main(argv: list[str] | None = None) -> None:
 def elastic_fpca_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Fit HLLRD event-level elastic fPCA.")
     _add_elastic_fpca_args(parser)
-    run_elastic_fpca(parser.parse_args(argv))
+    run_elastic_fpca(parser.parse_args(_normalize_std_grid_argv(argv)))
 
 
 def run_build_matrix(args: argparse.Namespace) -> None:
@@ -320,15 +320,39 @@ def _add_fit_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lambda-i", type=float, default=0.0)
     parser.add_argument("--lambda-activation", type=float, default=0.0)
     parser.add_argument("--c-null", type=float, default=4.0)
+    parser.add_argument(
+        "--empirical-null-repeats",
+        type=int,
+        default=HLLRDV1Config().empirical_null_repeats,
+        help="Number of quiet windows per length used to calibrate the empirical null; use 0 for analytic only.",
+    )
+    parser.add_argument(
+        "--empirical-null-quantile",
+        type=float,
+        default=HLLRDV1Config().empirical_null_quantile,
+        help="Quantile of quiet-window active gains used as the empirical null threshold.",
+    )
+    parser.add_argument("--empirical-null-seed", type=int, default=HLLRDV1Config().empirical_null_seed)
     parser.add_argument("--ridge", type=float, default=1e-6)
     parser.add_argument("--endpoint-trim-threshold", type=float, default=0.05)
     parser.add_argument("--duplicate-iou-threshold", type=float, default=0.8)
     parser.add_argument("--keep-next-longer", action="store_true")
     parser.add_argument("--no-peak-backtrack", dest="peak_backtrack_enabled", action="store_false")
     parser.add_argument("--peak-backtrack-rise-fraction", type=float, default=0.05)
+    parser.add_argument(
+        "--local-simplifier",
+        dest="local_simplifier_enabled",
+        action="store_true",
+        default=HLLRDV1Config().local_simplifier_enabled,
+    )
     parser.add_argument("--no-local-simplifier", dest="local_simplifier_enabled", action="store_false")
     parser.add_argument("--local-simplifier-gain-sigma", type=float, default=128.0)
     parser.add_argument("--local-simplifier-max-points", type=int, default=4)
+    parser.add_argument(
+        "--local-simplifier-max-relative-loss",
+        type=float,
+        default=HLLRDV1Config().local_simplifier_max_relative_loss,
+    )
 
 
 def _add_candidates_args(parser: argparse.ArgumentParser) -> None:
@@ -401,6 +425,9 @@ def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
         lambda_i=args.lambda_i,
         lambda_activation=args.lambda_activation,
         c_null=args.c_null,
+        empirical_null_repeats=args.empirical_null_repeats,
+        empirical_null_quantile=args.empirical_null_quantile,
+        empirical_null_seed=args.empirical_null_seed,
         ridge=args.ridge,
         endpoint_trim_threshold=args.endpoint_trim_threshold,
         duplicate_iou_threshold=args.duplicate_iou_threshold,
@@ -410,6 +437,7 @@ def _fit_config_from_args(args: argparse.Namespace) -> HLLRDV1Config:
         local_simplifier_enabled=args.local_simplifier_enabled,
         local_simplifier_gain_sigma=args.local_simplifier_gain_sigma,
         local_simplifier_max_points=args.local_simplifier_max_points,
+        local_simplifier_max_relative_loss=args.local_simplifier_max_relative_loss,
     )
 
 
@@ -432,6 +460,21 @@ def _parse_std_grid(value: str) -> tuple[float, ...]:
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
     return grid
+
+
+def _normalize_std_grid_argv(argv: list[str] | None) -> list[str]:
+    values = list(sys.argv[1:] if argv is None else argv)
+    normalized: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value == "--std-grid" and index + 1 < len(values):
+            normalized.append(f"--std-grid={values[index + 1]}")
+            index += 2
+            continue
+        normalized.append(value)
+        index += 1
+    return normalized
 
 
 def _print_matrix_summary(console: Console, artifact: Any, output: Path) -> None:

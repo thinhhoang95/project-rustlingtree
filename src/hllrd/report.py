@@ -34,6 +34,7 @@ def write_event_summary_csv(path: Path, result: HLLRDFitResult) -> None:
         "local_simplifier_initial_error_m2",
         "local_simplifier_residual_error_m2",
         "local_simplifier_reduced_error_m2",
+        "local_simplifier_relative_reconstruction_loss",
         "local_simplifier_point_count_histogram",
     ]
     with path.open("w", encoding="utf-8", newline="") as stream:
