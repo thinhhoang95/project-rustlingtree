@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, normalize_cluster
+from hllrd.elastic_fpca import ElasticFPCAConfig, fit_elastic_event_fpca, save_elastic_fpca_result
 from hllrd.fit import (
     HLLRDV1Config,
     fit_localized_low_rank,
@@ -61,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_args(report_parser)
     report_parser.set_defaults(func=run_report)
 
+    elastic_parser = subparsers.add_parser(
+        "elastic-fpca",
+        description="Fit elastic vertical and horizontal fPCA per event.",
+    )
+    _add_elastic_fpca_args(elastic_parser)
+    elastic_parser.set_defaults(func=run_elastic_fpca)
+
     run_parser = subparsers.add_parser("run", description="Run build-matrix, candidates, fit, and report.")
     _add_run_args(run_parser)
     run_parser.set_defaults(func=run_pipeline)
@@ -101,6 +109,12 @@ def report_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Generate HLLRD model reports.")
     _add_report_args(parser)
     run_report(parser.parse_args(argv))
+
+
+def elastic_fpca_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Fit HLLRD event-level elastic fPCA.")
+    _add_elastic_fpca_args(parser)
+    run_elastic_fpca(parser.parse_args(argv))
 
 
 def run_build_matrix(args: argparse.Namespace) -> None:
@@ -200,7 +214,9 @@ def run_transform(args: argparse.Namespace) -> None:
     if args.summary is not None:
         payload = {
             "explained_fraction": transform.explained_fraction,
-            "average_active_events_per_flight": float(np.mean(transform.active_counts)) if transform.active_counts.size else 0.0,
+            "average_active_events_per_flight": (
+                float(np.mean(transform.active_counts)) if transform.active_counts.size else 0.0
+            ),
             "matrix": args.matrix.as_posix(),
             "model": args.model.as_posix(),
         }
@@ -221,6 +237,32 @@ def run_report(args: argparse.Namespace) -> None:
         matrix = load_matrix_artifact(args.matrix)
         plot_residual_energy(args.output_dir / "residual_energy.png", matrix.X_centered, result)
     Console().print(f"[green]Wrote[/green] report files to {args.output_dir}")
+
+
+def run_elastic_fpca(args: argparse.Namespace) -> None:
+    matrix = load_matrix_artifact(args.matrix)
+    model = load_fit_result(args.model)
+    config = ElasticFPCAConfig(
+        components=args.components,
+        std_grid=args.std_grid,
+        min_active_flights=args.min_active_flights,
+        parallel=args.parallel,
+        cores=args.cores,
+    )
+    result = fit_elastic_event_fpca(
+        matrix,
+        model,
+        config=config,
+        metadata={
+            "matrix": args.matrix.as_posix(),
+            "model": args.model.as_posix(),
+            "cluster": matrix.cluster,
+            "flight_count": len(matrix.flight_ids),
+            "config": asdict(config),
+        },
+    )
+    save_elastic_fpca_result(args.output, result)
+    _print_elastic_summary(Console(), result, args.output)
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
@@ -320,6 +362,17 @@ def _add_report_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
 
 
+def _add_elastic_fpca_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--matrix", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--components", type=int, default=3)
+    parser.add_argument("--std-grid", type=_parse_std_grid, default=ElasticFPCAConfig().std_grid)
+    parser.add_argument("--min-active-flights", type=int, default=5)
+    parser.add_argument("--parallel", action="store_true")
+    parser.add_argument("--cores", type=int, default=1)
+
+
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--raw-adsb-dir", type=Path, default=DEFAULT_RAW_ADSB_DIR)
     parser.add_argument("--cluster-artifacts", type=Path, default=DEFAULT_CLUSTER_ARTIFACTS)
@@ -369,6 +422,18 @@ def _write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _parse_std_grid(value: str) -> tuple[float, ...]:
+    try:
+        grid = tuple(float(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--std-grid must be a comma-separated list of numbers") from exc
+    try:
+        ElasticFPCAConfig(std_grid=grid).validate()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return grid
+
+
 def _print_matrix_summary(console: Console, artifact: Any, output: Path) -> None:
     table = Table(title="HLLRD matrix")
     table.add_column("Metric")
@@ -389,6 +454,17 @@ def _print_fit_summary(console: Console, result: Any, output: Path) -> None:
     table.add_row("Events", f"{len(result.events):,}")
     table.add_row("Explained fraction", f"{result.explained_fraction:.3%}")
     table.add_row("sigma_hat", f"{result.sigma_hat:.3f}")
+    table.add_row("Output", output.as_posix())
+    console.print(table)
+
+
+def _print_elastic_summary(console: Console, result: Any, output: Path) -> None:
+    table = Table(title="HLLRD elastic fPCA")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Events", f"{len(result.events):,}")
+    table.add_row("Components", f"{result.config.components:,}")
+    table.add_row("Std grid", ",".join(f"{value:g}" for value in result.config.std_grid))
     table.add_row("Output", output.as_posix())
     console.print(table)
 

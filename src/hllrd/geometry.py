@@ -78,6 +78,20 @@ def resample_polyline_by_fraction(
     )
 
 
+def resample_polyline_constant_speed(polyline_xy_m: np.ndarray, sample_count: int) -> np.ndarray:
+    """Resample a polyline at uniform arc-length fractions."""
+
+    polyline = np.asarray(polyline_xy_m, dtype=float)
+    if polyline.ndim != 2 or polyline.shape[1] != 2:
+        raise ValueError("polyline_xy_m must have shape N x 2")
+    count = int(sample_count)
+    if count < 2:
+        raise ValueError("sample_count must be at least 2")
+    stations = np.linspace(0.0, 1.0, count)
+    x_m, y_m = resample_polyline_by_fraction(polyline[:, 0], polyline[:, 1], stations)
+    return np.column_stack((x_m, y_m))
+
+
 def reference_tangent_normal(reference_xy_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     reference = np.asarray(reference_xy_m, dtype=float)
     if reference.ndim != 2 or reference.shape[1] != 2:

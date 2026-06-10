@@ -12,6 +12,7 @@ from hllrd.geometry import (
     LocalProjection,
     projection_from_latlon,
     reference_tangent_normal,
+    resample_polyline_constant_speed,
     resample_polyline_by_fraction,
 )
 
@@ -174,6 +175,8 @@ def _flight_polyline_xy_m(
 def _resample_flight_polyline(polyline_xy_m: np.ndarray, stations: np.ndarray) -> np.ndarray | None:
     polyline = np.asarray(polyline_xy_m, dtype=float)
     try:
+        if np.array_equal(stations, np.linspace(0.0, 1.0, len(stations))):
+            return resample_polyline_constant_speed(polyline, len(stations))
         sample_x, sample_y = resample_polyline_by_fraction(polyline[:, 0], polyline[:, 1], stations)
     except ValueError:
         return None

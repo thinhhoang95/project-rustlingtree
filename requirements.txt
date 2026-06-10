@@ -1,5 +1,6 @@
 pandas>=2.2.0
 fastapi>=0.116.0
+fdasrsf>=2.6.9
 numpy>=1.26.0
 polars>=1.0.0
 matplotlib>=3.8.0

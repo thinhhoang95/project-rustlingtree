@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116.0",
+    "fdasrsf>=2.6.9",
     "ipykernel>=7.2.0",
     "matplotlib>=3.8.0",
     "notebook>=7.5.5",
@@ -33,6 +34,7 @@ adsb-trajectory-compress = "scenario.trajectory_compressor.cli:main"
 hllrd = "hllrd.cli:main"
 hllrd-build-matrix = "hllrd.cli:build_matrix_main"
 hllrd-candidates = "hllrd.cli:candidates_main"
+hllrd-elastic-fpca = "hllrd.cli:elastic_fpca_main"
 hllrd-fit = "hllrd.cli:fit_main"
 hllrd-report = "hllrd.cli:report_main"
 hllrd-transform = "hllrd.cli:transform_main"

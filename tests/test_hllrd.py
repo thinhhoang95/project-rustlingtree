@@ -25,6 +25,7 @@ from hllrd.matrix import (
     load_matrix_artifact,
     save_matrix_artifact,
 )
+from hllrd.geometry import resample_polyline_constant_speed
 from hllrd.simplifier import simplify_local_deviation_block, simplify_series_by_gain
 
 
@@ -101,6 +102,21 @@ def test_build_matrix_from_tracks_returns_centered_normal_residuals() -> None:
     assert np.all(np.isfinite(artifact.X_centered))
     assert np.allclose(np.linalg.norm(artifact.normals_xy, axis=1), 1.0)
     assert artifact.cluster == "SE"
+
+
+def test_resample_polyline_constant_speed_uses_uniform_arc_length() -> None:
+    polyline = np.asarray(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 3.0],
+        ]
+    )
+
+    sampled = resample_polyline_constant_speed(polyline, 5)
+    distances = np.hypot(np.diff(sampled[:, 0]), np.diff(sampled[:, 1]))
+
+    np.testing.assert_allclose(distances, np.ones(4), atol=1.0e-12)
 
 
 def test_reference_station_residual_ignores_alongtrack_polyline_timing() -> None:
