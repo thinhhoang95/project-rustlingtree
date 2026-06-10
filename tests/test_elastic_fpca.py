@@ -15,11 +15,13 @@ from hllrd.elastic_fpca import (
     ElasticFPCAResult,
     extract_event_functions,
     fit_elastic_event_fpca,
+    horizontal_component_gamma,
     horizontal_component_delta,
     load_elastic_fpca_result,
     save_elastic_fpca_result,
     vertical_component_delta,
     _function_sample_rank,
+    _invert_warp,
 )
 from hllrd.fit import HLLRDEvent, HLLRDFitResult, HLLRDV1Config, save_fit_result
 from hllrd.matrix import MatrixArtifact, save_matrix_artifact
@@ -126,6 +128,9 @@ def test_horizontal_component_delta_synthesizes_with_inverse_warp() -> None:
         horizontal_latent=np.asarray([1.0]),
     )
 
+    np.testing.assert_allclose(horizontal_component_gamma(event, 0, 0.0, (-1.0, 0.0, 1.0)), time)
+    np.testing.assert_allclose(horizontal_component_gamma(event, 0, 1.0, (-1.0, 0.0, 1.0)), gamma)
+
     delta = horizontal_component_delta(event, 0, 1.0, (-1.0, 0.0, 1.0))
 
     expected_inverse = np.interp(time, gamma, time)
@@ -218,17 +223,19 @@ def test_south_east_viewer_elastic_response_changes_only_event_window(tmp_path: 
     app.fig.canvas.draw()
 
 
-def test_south_east_viewer_horizontal_response_spans_observed_score_range(tmp_path: Path) -> None:
+def test_south_east_viewer_horizontal_response_warps_event_mean_path(tmp_path: Path) -> None:
     matplotlib.use("Agg")
     matrix = _synthetic_matrix(flight_count=3, station_count=10)
-    arch = np.asarray([0.0, 0.0, 0.0, 10.0, 20.0, 10.0, 0.0, 0.0, 0.0, 0.0])
-    matrix.reference_xy_m[:, 1] = arch
-    event_weight = arch / float(np.max(arch))
-    matrix.X[0] = -10.0 * event_weight
-    matrix.X[1] = 0.0
-    matrix.X[2] = 20.0 * event_weight
     model = _manual_fit_result_for_viewer()
-    elastic = _manual_elastic_result(horizontal_coefficients=np.asarray([[-1.0], [0.0], [1.0]]))
+    time = np.linspace(0.0, 1.0, 5)
+    gamma = time**2
+    horizontal = np.stack([time, time, gamma], axis=0)[:, :, None]
+    fmean = np.asarray([0.0, 8.0, 16.0, 8.0, 0.0])
+    elastic = _manual_elastic_result(
+        horizontal_coefficients=np.asarray([[-1.0], [0.0], [1.0]]),
+        horizontal_gam_pca=horizontal,
+        fmean=fmean,
+    )
     matrix_path = tmp_path / "matrix.npz"
     model_path = tmp_path / "model.npz"
     elastic_path = tmp_path / "elastic.npz"
@@ -249,25 +256,81 @@ def test_south_east_viewer_horizontal_response_spans_observed_score_range(tmp_pa
         background_linewidth=0.3,
     )
     app.create()
-    app.current_family = "horizontal"
     center = app.mean_xy_m.copy()
     event = app.current_elastic_event()
-    center_extent = app._event_trombone_extent_m(event, center[None, :, :])[0]
+    event_mean = app.event_mean_response_xy_m(event)
 
-    np.testing.assert_allclose(app.event_response_xy_m(), center)
-    np.testing.assert_allclose(center_extent, 20.0)
+    np.testing.assert_allclose(app.event_response_xy_m(), event_mean)
+    np.testing.assert_allclose(event_mean[: event.start], center[: event.start])
+    np.testing.assert_allclose(event_mean[event.end :], center[event.end :])
+    assert np.max(np.abs(event_mean[event.start : event.end] - center[event.start : event.end])) > 0.0
 
-    app.amplitude_slider.set_val(2.0)
-    high_response = app.event_response_xy_m()
-    high_extent = app._event_trombone_extent_m(event, high_response[None, :, :])[0]
-    np.testing.assert_allclose(high_extent, 40.0)
+    app.current_family = "horizontal"
+    np.testing.assert_allclose(app.event_response_xy_m(), event_mean)
 
-    app.amplitude_slider.set_val(-2.0)
-    low_response = app.event_response_xy_m()
-    low_extent = app._event_trombone_extent_m(event, low_response[None, :, :])[0]
-    np.testing.assert_allclose(low_extent, 10.0)
-    np.testing.assert_allclose(low_response[:2], center[:2])
-    np.testing.assert_allclose(low_response[7:], center[7:])
+    app.amplitude_slider.set_val(1.0)
+    response = app.event_response_xy_m()
+    inverse_gamma = _invert_warp(gamma, event.time)
+    expected_segment = np.column_stack(
+        (
+            np.interp(inverse_gamma, event.time, event_mean[event.start : event.end, 0]),
+            np.interp(inverse_gamma, event.time, event_mean[event.start : event.end, 1]),
+        )
+    )
+    np.testing.assert_allclose(response[: event.start], center[: event.start])
+    np.testing.assert_allclose(response[event.end :], center[event.end :])
+    np.testing.assert_allclose(response[event.start : event.end], expected_segment)
+    assert "observed range" not in app.title_text.get_text()
+    assert "horizontal PC1 score=+1.00 std" in app.title_text.get_text()
+    assert "response around FPCA mean" in app.title_text.get_text()
+    app.fig.canvas.draw()
+
+
+def test_south_east_viewer_event_switch_resets_stale_score_and_component(tmp_path: Path) -> None:
+    matplotlib.use("Agg")
+    matrix = _synthetic_matrix(flight_count=3, station_count=10)
+    model = _manual_fit_result_for_viewer()
+    second_model_event = replace(model.events[0], start=1, end=6, peak_index=3)
+    model = replace(model, events=(model.events[0], second_model_event))
+    first_elastic_event = _manual_elastic_result(components=3).events[0]
+    second_elastic_event = _manual_elastic_result(event_index=1, start=1, end=6, components=1).events[0]
+    elastic = ElasticFPCAResult(
+        events=(first_elastic_event, second_elastic_event),
+        config=ElasticFPCAConfig(components=3, std_grid=(-1.0, 0.0, 1.0), min_active_flights=1),
+        metadata={},
+    )
+    matrix_path = tmp_path / "matrix.npz"
+    model_path = tmp_path / "model.npz"
+    elastic_path = tmp_path / "elastic.npz"
+    save_matrix_artifact(matrix_path, matrix)
+    save_fit_result(model_path, model, flight_ids=matrix.flight_ids)
+    save_elastic_fpca_result(elastic_path, elastic)
+    viewer_module = _load_viewer_module()
+
+    app = viewer_module.SouthEastInteractive(
+        matrix_path,
+        model_path,
+        elastic_path,
+        raw_adsb_dir=None,
+        split_gap_seconds=1,
+        processes=1,
+        background_source="matrix",
+        background_alpha=0.1,
+        background_linewidth=0.3,
+    )
+    app.create()
+    app.component_radio.set_active(2)
+    app.amplitude_slider.set_val(1.0)
+
+    assert app.current_component == 2
+    assert app.amplitude_slider.val == 1.0
+
+    app.update_event(1)
+
+    assert app.current_event_index == 1
+    assert app.current_component == 0
+    assert app.amplitude_slider.val == 0.0
+    assert "PC1 score=+0.00 std" in app.title_text.get_text()
     app.fig.canvas.draw()
 
 
@@ -418,37 +481,55 @@ def _manual_fit_result_for_viewer() -> HLLRDFitResult:
     )
 
 
-def _manual_elastic_result(horizontal_coefficients: np.ndarray | None = None) -> ElasticFPCAResult:
-    time = np.linspace(0.0, 1.0, 5)
-    shape = np.asarray([0.0, 1.0, 2.0, 1.0, 0.0])
-    vertical = np.stack([-shape, np.zeros_like(shape), shape], axis=1)[:, :, None]
-    horizontal = np.tile(time, (3, 1))[:, :, None]
+def _manual_elastic_result(
+    horizontal_coefficients: np.ndarray | None = None,
+    *,
+    fmean: np.ndarray | None = None,
+    horizontal_gam_pca: np.ndarray | None = None,
+    event_index: int = 0,
+    start: int = 2,
+    end: int = 7,
+    components: int = 1,
+) -> ElasticFPCAResult:
+    length = int(end) - int(start)
+    time = np.linspace(0.0, 1.0, length)
+    shape = np.sin(np.linspace(0.0, np.pi, length))
+    vertical_curve = np.stack([-shape, np.zeros_like(shape), shape], axis=1)
+    vertical = np.stack([vertical_curve * float(index + 1) for index in range(int(components))], axis=2)
+    if horizontal_gam_pca is None:
+        horizontal = np.tile(time, (3, 1))[:, :, None]
+        horizontal = np.repeat(horizontal, int(components), axis=2)
+    else:
+        horizontal = np.asarray(horizontal_gam_pca, dtype=float)
+        if horizontal.ndim == 2:
+            horizontal = horizontal[:, :, None]
     hcoef = (
-        np.zeros((3, 1), dtype=float)
+        np.zeros((3, int(components)), dtype=float)
         if horizontal_coefficients is None
         else np.asarray(horizontal_coefficients, dtype=float)
     )
+    mean_function = np.zeros(length, dtype=float) if fmean is None else np.asarray(fmean, dtype=float)
     event = ElasticEventFPCA(
-        event_index=0,
-        start=2,
-        end=7,
+        event_index=int(event_index),
+        start=int(start),
+        end=int(end),
         active_rows=np.asarray([0, 1, 2], dtype=int),
         active_flight_ids=("FLT0", "FLT1", "FLT2"),
         time=time,
-        functions=np.zeros((5, 3), dtype=float),
-        fmean=np.zeros(5, dtype=float),
-        aligned_functions=np.zeros((5, 3), dtype=float),
+        functions=np.zeros((length, 3), dtype=float),
+        fmean=mean_function,
+        aligned_functions=np.zeros((length, 3), dtype=float),
         warps=np.tile(time[:, None], (1, 3)),
         vertical_f_pca=vertical,
-        vertical_coefficients=np.zeros((3, 1), dtype=float),
-        vertical_latent=np.asarray([1.0]),
+        vertical_coefficients=np.zeros((3, int(components)), dtype=float),
+        vertical_latent=np.ones(int(components), dtype=float),
         horizontal_gam_pca=horizontal,
         horizontal_coefficients=hcoef,
-        horizontal_latent=np.asarray([1.0]),
+        horizontal_latent=np.ones(int(components), dtype=float),
     )
     return ElasticFPCAResult(
         events=(event,),
-        config=ElasticFPCAConfig(components=1, std_grid=(-1.0, 0.0, 1.0), min_active_flights=1),
+        config=ElasticFPCAConfig(components=int(components), std_grid=(-1.0, 0.0, 1.0), min_active_flights=1),
         metadata={},
     )
 

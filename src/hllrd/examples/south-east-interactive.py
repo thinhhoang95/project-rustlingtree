@@ -29,7 +29,12 @@ if str(SRC_DIR) not in sys.path:
 
 from hllrd.fit import load_fit_result  # noqa: E402
 from hllrd.data import trim_tracks_from_anchor  # noqa: E402
-from hllrd.elastic_fpca import elastic_component_delta, load_elastic_fpca_result  # noqa: E402
+from hllrd.elastic_fpca import (  # noqa: E402
+    _invert_warp,
+    elastic_component_delta,
+    horizontal_component_gamma,
+    load_elastic_fpca_result,
+)
 from hllrd.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
 from hllrd.matrix import load_matrix_artifact  # noqa: E402
 from scenario.trajectory_compressor.io import load_raw_adsb, split_tracks_by_gap  # noqa: E402
@@ -229,168 +234,45 @@ class SouthEastInteractive:
     def event_response_xy_m(self) -> np.ndarray:
         event = self.current_elastic_event()
         if self.current_family == "horizontal":
-            if self._horizontal_uses_observed_range(event, self.current_component):
-                return self.observed_horizontal_response_xy_m(event)
-            return self.elastic_normal_offset_response_xy_m(event, "horizontal")
-        return self.elastic_normal_offset_response_xy_m(event, "vertical")
+            return self.horizontal_phase_response_xy_m(event)
+        return self.vertical_amplitude_response_xy_m(event)
 
-    def elastic_normal_offset_response_xy_m(self, event, family: str) -> np.ndarray:
+    def event_mean_response_xy_m(self, event) -> np.ndarray:
+        response = self.mean_xy_m.copy()
+        segment = slice(event.start, event.end)
+        response[segment] = self.mean_xy_m[segment] + event.fmean[:, None] * self.matrix.normals_xy[segment]
+        return response
+
+    def vertical_amplitude_response_xy_m(self, event) -> np.ndarray:
         normal_offset_m = np.zeros(self.mean_xy_m.shape[0], dtype=float)
         delta = elastic_component_delta(
             event,
-            family,
+            "vertical",
             self.current_component,
             float(self.amplitude_slider.val),
             self.elastic.config.std_grid,
         )
-        normal_offset_m[event.start : event.end] = delta
+        normal_offset_m[event.start : event.end] = event.fmean + delta
         return self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
 
-    def _horizontal_uses_observed_range(self, event, component: int) -> bool:
-        component_index = int(component)
-        if component_index < 0 or component_index >= event.horizontal_coefficients.shape[1]:
-            return False
-        scores = np.asarray(event.horizontal_coefficients[:, component_index], dtype=float)
-        if scores.size < 3 or float(np.std(scores)) <= 1.0e-12:
-            return False
-        trajectories = np.stack(
-            [self.flight_xy_m(int(row)) for row in np.asarray(event.active_rows, dtype=int)],
-            axis=0,
-        )
-        extent = self._event_trombone_extent_m(event, trajectories)
-        if float(np.ptp(extent)) <= 1.0e-12:
-            return False
-        correlation = float(np.corrcoef(scores, extent)[0, 1])
-        return bool(np.isfinite(correlation) and abs(correlation) >= 0.5)
-
-    def observed_horizontal_response_xy_m(self, event) -> np.ndarray:
-        component = int(self.current_component)
-        if component < 0 or component >= event.horizontal_coefficients.shape[1]:
-            return self.mean_xy_m.copy()
-        scores = np.asarray(event.horizontal_coefficients[:, component], dtype=float)
-        if scores.size == 0:
-            return self.mean_xy_m.copy()
-        score_scale = float(np.std(scores))
-        if not np.isfinite(score_scale) or score_scale <= 1.0e-12:
-            return self.mean_xy_m.copy()
-
-        score_z = (scores - float(np.mean(scores))) / score_scale
-        low_z = float(np.min(score_z))
-        high_z = float(np.max(score_z))
-        if low_z >= 0.0 and high_z <= 0.0:
-            return self.mean_xy_m.copy()
-
-        target_z = self._horizontal_target_score_z(score_z, float(self.amplitude_slider.val))
-        if np.isclose(target_z, 0.0):
-            return self.mean_xy_m.copy()
-        if target_z < 0.0 and low_z < 0.0:
-            endpoint_xy_m, endpoint_extent_m = self._score_endpoint_observation(event, score_z, upper=False)
-            fraction = float(np.clip(target_z / low_z, 0.0, 1.0))
-        elif target_z > 0.0 and high_z > 0.0:
-            endpoint_xy_m, endpoint_extent_m = self._score_endpoint_observation(event, score_z, upper=True)
-            fraction = float(np.clip(target_z / high_z, 0.0, 1.0))
-        else:
-            return self.mean_xy_m.copy()
-        return self._trombone_extent_response_xy_m(event, endpoint_xy_m, endpoint_extent_m, fraction)
-
-    def _horizontal_target_score_z(self, score_z: np.ndarray, amplitude_std: float) -> float:
-        grid = np.asarray(self.elastic.config.std_grid, dtype=float)
-        if grid.size < 2:
-            return 0.0
-        low_ui = float(grid[0])
-        high_ui = float(grid[-1])
-        amplitude = float(np.clip(amplitude_std, low_ui, high_ui))
-        if amplitude < 0.0 and low_ui < 0.0:
-            return float(np.min(score_z)) * (amplitude / low_ui)
-        if amplitude > 0.0 and high_ui > 0.0:
-            return float(np.max(score_z)) * (amplitude / high_ui)
-        return 0.0
-
-    def _score_endpoint_observation(
-        self,
-        event,
-        score_z: np.ndarray,
-        *,
-        upper: bool,
-    ) -> tuple[np.ndarray, float]:
-        count = int(score_z.size)
-        if count == 0:
-            return self.mean_xy_m.copy(), self._mean_trombone_extent_m(event)
-        side_mask = score_z > 0.0 if upper else score_z < 0.0
-        if not np.any(side_mask):
-            side_mask = score_z == np.max(score_z) if upper else score_z == np.min(score_z)
-        candidate_indices = np.flatnonzero(side_mask)
-        if candidate_indices.size == 0:
-            return self.mean_xy_m.copy(), self._mean_trombone_extent_m(event)
-
-        trajectories = np.stack(
-            [self.flight_xy_m(int(row)) for row in np.asarray(event.active_rows, dtype=int)],
-            axis=0,
-        )
-        extent = self._event_trombone_extent_m(event, trajectories)
-        score_extent_correlation = np.corrcoef(score_z, extent)[0, 1] if count > 1 else 0.0
-        if not np.isfinite(score_extent_correlation):
-            score_extent_correlation = 0.0
-        choose_long = upper if score_extent_correlation >= 0.0 else not upper
-        candidate_extent = extent[candidate_indices]
-        selected_position = int(np.argmax(candidate_extent) if choose_long else np.argmin(candidate_extent))
-        selected_local = int(candidate_indices[selected_position])
-        return trajectories[selected_local].copy(), float(extent[selected_local])
-
-    def _trombone_extent_response_xy_m(
-        self,
-        event,
-        endpoint_xy_m: np.ndarray,
-        endpoint_extent_m: float,
-        fraction: float,
-    ) -> np.ndarray:
-        axis = self._event_trombone_axis(event)
-        if axis is None:
-            return self.mean_xy_m + fraction * (endpoint_xy_m - self.mean_xy_m)
-        segment, _midpoint, outward, mean_extent_m, weights = axis
-        if float(np.max(weights)) <= 1.0e-12:
-            return self.mean_xy_m + fraction * (endpoint_xy_m - self.mean_xy_m)
-        target_extent_m = mean_extent_m + fraction * (float(endpoint_extent_m) - mean_extent_m)
-        response = self.mean_xy_m.copy()
-        response[segment] = response[segment] + ((target_extent_m - mean_extent_m) * weights)[:, None] * outward
-        return response
-
-    def _mean_trombone_extent_m(self, event) -> float:
-        axis = self._event_trombone_axis(event)
-        return 0.0 if axis is None else float(axis[3])
-
-    def _event_trombone_extent_m(self, event, trajectories_xy_m: np.ndarray) -> np.ndarray:
-        trajectories = np.asarray(trajectories_xy_m, dtype=float)
-        if trajectories.ndim != 3 or trajectories.shape[1:] != self.mean_xy_m.shape:
-            raise ValueError("trajectories_xy_m must have shape flight_count x station_count x 2")
-        axis = self._event_trombone_axis(event)
-        if axis is None:
-            segment = slice(event.start, event.end)
-            return np.linalg.norm(trajectories[:, segment, :] - self.mean_xy_m[segment][None, :, :], axis=2).max(axis=1)
-        segment, midpoint, outward, _mean_extent_m, _weights = axis
-        return np.max((trajectories[:, segment, :] - midpoint) @ outward, axis=1)
-
-    def _event_trombone_axis(self, event) -> tuple[slice, np.ndarray, np.ndarray, float, np.ndarray] | None:
+    def horizontal_phase_response_xy_m(self, event) -> np.ndarray:
+        response = self.event_mean_response_xy_m(event)
         segment = slice(event.start, event.end)
-        start_xy = self.mean_xy_m[event.start]
-        end_xy = self.mean_xy_m[event.end - 1]
-        chord = end_xy - start_xy
-        chord_norm = float(np.linalg.norm(chord))
-        if chord_norm <= 1.0e-12:
-            return None
-        chord_unit = chord / chord_norm
-        outward = np.asarray([-chord_unit[1], chord_unit[0]], dtype=float)
-        midpoint = 0.5 * (start_xy + end_xy)
-        mean_segment = self.mean_xy_m[segment] - midpoint
-        if float(np.max(mean_segment @ outward)) < float(np.max(mean_segment @ (-outward))):
-            outward = -outward
-        mean_coordinates = mean_segment @ outward
-        mean_extent_m = float(np.max(mean_coordinates))
-        if mean_extent_m <= 1.0e-12:
-            weights = np.zeros_like(mean_coordinates)
-        else:
-            weights = np.clip(mean_coordinates / mean_extent_m, 0.0, 1.0)
-        return segment, midpoint, outward, mean_extent_m, weights
+        mean_segment = response[segment]
+        gamma = horizontal_component_gamma(
+            event,
+            self.current_component,
+            float(self.amplitude_slider.val),
+            self.elastic.config.std_grid,
+        )
+        inverse_gamma = _invert_warp(gamma, event.time)
+        response[segment] = np.column_stack(
+            (
+                np.interp(inverse_gamma, event.time, mean_segment[:, 0]),
+                np.interp(inverse_gamma, event.time, mean_segment[:, 1]),
+            )
+        )
+        return response
 
     def create(self) -> None:
         self.fig, self.ax = plt.subplots(figsize=(10.5, 7.2))
@@ -417,7 +299,7 @@ class SouthEastInteractive:
         amplitude_ax = self.fig.add_axes((0.25, 0.08, 0.65, 0.04))
         self.amplitude_slider = Slider(
             amplitude_ax,
-            "Scale",
+            "Score (std)",
             float(std_grid[0]),
             float(std_grid[-1]),
             valinit=0.0,
@@ -430,7 +312,7 @@ class SouthEastInteractive:
             color="#b2182b",
             linewidth=2.0,
             alpha=0.9,
-            label="deformed trajectory",
+            label="FPCA response trajectory",
             zorder=5,
         )[0]
         self.response_segment_line = self.ax.plot(
@@ -440,7 +322,7 @@ class SouthEastInteractive:
             linewidth=4.0,
             alpha=0.96,
             solid_capstyle="round",
-            label="active event segment",
+            label="FPCA response event segment",
             zorder=6,
         )[0]
         self.window_line = self.ax.plot(
@@ -450,7 +332,7 @@ class SouthEastInteractive:
             linewidth=5.0,
             alpha=0.9,
             solid_capstyle="round",
-            label="window on center",
+            label="HLLRD center window",
             zorder=4,
         )[0]
         self.window_endpoints = self.ax.scatter([], [], s=24, color="black", edgecolor="white", linewidth=0.5, zorder=7)
@@ -543,13 +425,15 @@ class SouthEastInteractive:
 
     def update_event(self, event_index: int) -> None:
         self.current_event_index = int(event_index)
-        if self.current_component >= self.current_elastic_event().component_count:
-            self.current_component = 0
-            self.component_radio.set_active(0)
-            return
+        event = self.current_elastic_event()
         self.amplitude_slider.eventson = False
         self.amplitude_slider.set_val(0.0)
         self.amplitude_slider.eventson = True
+        if self.current_component >= event.component_count:
+            self.current_component = 0
+            self.component_radio.eventson = False
+            self.component_radio.set_active(0)
+            self.component_radio.eventson = True
         self.update_response()
 
     def update_response(self) -> None:
@@ -578,15 +462,11 @@ class SouthEastInteractive:
         active_fraction = 100.0 * float(active_count) / float(len(self.matrix.flight_ids))
         start_nm = self.station_distance_nm[event.start]
         end_nm = self.station_distance_nm[event.end - 1]
-        observed_range = (
-            self.current_family == "horizontal"
-            and self._horizontal_uses_observed_range(event, self.current_component)
-        )
-        scale_label = "observed range" if observed_range else "std"
         self.title_text.set_text(
             f"Event {self.current_event_index}: {start_nm:.1f}-{end_nm:.1f} NM from merge | "
             f"active {active_count}/{len(self.matrix.flight_ids)} ({active_fraction:.1f}%) | "
-            f"{self.current_family} PC{self.current_component + 1}={self.amplitude_slider.val:.2f} {scale_label}"
+            f"{self.current_family} PC{self.current_component + 1} score={self.amplitude_slider.val:+.2f} std | "
+            "response around FPCA mean"
         )
         self.fig.canvas.draw_idle()
 

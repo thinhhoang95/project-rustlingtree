@@ -243,6 +243,27 @@ def vertical_component_delta(
     return values - baseline
 
 
+def horizontal_component_gamma(
+    event: ElasticEventFPCA,
+    component: int,
+    amplitude_std: float,
+    std_grid: tuple[float, ...] | np.ndarray,
+) -> np.ndarray:
+    component_index = _validate_component(event, component)
+    time = np.asarray(event.time, dtype=float)
+    if np.isclose(float(amplitude_std), 0.0):
+        return time.copy()
+    grid = np.asarray(std_grid, dtype=float)
+    gammas = event.horizontal_gam_pca[:, :, component_index]
+    gamma = _interp_std_grid(gammas.T, grid, float(amplitude_std))
+    if gamma.size == 0:
+        return gamma
+    gamma = np.maximum.accumulate(np.clip(gamma, float(time[0]), float(time[-1])))
+    gamma[0] = float(time[0])
+    gamma[-1] = float(time[-1])
+    return gamma
+
+
 def horizontal_component_delta(
     event: ElasticEventFPCA,
     component: int,
@@ -252,13 +273,7 @@ def horizontal_component_delta(
     component_index = _validate_component(event, component)
     if np.isclose(float(amplitude_std), 0.0):
         return np.zeros(event.length, dtype=float)
-    grid = np.asarray(std_grid, dtype=float)
-    gammas = event.horizontal_gam_pca[:, :, component_index]
-    gamma = _interp_std_grid(gammas.T, grid, float(amplitude_std))
-    gamma = np.clip(gamma, 0.0, 1.0)
-    if gamma.size:
-        gamma[0] = 0.0
-        gamma[-1] = 1.0
+    gamma = horizontal_component_gamma(event, component_index, amplitude_std, std_grid)
     inverse_gamma = _invert_warp(gamma, event.time)
     warped = np.interp(inverse_gamma, event.time, event.fmean)
     return warped - event.fmean
