@@ -14,7 +14,8 @@ from vlm_ppe.diagnostics.report import write_medoid_report
 from vlm_ppe.io.adsb_loader import ingest_adsb_tracks
 from vlm_ppe.io.parquet_store import read_parquet, write_parquet
 from vlm_ppe.processing import resample_track_frame
-from vlm_ppe.schemas import ClusterReview, GraphEvent, KMetric, PPEConfig, PPEState
+from vlm_ppe.audit import log_graph_event
+from vlm_ppe.schemas import ClusterReview, KMetric, PPEConfig, PPEState
 
 
 def state_model(state: dict) -> PPEState:
@@ -27,11 +28,7 @@ def config_model(state: dict) -> PPEConfig:
 
 def append_event(state: dict, node: str, status: str, message: str | None = None, payload: dict | None = None) -> None:
     current = state_model(state)
-    event = GraphEvent(node=node, status=status, message=message, payload=payload or {})
-    path = Path(current.run_dir) / "graph_events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(event.model_dump_json() + "\n")
+    log_graph_event(run_dir=current.run_dir, node=node, status=status, message=message, payload=payload or {})
 
 
 def ingest_tracks_tool(state: dict) -> dict:

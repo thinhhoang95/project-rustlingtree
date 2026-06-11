@@ -11,3 +11,5 @@ kmeans_random_state: 17
 max_retries: 2
 max_k_expansion: 12
 vlm_model: "gemini-3.5-flash"
+log_level: "INFO"
+log_to_console: true

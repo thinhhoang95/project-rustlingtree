@@ -7,6 +7,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from vlm_ppe.agents.prompts import cluster_review_prompt
 from vlm_ppe.agents.tools import (
     append_event,
     build_features_tool,
@@ -22,6 +23,7 @@ from vlm_ppe.agents.tools import (
     validate_review_tool,
 )
 from vlm_ppe.agents.vlm_client import ClusterReviewClient, GeminiVLMClient
+from vlm_ppe.audit import log_vlm_request, log_vlm_response, setup_audit_logging
 from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, PPEConfig, PPEState
 
 
@@ -44,6 +46,20 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
     def node(state: dict) -> dict:
         current = state_model(state)
         config = PPEConfig.model_validate(current.config)
+        evidence = [EvidenceImage.model_validate(item) for item in current.evidence_images]
+        metrics = [KMetric.model_validate(item) for item in state.get("clustering_metrics", [])]
+        available_k = [int(k) for k in state.get("candidate_k_values", [])]
+        prompt = cluster_review_prompt(metrics, available_k, current.retry_count, config.max_retries)
+        log_vlm_request(
+            run_dir=current.run_dir,
+            attempt=current.retry_count,
+            model=config.vlm_model,
+            prompt=prompt,
+            evidence_images=evidence,
+            metrics=metrics,
+            available_k=available_k,
+            offline_override=current.chosen_k_override is not None,
+        )
         if current.chosen_k_override is not None:
             review = ClusterReview(
                 chosen_k=current.chosen_k_override,
@@ -57,19 +73,24 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
             )
         else:
             client = vlm_client or GeminiVLMClient(model=config.vlm_model)
-            evidence = [EvidenceImage.model_validate(item) for item in current.evidence_images]
-            metrics = [KMetric.model_validate(item) for item in state.get("clustering_metrics", [])]
             review = client.review_clusters(
                 evidence_images=evidence,
                 metrics=metrics,
-                available_k=[int(k) for k in state.get("candidate_k_values", [])],
+                available_k=available_k,
                 attempt=current.retry_count,
                 max_retries=config.max_retries,
+                prompt=prompt,
             )
         review_dir = Path(current.run_dir) / "vlm_reviews"
         review_dir.mkdir(parents=True, exist_ok=True)
         review_path = review_dir / f"attempt_{current.retry_count:02d}.json"
         review_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
+        log_vlm_response(
+            run_dir=current.run_dir,
+            attempt=current.retry_count,
+            review=review,
+            response_path=review_path.as_posix(),
+        )
         return {
             "vlm_reviews": [*current.vlm_reviews, review.model_dump()],
             "latest_vlm_review_path": review_path.as_posix(),
@@ -129,6 +150,9 @@ def initial_state(
     state = PPEState(
         run_id=resolved_run_id,
         run_dir=run_dir.as_posix(),
+        audit_log_path=(run_dir / "audit.log").as_posix(),
+        graph_events_path=(run_dir / "graph_events.jsonl").as_posix(),
+        vlm_interactions_path=(run_dir / "vlm_interactions.jsonl").as_posix(),
         config=config.model_dump(mode="json"),
         k_max_current=config.k_max,
         chosen_k_override=chosen_k,
@@ -140,6 +164,8 @@ def initial_state(
 
 def run_graph(config: PPEConfig, *, chosen_k: int | None = None, run_id: str | None = None, vlm_client: ClusterReviewClient | None = None) -> dict:
     graph = build_graph(vlm_client=vlm_client)
+    state = initial_state(config, run_id=run_id, chosen_k=chosen_k, require_api_key=vlm_client is None)
+    setup_audit_logging(state["run_dir"], level=config.log_level, console=config.log_to_console)
     return graph.invoke(
-        initial_state(config, run_id=run_id, chosen_k=chosen_k, require_api_key=vlm_client is None)
+        state
     )

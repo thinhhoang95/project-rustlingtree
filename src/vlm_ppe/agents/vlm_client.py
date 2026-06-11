@@ -18,6 +18,7 @@ class ClusterReviewClient(Protocol):
         available_k: list[int],
         attempt: int,
         max_retries: int,
+        prompt: str | None = None,
     ) -> ClusterReview:
         ...
 
@@ -37,13 +38,14 @@ class GeminiVLMClient:
         available_k: list[int],
         attempt: int,
         max_retries: int,
+        prompt: str | None = None,
     ) -> ClusterReview:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=self.api_key)
-        prompt = cluster_review_prompt(metrics, available_k, attempt, max_retries)
-        contents: list[object] = [prompt]
+        resolved_prompt = prompt or cluster_review_prompt(metrics, available_k, attempt, max_retries)
+        contents: list[object] = [resolved_prompt]
         for image in evidence_images:
             image_path = Path(image.path)
             contents.append(f"Image: {image.caption}")

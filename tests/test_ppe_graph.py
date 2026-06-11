@@ -25,8 +25,10 @@ class FakeReviewClient(ClusterReviewClient):
         available_k: list[int],
         attempt: int,
         max_retries: int,
+        prompt: str | None = None,
     ) -> ClusterReview:
         self.calls += 1
+        assert prompt
         assert evidence_images
         assert metrics
         if self.retry_once and self.calls == 1:
@@ -136,6 +138,10 @@ def test_graph_runs_through_medoid_with_fake_vlm(tmp_path: Path) -> None:
     assert Path(result["state_path"]).exists()
     assert Path(result["medoids_path"]).exists()
     assert Path(result["medoid_report_path"]).exists()
+    assert Path(result["run_dir"], "audit.log").exists()
+    assert Path(result["run_dir"], "vlm_interactions.jsonl").exists()
+    assert Path(result["run_dir"], "vlm_reviews", "attempt_00_request.json").exists()
+    assert Path(result["run_dir"], "vlm_reviews", "attempt_00_prompt.txt").exists()
     assert len(result["vlm_reviews"]) == 1
 
 

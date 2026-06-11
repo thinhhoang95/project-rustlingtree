@@ -23,6 +23,8 @@ class PPEConfig(BaseModel):
     max_k_expansion: int = Field(default=12, ge=1)
     vlm_model: str = "gemini-3.5-flash"
     min_track_points: int = Field(default=2, ge=2)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_to_console: bool = True
 
     @field_validator("operation")
     @classmethod
@@ -94,6 +96,9 @@ class PPEState(BaseModel):
 
     run_id: str
     run_dir: str
+    audit_log_path: str | None = None
+    graph_events_path: str | None = None
+    vlm_interactions_path: str | None = None
     config: dict
     retry_count: int = 0
     k_max_current: int
@@ -118,6 +123,7 @@ class PPEState(BaseModel):
 
 
 class GraphEvent(BaseModel):
+    timestamp_utc: str | None = None
     node: str
     status: Literal["started", "completed", "failed"]
     message: str | None = None
