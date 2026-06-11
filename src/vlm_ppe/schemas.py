@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PPEConfig(BaseModel):
@@ -23,6 +23,9 @@ class PPEConfig(BaseModel):
     max_k_expansion: int = Field(default=12, ge=1)
     vlm_model: str = "google/gemini-2.5-flash"
     min_track_points: int = Field(default=2, ge=2)
+    track_filter_center_lat: float | None = Field(default=None, ge=-90.0, le=90.0)
+    track_filter_center_lon: float | None = Field(default=None, ge=-180.0, le=180.0)
+    track_filter_radius_nm: float | None = Field(default=None, gt=0.0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_to_console: bool = True
 
@@ -41,6 +44,16 @@ class PPEConfig(BaseModel):
         if value < k_min:
             raise ValueError("k_max must be greater than or equal to k_min")
         return value
+
+    @model_validator(mode="after")
+    def validate_track_filter(self) -> Self:
+        has_center_lat = self.track_filter_center_lat is not None
+        has_center_lon = self.track_filter_center_lon is not None
+        if has_center_lat != has_center_lon:
+            raise ValueError("track_filter_center_lat and track_filter_center_lon must be provided together")
+        if self.track_filter_radius_nm is not None and not (has_center_lat and has_center_lon):
+            raise ValueError("track_filter_center_lat/lon are required when track_filter_radius_nm is set")
+        return self
 
 
 class CoordinateSystem(BaseModel):
@@ -75,6 +88,13 @@ class ClusterReview(BaseModel):
     retry_requested: bool = False
     requested_k_max: int | None = Field(default=None, ge=1)
     suggested_action: Literal["accept", "retry", "human_review"] = "accept"
+
+    @field_validator("rationale", "rejected_alternatives", mode="before")
+    @classmethod
+    def coerce_text_list(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [value]
+        return value
 
     @field_validator("rationale", "rejected_alternatives")
     @classmethod

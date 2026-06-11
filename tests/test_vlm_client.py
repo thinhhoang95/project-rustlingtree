@@ -48,7 +48,9 @@ def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeyp
         app_title="VLM PPE Test",
     )
     review = client.review_clusters(
-        evidence_images=[EvidenceImage(kind="cluster_panel", path=image_path.as_posix(), caption="Cluster panel")],
+        evidence_images=[
+            EvidenceImage(kind="cluster_panel", path=image_path.as_posix(), caption="Cluster panel")
+        ],
         metrics=[KMetric(k=2, inertia=1.0, silhouette=0.5, cluster_count_min=1, cluster_count_max=3, cluster_count_mean=2.0)],
         available_k=[1, 2],
         attempt=0,
@@ -70,3 +72,46 @@ def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeyp
     assert content[1] == {"type": "text", "text": "Image: Cluster panel"}
     assert content[2]["type"] == "image_url"
     assert content[2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_openrouter_client_accepts_single_string_rationale(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "panel.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    class FakeCompletions:
+        def create(self, **kwargs: Any) -> Any:
+            content = json.dumps(
+                {
+                    "chosen_k": 4,
+                    "confidence": 0.9,
+                    "rationale": "K=4 is visually distinct.",
+                    "rejected_alternatives": "K=5 splits a coherent group.",
+                    "clusters_to_recheck": [],
+                    "retry_requested": False,
+                    "requested_k_max": None,
+                    "suggested_action": "accept",
+                }
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+
+    client = OpenRouterVLMClient(model="google/gemini-2.5-flash")
+    review = client.review_clusters(
+        evidence_images=[EvidenceImage(kind="cluster_panel", path=image_path.as_posix(), caption="Cluster panel")],
+        metrics=[],
+        available_k=[4],
+        attempt=0,
+        max_retries=1,
+        prompt="Return JSON.",
+    )
+
+    assert review.rationale == ["K=4 is visually distinct."]
+    assert review.rejected_alternatives == ["K=5 splits a coherent group."]

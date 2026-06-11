@@ -190,6 +190,9 @@ kmeans_random_state: 17
 max_retries: 2
 max_k_expansion: 12
 vlm_model: "gemini-3.5-flash"
+track_filter_center_lat: 32.897102378968
+track_filter_center_lon: -97.036547781746
+track_filter_radius_nm: 60.0
 log_level: "INFO"
 log_to_console: true
 ```
@@ -209,6 +212,11 @@ Meaning:
 - `max_retries`: maximum VLM-requested reclustering attempts.
 - `max_k_expansion`: upper bound if the VLM requests a larger `Kmax`.
 - `vlm_model`: Gemini model name.
+- `track_filter_center_lat`, `track_filter_center_lon`: optional center of the
+  circular trajectory window. The default KDFW config uses the airport center.
+- `track_filter_radius_nm`: optional circular trajectory window radius in
+  nautical miles. The default KDFW config keeps only the ADS-B trajectory
+  portion within 60 NM of the airport center.
 - `log_level`: audit logger threshold.
 - `log_to_console`: whether audit messages should also stream to stdout.
 
@@ -322,11 +330,15 @@ Steps:
 4. Filter by `operation` and optional `runway`.
 5. Load only matching `flight_id`s from compressed ADS-B JSONL.
 6. Merge catalog metadata into the track points.
-7. Select a projection origin from runway threshold coordinates, falling back
-   to event coordinates.
+7. Select a projection origin. If a trajectory filter center is configured,
+   that center is used; otherwise runway threshold coordinates are used, falling
+   back to event coordinates.
 8. Project all selected tracks into one common local coordinate frame.
-9. Remove degenerate tracks.
-10. Write normalized track tables.
+9. If `track_filter_radius_nm` is configured, clip each projected track to the
+   circular window and insert interpolated boundary points where segments cross
+   the window edge.
+10. Remove degenerate tracks.
+11. Write normalized track tables.
 
 Outputs:
 
