@@ -217,8 +217,20 @@ def test_south_east_viewer_elastic_response_changes_only_event_window(tmp_path: 
     assert np.max(np.abs(response[2:7] - center[2:7])) > 0.0
     np.testing.assert_allclose(response[7:], center[7:])
 
-    app.current_family = "horizontal"
+    app.on_family_selected("horizontal")
+    assert app.amplitude_slider.val == 0.0
+    np.testing.assert_allclose(app.event_response_xy_m(), response)
     app.amplitude_slider.set_val(1.0)
+    np.testing.assert_allclose(app.event_response_xy_m(), response)
+
+    app.on_family_selected("vertical")
+    assert app.amplitude_slider.val == 1.0
+    np.testing.assert_allclose(app.event_response_xy_m(), response)
+
+    app.on_reset_clicked(None)
+    assert app.amplitude_slider.val == 0.0
+    np.testing.assert_allclose(app.event_scores(app.current_elastic_event())["vertical"], 0.0)
+    np.testing.assert_allclose(app.event_scores(app.current_elastic_event())["horizontal"], 0.0)
     np.testing.assert_allclose(app.event_response_xy_m(), center)
     app.fig.canvas.draw()
 
@@ -265,7 +277,7 @@ def test_south_east_viewer_horizontal_response_warps_event_mean_path(tmp_path: P
     np.testing.assert_allclose(event_mean[event.end :], center[event.end :])
     assert np.max(np.abs(event_mean[event.start : event.end] - center[event.start : event.end])) > 0.0
 
-    app.current_family = "horizontal"
+    app.on_family_selected("horizontal")
     np.testing.assert_allclose(app.event_response_xy_m(), event_mean)
 
     app.amplitude_slider.set_val(1.0)
@@ -283,6 +295,24 @@ def test_south_east_viewer_horizontal_response_warps_event_mean_path(tmp_path: P
     assert "observed range" not in app.title_text.get_text()
     assert "horizontal PC1 score=+1.00 std" in app.title_text.get_text()
     assert "response around FPCA mean" in app.title_text.get_text()
+
+    segments = np.asarray(app.warp_line_collection.get_segments(), dtype=float)
+    mapped_station = event.start + gamma * float(event.length - 1)
+    mapped_response = viewer_module.interpolate_station_path(response, mapped_station)
+    template_lat, template_lon = app.xy_to_latlon(app.mean_xy_m[event.start : event.end])
+    mapped_lat, mapped_lon = app.xy_to_latlon(mapped_response)
+    expected_segments = np.stack(
+        (
+            np.column_stack((template_lon, template_lat)),
+            np.column_stack((mapped_lon, mapped_lat)),
+        ),
+        axis=1,
+    )
+    np.testing.assert_allclose(segments, expected_segments)
+
+    app.on_family_selected("vertical")
+    assert app.amplitude_slider.val == 0.0
+    np.testing.assert_allclose(np.asarray(app.warp_line_collection.get_segments(), dtype=float), expected_segments)
     app.fig.canvas.draw()
 
 

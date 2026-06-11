@@ -5,12 +5,12 @@ import sys
 from pathlib import Path
 
 from matplotlib.axes import Axes
-from matplotlib.collections import PathCollection
+from matplotlib.collections import LineCollection, PathCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.text import Text
 import matplotlib.pyplot as plt
-from matplotlib.widgets import RadioButtons, Slider
+from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 import numpy as np
 
 
@@ -31,9 +31,9 @@ from hllrd.fit import load_fit_result  # noqa: E402
 from hllrd.data import trim_tracks_from_anchor  # noqa: E402
 from hllrd.elastic_fpca import (  # noqa: E402
     _invert_warp,
-    elastic_component_delta,
     horizontal_component_gamma,
     load_elastic_fpca_result,
+    vertical_component_delta,
 )
 from hllrd.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
 from hllrd.matrix import load_matrix_artifact  # noqa: E402
@@ -46,6 +46,14 @@ DEFAULT_MODEL = DEFAULT_OUTPUT_DIR / "model_from_merge_L40_K6.npz"
 DEFAULT_ELASTIC_FPCA = DEFAULT_OUTPUT_DIR / "elastic_fpca_from_merge_L40_K6.npz"
 DEFAULT_SPLIT_GAP_SECONDS = 25 * 60
 NM_PER_M = 1.0 / 1852.0
+
+
+def interpolate_station_path(path_xy_m: np.ndarray, station_coordinate: np.ndarray) -> np.ndarray:
+    stations = np.arange(path_xy_m.shape[0], dtype=float)
+    clipped = np.clip(np.asarray(station_coordinate, dtype=float), stations[0], stations[-1])
+    x = np.interp(clipped, stations, path_xy_m[:, 0])
+    y = np.interp(clipped, stations, path_xy_m[:, 1])
+    return np.column_stack((x, y))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,20 +131,31 @@ class SouthEastInteractive:
             if self.background_source == "raw"
             else None
         )
+        self.score_by_event = {
+            int(event.event_index): {
+                "vertical": np.zeros(event.component_count, dtype=float),
+                "horizontal": np.zeros(event.component_count, dtype=float),
+            }
+            for event in self.elastic.events
+        }
         self.current_event_index = int(self.elastic.events[0].event_index)
         self.current_family = "vertical"
         self.current_component = 0
+        self.show_warp_lines = True
 
         self.fig: Figure
         self.ax: Axes
         self.event_radio: RadioButtons
         self.family_radio: RadioButtons
         self.component_radio: RadioButtons
+        self.warp_checkbox: CheckButtons
+        self.reset_button: Button
         self.amplitude_slider: Slider
         self.response_line: Line2D
         self.response_segment_line: Line2D
         self.window_line: Line2D
         self.window_endpoints: PathCollection
+        self.warp_line_collection: LineCollection
         self.title_text: Text
 
     def _mean_xy_m(self) -> np.ndarray:
@@ -233,9 +252,18 @@ class SouthEastInteractive:
 
     def event_response_xy_m(self) -> np.ndarray:
         event = self.current_elastic_event()
-        if self.current_family == "horizontal":
-            return self.horizontal_phase_response_xy_m(event)
-        return self.vertical_amplitude_response_xy_m(event)
+        response = self.aggregate_amplitude_response_xy_m(event)
+        segment = slice(event.start, event.end)
+        response_segment = response[segment]
+        gamma = self.aggregate_horizontal_gamma(event)
+        inverse_gamma = _invert_warp(gamma, event.time)
+        response[segment] = np.column_stack(
+            (
+                np.interp(inverse_gamma, event.time, response_segment[:, 0]),
+                np.interp(inverse_gamma, event.time, response_segment[:, 1]),
+            )
+        )
+        return response
 
     def event_mean_response_xy_m(self, event) -> np.ndarray:
         response = self.mean_xy_m.copy()
@@ -243,36 +271,47 @@ class SouthEastInteractive:
         response[segment] = self.mean_xy_m[segment] + event.fmean[:, None] * self.matrix.normals_xy[segment]
         return response
 
-    def vertical_amplitude_response_xy_m(self, event) -> np.ndarray:
+    def aggregate_amplitude_response_xy_m(self, event) -> np.ndarray:
         normal_offset_m = np.zeros(self.mean_xy_m.shape[0], dtype=float)
-        delta = elastic_component_delta(
-            event,
-            "vertical",
-            self.current_component,
-            float(self.amplitude_slider.val),
-            self.elastic.config.std_grid,
-        )
-        normal_offset_m[event.start : event.end] = event.fmean + delta
+        normal_offset_m[event.start : event.end] = event.fmean + self.aggregate_vertical_delta(event)
         return self.mean_xy_m + normal_offset_m[:, None] * self.matrix.normals_xy
 
-    def horizontal_phase_response_xy_m(self, event) -> np.ndarray:
-        response = self.event_mean_response_xy_m(event)
-        segment = slice(event.start, event.end)
-        mean_segment = response[segment]
-        gamma = horizontal_component_gamma(
-            event,
-            self.current_component,
-            float(self.amplitude_slider.val),
-            self.elastic.config.std_grid,
-        )
-        inverse_gamma = _invert_warp(gamma, event.time)
-        response[segment] = np.column_stack(
-            (
-                np.interp(inverse_gamma, event.time, mean_segment[:, 0]),
-                np.interp(inverse_gamma, event.time, mean_segment[:, 1]),
-            )
-        )
-        return response
+    def aggregate_vertical_delta(self, event) -> np.ndarray:
+        delta = np.zeros(event.length, dtype=float)
+        scores = self.event_scores(event)["vertical"]
+        for component, score in enumerate(scores[: event.component_count]):
+            if not np.isclose(float(score), 0.0):
+                delta += vertical_component_delta(event, component, float(score), self.elastic.config.std_grid)
+        return delta
+
+    def aggregate_horizontal_gamma(self, event) -> np.ndarray:
+        time = np.asarray(event.time, dtype=float)
+        gamma = time.copy()
+        scores = self.event_scores(event)["horizontal"]
+        for component, score in enumerate(scores[: event.component_count]):
+            if not np.isclose(float(score), 0.0):
+                component_gamma = horizontal_component_gamma(event, component, float(score), self.elastic.config.std_grid)
+                gamma += component_gamma - time
+        if gamma.size:
+            gamma = np.maximum.accumulate(np.clip(gamma, float(time[0]), float(time[-1])))
+            gamma[0] = float(time[0])
+            gamma[-1] = float(time[-1])
+        return gamma
+
+    def event_scores(self, event) -> dict[str, np.ndarray]:
+        event_index = int(event.event_index)
+        scores = self.score_by_event.get(event_index)
+        if scores is None or scores["vertical"].shape != (event.component_count,):
+            scores = {
+                "vertical": np.zeros(event.component_count, dtype=float),
+                "horizontal": np.zeros(event.component_count, dtype=float),
+            }
+            self.score_by_event[event_index] = scores
+        return scores
+
+    def current_score(self) -> float:
+        event = self.current_elastic_event()
+        return float(self.event_scores(event)[self.current_family][self.current_component])
 
     def create(self) -> None:
         self.fig, self.ax = plt.subplots(figsize=(10.5, 7.2))
@@ -294,6 +333,12 @@ class SouthEastInteractive:
         component_labels = [f"PC{index + 1}" for index in range(self.elastic.max_components)]
         self.component_radio = RadioButtons(component_ax, component_labels, active=0)
         component_ax.set_title("Component", fontsize=10)
+
+        warp_ax = self.fig.add_axes((0.025, 0.215, 0.16, 0.04))
+        self.warp_checkbox = CheckButtons(warp_ax, ["warp lines"], [self.show_warp_lines])
+
+        reset_ax = self.fig.add_axes((0.025, 0.025, 0.16, 0.035))
+        self.reset_button = Button(reset_ax, "Reset")
 
         std_grid = np.asarray(self.elastic.config.std_grid, dtype=float)
         amplitude_ax = self.fig.add_axes((0.25, 0.08, 0.65, 0.04))
@@ -336,12 +381,23 @@ class SouthEastInteractive:
             zorder=4,
         )[0]
         self.window_endpoints = self.ax.scatter([], [], s=24, color="black", edgecolor="white", linewidth=0.5, zorder=7)
+        self.warp_line_collection = LineCollection(
+            [],
+            colors="#ffcc00",
+            linewidths=0.8,
+            alpha=0.78,
+            label="warping station matches",
+            zorder=5.5,
+        )
+        self.ax.add_collection(self.warp_line_collection)
         self.title_text = self.ax.set_title("")
 
         self.event_radio.on_clicked(self.on_event_selected)
         self.family_radio.on_clicked(self.on_family_selected)
         self.component_radio.on_clicked(self.on_component_selected)
-        self.amplitude_slider.on_changed(lambda _value: self.update_response())
+        self.warp_checkbox.on_clicked(self.on_warp_lines_toggled)
+        self.reset_button.on_clicked(self.on_reset_clicked)
+        self.amplitude_slider.on_changed(self.on_score_changed)
         self.update_event(self.current_event_index)
         self.ax.legend(loc="best", fontsize=8)
 
@@ -410,6 +466,7 @@ class SouthEastInteractive:
         if label is None:
             return
         self.current_family = str(label)
+        self.sync_slider_to_current_score()
         self.update_response()
 
     def on_component_selected(self, label: str | None) -> None:
@@ -421,19 +478,39 @@ class SouthEastInteractive:
             self.component_radio.set_active(0)
             return
         self.current_component = component
+        self.sync_slider_to_current_score()
         self.update_response()
+
+    def on_warp_lines_toggled(self, _label: str | None) -> None:
+        self.show_warp_lines = bool(self.warp_checkbox.get_status()[0])
+        self.update_response()
+
+    def on_score_changed(self, value: float) -> None:
+        event = self.current_elastic_event()
+        self.event_scores(event)[self.current_family][self.current_component] = float(value)
+        self.update_response()
+
+    def on_reset_clicked(self, _event) -> None:
+        scores = self.event_scores(self.current_elastic_event())
+        scores["vertical"][:] = 0.0
+        scores["horizontal"][:] = 0.0
+        self.sync_slider_to_current_score()
+        self.update_response()
+
+    def sync_slider_to_current_score(self) -> None:
+        self.amplitude_slider.eventson = False
+        self.amplitude_slider.set_val(self.current_score())
+        self.amplitude_slider.eventson = True
 
     def update_event(self, event_index: int) -> None:
         self.current_event_index = int(event_index)
         event = self.current_elastic_event()
-        self.amplitude_slider.eventson = False
-        self.amplitude_slider.set_val(0.0)
-        self.amplitude_slider.eventson = True
         if self.current_component >= event.component_count:
             self.current_component = 0
             self.component_radio.eventson = False
             self.component_radio.set_active(0)
             self.component_radio.eventson = True
+        self.sync_slider_to_current_score()
         self.update_response()
 
     def update_response(self) -> None:
@@ -445,6 +522,7 @@ class SouthEastInteractive:
         segment = xy_m[event.start : event.end]
         segment_lat, segment_lon = self.xy_to_latlon(segment)
         self.response_segment_line.set_data(segment_lon, segment_lat)
+        self.update_warp_lines(event, xy_m)
 
         mean_segment = self.mean_xy_m[event.start : event.end]
         mean_segment_lat, mean_segment_lon = self.xy_to_latlon(mean_segment)
@@ -469,6 +547,33 @@ class SouthEastInteractive:
             "response around FPCA mean"
         )
         self.fig.canvas.draw_idle()
+
+    def update_warp_lines(self, event, response_xy_m: np.ndarray) -> None:
+        if not self.show_warp_lines:
+            self.warp_line_collection.set_segments([])
+            return
+
+        length = int(event.length)
+        if length < 2:
+            self.warp_line_collection.set_segments([])
+            return
+
+        gamma = self.aggregate_horizontal_gamma(event)
+        mapped_local_response_station = np.asarray(gamma, dtype=float) * float(length - 1)
+        mapped_global_response_station = mapped_local_response_station + int(event.start)
+
+        template_segment = self.mean_xy_m[event.start : event.end]
+        mapped_response_segment = interpolate_station_path(response_xy_m, mapped_global_response_station)
+        template_lat, template_lon = self.xy_to_latlon(template_segment)
+        mapped_lat, mapped_lon = self.xy_to_latlon(mapped_response_segment)
+        segments = np.stack(
+            (
+                np.column_stack((template_lon, template_lat)),
+                np.column_stack((mapped_lon, mapped_lat)),
+            ),
+            axis=1,
+        )
+        self.warp_line_collection.set_segments(segments)
 
     def show(self) -> None:
         self.create()
