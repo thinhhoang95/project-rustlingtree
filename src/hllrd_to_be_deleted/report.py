@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from hllrd.fit import HLLRDFitResult, event_summary
+from hllrd_to_be_deleted.fit import HLLRDFitResult, event_summary
 
 
 def write_event_summary_csv(path: Path, result: HLLRDFitResult) -> None:

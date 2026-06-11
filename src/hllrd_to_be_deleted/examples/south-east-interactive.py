@@ -27,16 +27,16 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hllrd.fit import load_fit_result  # noqa: E402
-from hllrd.data import trim_tracks_from_anchor  # noqa: E402
-from hllrd.elastic_fpca import (  # noqa: E402
+from hllrd_to_be_deleted.fit import load_fit_result  # noqa: E402
+from hllrd_to_be_deleted.data import trim_tracks_from_anchor  # noqa: E402
+from hllrd_to_be_deleted.elastic_fpca import (  # noqa: E402
     _invert_warp,
     horizontal_component_gamma,
     load_elastic_fpca_result,
     vertical_component_delta,
 )
-from hllrd.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
-from hllrd.matrix import load_matrix_artifact  # noqa: E402
+from hllrd_to_be_deleted.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
+from hllrd_to_be_deleted.matrix import load_matrix_artifact  # noqa: E402
 from scenario.trajectory_compressor.io import load_raw_adsb, split_tracks_by_gap  # noqa: E402
 
 

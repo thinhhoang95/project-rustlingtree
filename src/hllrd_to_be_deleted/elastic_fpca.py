@@ -7,8 +7,8 @@ from typing import Any, Literal
 
 import numpy as np
 
-from hllrd.fit import HLLRDEvent, HLLRDFitResult
-from hllrd.matrix import MatrixArtifact
+from hllrd_to_be_deleted.fit import HLLRDEvent, HLLRDFitResult
+from hllrd_to_be_deleted.matrix import MatrixArtifact
 
 
 Family = Literal["vertical", "horizontal"]

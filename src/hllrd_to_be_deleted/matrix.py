@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hllrd.geometry import (
+from hllrd_to_be_deleted.geometry import (
     LocalProjection,
     projection_from_latlon,
     reference_tangent_normal,

@@ -13,9 +13,9 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
-from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, normalize_cluster
-from hllrd.elastic_fpca import ElasticFPCAConfig, fit_elastic_event_fpca, save_elastic_fpca_result
-from hllrd.fit import (
+from hllrd_to_be_deleted.data import filter_tracks_to_cluster, load_cluster_flights, normalize_cluster
+from hllrd_to_be_deleted.elastic_fpca import ElasticFPCAConfig, fit_elastic_event_fpca, save_elastic_fpca_result
+from hllrd_to_be_deleted.fit import (
     HLLRDV1Config,
     fit_localized_low_rank,
     generate_candidate_summary,
@@ -23,8 +23,8 @@ from hllrd.fit import (
     save_fit_result,
     transform_with_model,
 )
-from hllrd.matrix import MatrixBuildConfig, load_matrix_artifact, save_matrix_artifact, build_matrix_from_tracks
-from hllrd.report import (
+from hllrd_to_be_deleted.matrix import MatrixBuildConfig, load_matrix_artifact, save_matrix_artifact, build_matrix_from_tracks
+from hllrd_to_be_deleted.report import (
     plot_reconstruction_heatmap,
     plot_residual_energy,
     write_event_summary_csv,

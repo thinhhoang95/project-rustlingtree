@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from hllrd.candidates import (
+from hllrd_to_be_deleted.candidates import (
     CandidateFit,
     analytic_null_threshold,
     backtrack_peak_rise_start,
@@ -18,8 +18,8 @@ from hllrd.candidates import (
     local_rank2_candidate,
     smooth_energy,
 )
-from hllrd.matrix import estimate_noise_sigma, robust_center_columns
-from hllrd.simplifier import simplify_local_deviation_block
+from hllrd_to_be_deleted.matrix import estimate_noise_sigma, robust_center_columns
+from hllrd_to_be_deleted.simplifier import simplify_local_deviation_block
 
 
 @dataclass(frozen=True)

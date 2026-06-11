@@ -22,10 +22,10 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hllrd.elastic_fpca import load_elastic_fpca_result  # noqa: E402
-from hllrd.fit import load_fit_result  # noqa: E402
-from hllrd.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
-from hllrd.matrix import load_matrix_artifact  # noqa: E402
+from hllrd_to_be_deleted.elastic_fpca import load_elastic_fpca_result  # noqa: E402
+from hllrd_to_be_deleted.fit import load_fit_result  # noqa: E402
+from hllrd_to_be_deleted.geometry import LocalProjection, cumulative_distance_m  # noqa: E402
+from hllrd_to_be_deleted.matrix import load_matrix_artifact  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "hllrd" / "south-east"

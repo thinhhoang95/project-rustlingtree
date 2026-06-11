@@ -8,8 +8,8 @@ import matplotlib
 import numpy as np
 import pytest
 
-from hllrd.cli import elastic_fpca_main
-from hllrd.elastic_fpca import (
+from hllrd_to_be_deleted.cli import elastic_fpca_main
+from hllrd_to_be_deleted.elastic_fpca import (
     ElasticEventFPCA,
     ElasticFPCAConfig,
     ElasticFPCAResult,
@@ -23,8 +23,8 @@ from hllrd.elastic_fpca import (
     _function_sample_rank,
     _invert_warp,
 )
-from hllrd.fit import HLLRDEvent, HLLRDFitResult, HLLRDV1Config, save_fit_result
-from hllrd.matrix import MatrixArtifact, save_matrix_artifact
+from hllrd_to_be_deleted.fit import HLLRDEvent, HLLRDFitResult, HLLRDV1Config, save_fit_result
+from hllrd_to_be_deleted.matrix import MatrixArtifact, save_matrix_artifact
 
 
 def test_extract_event_functions_uses_only_active_flights() -> None:

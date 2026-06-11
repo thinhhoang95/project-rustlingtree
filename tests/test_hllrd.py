@@ -6,10 +6,10 @@ import json
 import numpy as np
 import pandas as pd
 
-from hllrd.candidates import backtrack_peak_rise_start, is_duplicate_interval
-from hllrd.cli import candidates_main, fit_main, transform_main
-from hllrd.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
-from hllrd.fit import (
+from hllrd_to_be_deleted.candidates import backtrack_peak_rise_start, is_duplicate_interval
+from hllrd_to_be_deleted.cli import candidates_main, fit_main, transform_main
+from hllrd_to_be_deleted.data import filter_tracks_to_cluster, load_cluster_flights, trim_tracks_from_anchor
+from hllrd_to_be_deleted.fit import (
     HLLRDV1Config,
     activation_threshold_for_length,
     fit_localized_low_rank,
@@ -17,7 +17,7 @@ from hllrd.fit import (
     quiet_window_energy_floor,
     save_fit_result,
 )
-from hllrd.matrix import (
+from hllrd_to_be_deleted.matrix import (
     MatrixArtifact,
     MatrixBuildConfig,
     _normal_residuals_at_reference_stations,
@@ -25,8 +25,8 @@ from hllrd.matrix import (
     load_matrix_artifact,
     save_matrix_artifact,
 )
-from hllrd.geometry import resample_polyline_constant_speed
-from hllrd.simplifier import simplify_local_deviation_block, simplify_series_by_gain
+from hllrd_to_be_deleted.geometry import resample_polyline_constant_speed
+from hllrd_to_be_deleted.simplifier import simplify_local_deviation_block, simplify_series_by_gain
 
 
 def test_load_cluster_flights_filters_artifact_jsonl(tmp_path) -> None:
