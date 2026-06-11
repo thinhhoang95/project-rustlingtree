@@ -21,7 +21,7 @@ class PPEConfig(BaseModel):
     kmeans_random_state: int = 17
     max_retries: int = Field(default=2, ge=0)
     max_k_expansion: int = Field(default=12, ge=1)
-    vlm_model: str = "gemini-3.5-flash"
+    vlm_model: str = "google/gemini-2.5-flash"
     min_track_points: int = Field(default=2, ge=2)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_to_console: bool = True

@@ -22,7 +22,7 @@ from vlm_ppe.agents.tools import (
     state_model,
     validate_review_tool,
 )
-from vlm_ppe.agents.vlm_client import ClusterReviewClient, GeminiVLMClient
+from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
 from vlm_ppe.audit import log_vlm_request, log_vlm_response, setup_audit_logging
 from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, PPEConfig, PPEState
 
@@ -72,7 +72,7 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
                 suggested_action="accept",
             )
         else:
-            client = vlm_client or GeminiVLMClient(model=config.vlm_model)
+            client = vlm_client or OpenRouterVLMClient(model=config.vlm_model)
             review = client.review_clusters(
                 evidence_images=evidence,
                 metrics=metrics,
@@ -157,8 +157,8 @@ def initial_state(
         k_max_current=config.k_max,
         chosen_k_override=chosen_k,
     )
-    if require_api_key and chosen_k is None and not os.environ.get("GEMINI_API_KEY"):
-        raise RuntimeError("GEMINI_API_KEY is required for VLM-led runs; use --chosen-k for offline/test runs")
+    if require_api_key and chosen_k is None and not os.environ.get("OPENROUTER_API_KEY"):
+        raise RuntimeError("OPENROUTER_API_KEY is required for VLM-led runs; use --chosen-k for offline/test runs")
     return state.model_dump(mode="json")
 
 

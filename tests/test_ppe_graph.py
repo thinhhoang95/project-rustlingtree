@@ -118,7 +118,7 @@ def _write_fixture(tmp_path: Path) -> Path:
                 "kmeans_random_state: 5",
                 "max_retries: 1",
                 "max_k_expansion: 3",
-                'vlm_model: "gemini-3.5-flash"',
+                'vlm_model: "google/gemini-2.5-flash"',
             ]
         ),
         encoding="utf-8",
@@ -159,7 +159,7 @@ def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
 
 
 def test_offline_chosen_k_bypasses_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config = load_config(_write_fixture(tmp_path))
 
     result = run_graph(config, chosen_k=2, run_id="offline-run")
@@ -169,8 +169,8 @@ def test_offline_chosen_k_bypasses_missing_api_key(tmp_path: Path, monkeypatch: 
 
 
 def test_missing_api_key_without_override_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config = load_config(_write_fixture(tmp_path))
 
-    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         run_graph(config, run_id="missing-key-run")

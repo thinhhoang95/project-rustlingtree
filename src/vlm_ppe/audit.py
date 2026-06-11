@@ -166,7 +166,7 @@ def log_vlm_request(
     _append_jsonl(root / "vlm_interactions.jsonl", request_payload)
 
     logger = get_audit_logger(root)
-    mode = "offline override" if offline_override else "Gemini request"
+    mode = "offline override" if offline_override else "OpenRouter request"
     logger.info("VLM attempt %02d prepared: %s model=%s available_k=%s images=%d", attempt, mode, model, available_k, len(image_records))
     for index, image in enumerate(image_records, start=1):
         logger.info(
