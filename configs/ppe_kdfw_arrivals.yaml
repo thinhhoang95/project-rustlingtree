@@ -1,0 +1,13 @@
+dataset_id: "2026-04-01"
+operation: "arrival"
+runway: null
+manifest_path: "data_manifest.json"
+output_root: "data/artifacts/ppe/2026-04-01"
+n_resample: 100
+k_min: 1
+k_max: 8
+kmeans_n_init: 50
+kmeans_random_state: 17
+max_retries: 2
+max_k_expansion: 12
+vlm_model: "gemini-3.5-flash"

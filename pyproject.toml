@@ -13,13 +13,19 @@ dependencies = [
     "fdasrsf>=2.6.9",
     "ipykernel>=7.2.0",
     "matplotlib>=3.8.0",
+    "google-genai>=1.0.0",
+    "langgraph>=0.2.0",
     "notebook>=7.5.5",
     "numpy>=1.26.0",
     "openap>=2.5.0",
     "pandas>=2.2.0",
     "plotly>=5.20.0",
     "polars>=1.0.0",
+    "pyarrow>=16.0.0",
+    "pydantic>=2.0.0",
+    "pyproj>=3.6.0",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.0",
     "rich>=14.3.4",
     "scikit-learn>=1.4.0",
     "scipy>=1.12.0",
@@ -40,6 +46,7 @@ hllrd-report = "hllrd.cli:report_main"
 hllrd-transform = "hllrd.cli:transform_main"
 scenario-manager-api = "mcp_tools.scenario_manager.server:main"
 scenario-manager-precompute-artifact = "mcp_tools.scenario_manager.precompute_artifact:main"
+vlm-ppe = "vlm_ppe.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
