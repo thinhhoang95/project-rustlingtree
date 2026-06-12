@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
-from vlm_ppe.agents.prompts import cluster_review_prompt
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric
+from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -23,6 +23,16 @@ class ClusterReviewClient(Protocol):
         max_retries: int,
         prompt: str | None = None,
     ) -> ClusterReview:
+        ...
+
+    def review_windows(
+        self,
+        *,
+        cluster_id: int,
+        windows: list[InterventionWindow],
+        evidence_images: list[EvidenceImage],
+        prompt: str | None = None,
+    ) -> WindowReview:
         ...
 
 
@@ -54,14 +64,30 @@ class OpenRouterVLMClient:
         max_retries: int,
         prompt: str | None = None,
     ) -> ClusterReview:
+        resolved_prompt = prompt or cluster_review_prompt(metrics, available_k, attempt, max_retries)
+        text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
+        return ClusterReview.model_validate(json.loads(text))
+
+    def review_windows(
+        self,
+        *,
+        cluster_id: int,
+        windows: list[InterventionWindow],
+        evidence_images: list[EvidenceImage],
+        prompt: str | None = None,
+    ) -> WindowReview:
+        resolved_prompt = prompt or window_review_prompt(cluster_id, windows)
+        text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
+        return WindowReview.model_validate(json.loads(text))
+
+    def _request_json_text(self, *, prompt: str, evidence_images: list[EvidenceImage]) -> str:
         try:
             from openai import OpenAI
         except ImportError as exc:
             raise RuntimeError("The openai package is required for OpenRouter VLM calls") from exc
 
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        resolved_prompt = prompt or cluster_review_prompt(metrics, available_k, attempt, max_retries)
-        contents: list[dict[str, Any]] = [{"type": "text", "text": resolved_prompt}]
+        contents: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for image in evidence_images:
             contents.append({"type": "text", "text": f"Image: {image.caption}"})
             contents.append({"type": "image_url", "image_url": {"url": _image_data_url(Path(image.path))}})
@@ -75,7 +101,7 @@ class OpenRouterVLMClient:
         text = _message_text(response.choices[0].message.content)
         if not text:
             raise ValueError("OpenRouter response did not contain text")
-        return ClusterReview.model_validate(json.loads(text))
+        return text
 
 
 def _image_data_url(image_path: Path) -> str:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
 
 LOGGER_NAME = "vlm_ppe.audit"
 
@@ -77,7 +77,15 @@ def _payload_summary(payload: dict[str, Any]) -> str:
         return ""
     parts: list[str] = []
     for key, value in payload.items():
-        if key in {"clustering_metrics", "evidence_images", "medoids", "config"}:
+        if key in {
+            "clustering_metrics",
+            "evidence_images",
+            "window_evidence_images",
+            "medoids",
+            "intervention_windows",
+            "window_reviews",
+            "config",
+        }:
             if isinstance(value, list):
                 parts.append(f"{key}=<{len(value)} items>")
             else:
@@ -209,3 +217,81 @@ def log_vlm_response(
     )
     for index, rationale in enumerate(review.rationale, start=1):
         logger.info("VLM rationale %02d: %s", index, rationale)
+
+
+def log_window_vlm_request(
+    *,
+    run_dir: str | Path,
+    cluster_id: int,
+    model: str,
+    prompt: str,
+    evidence_images: list[EvidenceImage],
+    windows: list[InterventionWindow],
+    offline_override: bool,
+) -> str:
+    root = Path(run_dir)
+    review_dir = root / "vlm_reviews" / "windows"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"cluster_{int(cluster_id):02d}"
+    image_records = [_image_record(image) for image in evidence_images]
+    prompt_path = review_dir / f"{stem}_prompt.txt"
+    request_path = review_dir / f"{stem}_request.json"
+    request_payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_window_request",
+        "cluster_id": int(cluster_id),
+        "model": model,
+        "offline_override": offline_override,
+        "prompt_path": prompt_path.as_posix(),
+        "images": image_records,
+        "windows": [window.model_dump() for window in windows],
+    }
+    prompt_path.write_text(prompt, encoding="utf-8")
+    with request_path.open("w", encoding="utf-8") as stream:
+        json.dump(_json_safe({**request_payload, "prompt": prompt}), stream, indent=2, ensure_ascii=False)
+    _append_jsonl(root / "vlm_interactions.jsonl", request_payload)
+
+    logger = get_audit_logger(root)
+    mode = "offline override" if offline_override else "OpenRouter request"
+    logger.info(
+        "VLM window review prepared: cluster=%s %s model=%s windows=%d images=%d",
+        cluster_id,
+        mode,
+        model,
+        len(windows),
+        len(image_records),
+    )
+    return request_path.as_posix()
+
+
+def log_window_vlm_response(
+    *,
+    run_dir: str | Path,
+    review: WindowReview,
+    response_path: str,
+) -> None:
+    root = Path(run_dir)
+    payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_window_response",
+        "cluster_id": review.cluster_id,
+        "response_path": response_path,
+        "review": review.model_dump(),
+    }
+    _append_jsonl(root / "vlm_interactions.jsonl", payload)
+    logger = get_audit_logger(root)
+    logger.info(
+        "VLM window response: cluster=%s windows=%d action=%s response=%s",
+        review.cluster_id,
+        len(review.windows),
+        review.suggested_action,
+        response_path,
+    )
+    for window in review.windows:
+        logger.info(
+            "VLM window classification: cluster=%s window=%s class=%s confidence=%.3f",
+            review.cluster_id,
+            window.window_id,
+            window.class_name,
+            window.confidence,
+        )

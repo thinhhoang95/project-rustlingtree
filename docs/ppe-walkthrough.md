@@ -2,9 +2,10 @@
 
 This document explains the Practical Procedure Extraction framework implemented
 under `src/vlm_ppe`. It is written as a self-contained guide for running,
-inspecting, and debugging the pipeline through medoid trajectory extraction.
+inspecting, and debugging the pipeline through residual-window classification.
 
-The current implementation covers PPE stages 0 through 6:
+The current implementation covers PPE ingestion through PPE plan Sections 7 and
+8:
 
 1. ingest ADS-B tracks,
 2. project them into a common local coordinate frame,
@@ -15,10 +16,14 @@ The current implementation covers PPE stages 0 through 6:
 7. ask the VLM to choose or retry the cluster count,
 8. validate the VLM decision,
 9. compute one medoid trajectory per accepted cluster,
-10. write audit artifacts and a medoid report.
+10. compute residual-energy and heading-dispersion windows,
+11. render residual-window evidence,
+12. ask the VLM to classify windows into the v1 intervention classes,
+13. validate the structured classifications,
+14. write audit artifacts and a final state index.
 
-Residual-energy windows, intervention fitting, and procedure-program export are
-not implemented yet. Those correspond to Section 7 and beyond in the PPE plan.
+Intervention fitting and procedure-program export are not implemented yet. Those
+correspond to Section 9 and beyond in the PPE plan.
 
 ## Core Idea
 
@@ -30,6 +35,7 @@ The VLM is the visible orchestrator:
 - it sees metrics and plots,
 - it chooses the practical cluster count,
 - it can request bounded retries,
+- it classifies deterministic residual windows,
 - it explains its decision through a structured rationale.
 
 The deterministic tools remain authoritative for all numeric and geometric
@@ -41,14 +47,15 @@ outputs:
 - KMeans labels,
 - metric computation,
 - artifact writing,
-- medoid trajectory selection.
+- medoid trajectory selection,
+- residual-window detection.
 
 The important contract is:
 
 ```text
 VLM reviews and chooses.
 Tools compute and validate.
-The final medoid geometry is never authored directly by the VLM.
+The final medoid/window geometry is never authored directly by the VLM.
 ```
 
 The implementation logs the model-visible prompt, the images prepared for model
@@ -69,7 +76,8 @@ Primary files:
 - `src/vlm_ppe/agents/tools.py`: deterministic tool wrappers used by graph
   nodes.
 - `src/vlm_ppe/agents/vlm_client.py`: Gemini-backed VLM client.
-- `src/vlm_ppe/agents/prompts.py`: cluster-review prompt builder.
+- `src/vlm_ppe/agents/prompts.py`: cluster-review and window-review prompt
+  builders.
 - `src/vlm_ppe/io/adsb_loader.py`: manifest, catalog, and compressed ADS-B
   ingestion.
 - `src/vlm_ppe/io/parquet_store.py`: Parquet read/write helpers.
@@ -80,8 +88,12 @@ Primary files:
 - `src/vlm_ppe/clustering/features.py`: shape feature construction.
 - `src/vlm_ppe/clustering/kmeans_runner.py`: candidate KMeans runs.
 - `src/vlm_ppe/clustering/medoid.py`: cluster medoid extraction.
+- `src/vlm_ppe/clustering/residual_windows.py`: residual-energy and
+  heading-dispersion window detection.
 - `src/vlm_ppe/diagnostics/plots_clustering.py`: cluster evidence plots.
 - `src/vlm_ppe/diagnostics/plots_medoids.py`: medoid summary plot.
+- `src/vlm_ppe/diagnostics/plots_residuals.py`: residual-window evidence
+  plots.
 - `src/vlm_ppe/diagnostics/report.py`: Markdown medoid report.
 
 Default config:
@@ -281,6 +293,10 @@ START
        -> run_candidate_clustering, if retry requested and allowed
        -> compute_cluster_medoids, otherwise
   -> render_medoid_report
+  -> compute_residual_windows
+  -> render_window_diagnostics
+  -> vlm_classify_windows
+  -> validate_window_reviews
   -> export_state
   -> END
 ```
@@ -307,6 +323,12 @@ Key state fields include:
 - `medoids_path`
 - `medoid_summary_path`
 - `medoid_report_path`
+- `residual_profiles_path`
+- `intervention_windows_path`
+- `intervention_windows`
+- `window_evidence_images`
+- `window_reviews`
+- `window_review_paths`
 - `audit_log_path`
 - `graph_events_path`
 - `vlm_interactions_path`
@@ -572,6 +594,48 @@ The report includes:
 - track counts,
 - mean and maximum distance to the cluster medoid,
 - medoid plot path.
+
+### Stage 9: Residual-Window Detection
+
+This corresponds to Section 7 of the PPE plan.
+
+Implemented by:
+
+- `compute_residual_windows_tool()` in `agents/tools.py`
+- `compute_cluster_residual_windows()` in `clustering/residual_windows.py`
+
+For each accepted cluster, the tool computes:
+
+- median squared residual energy against the cluster medoid,
+- circular heading dispersion,
+- contiguous windows triggered by either metric,
+- merged/filtered windows using the configured length and gap thresholds.
+
+Outputs:
+
+- `residuals/residual_profiles.parquet`
+- `residuals/intervention_windows.parquet`
+
+### Stage 10: Window Diagnostics And Classification
+
+This corresponds to Section 8 of the PPE plan.
+
+Implemented by:
+
+- `render_window_diagnostics_tool()` in `agents/tools.py`
+- `render_residual_window_diagnostics()` in `diagnostics/plots_residuals.py`
+- `vlm_classify_windows` node in `agents/graph.py`
+- `window_review_prompt()` in `agents/prompts.py`
+
+The VLM receives residual-window plots and structured window records. It may
+classify windows as:
+
+```text
+no_stretch, dogleg, trombone, PMS, other
+```
+
+The VLM does not create or modify window geometry. `validate_window_reviews`
+checks that every detected window receives exactly one known class label.
 
 ## Audit And Logging
 
@@ -902,27 +966,25 @@ vlm-ppe run-through-medoid \
 
 ## Current Limitations
 
-- Only stages through cluster medoid extraction are implemented.
-- The VLM review is currently used only for cluster-count choice and bounded
-  retry orchestration.
+- Only stages through residual-window classification are implemented.
+- The VLM review is currently used for cluster-count choice, bounded retry
+  orchestration, and residual-window classification.
 - The final exported geometry is a medoid trajectory, not yet a procedure
   program with intervention tokens.
-- No residual-energy windows are computed yet.
 - No dogleg, trombone, or PMS fitting is implemented yet.
 - Altitude is ingested but not used in clustering.
-- The current evidence pack contains cluster panels and a metrics chart. Future
-  versions should add medoid-nearest examples and residual diagnostics.
+- The evidence packs contain cluster panels, a metrics chart, and residual
+  diagnostics. Future versions should add fitted-reconstruction diagnostics.
 
 ## Expected Next Extensions
 
-The natural next implementation step is Section 7:
+The natural next implementation step is Section 9:
 
-1. compute robust residual energy against each cluster medoid,
-2. compute heading dispersion,
-3. detect candidate intervention windows,
-4. render window evidence packs,
-5. ask the VLM to classify windows,
-6. keep deterministic validators authoritative.
+1. fit dogleg and trombone candidates inside accepted windows,
+2. add deterministic acceptance gates for fitted geometry,
+3. render reconstruction diagnostics,
+4. ask the VLM to review fitted reconstructions,
+5. export reconstructable procedure-program JSON.
 
 The audit machinery is already structured for that extension. New VLM review
 nodes should use the same pattern:

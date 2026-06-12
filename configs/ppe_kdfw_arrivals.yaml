@@ -11,6 +11,10 @@ kmeans_random_state: 17
 max_retries: 2
 max_k_expansion: 12
 vlm_model: "google/gemini-3.5-flash"
+residual_energy_lambda: 3.0
+min_window_length_nm: 2.0
+merge_windows_gap_nm: 1.0
+heading_dispersion_threshold: 0.25
 # KDFW runway-endpoint centroid from data/kdfw_procs/kdfw-runways.txt.
 track_filter_center_lat: 32.897102378968
 track_filter_center_lon: -97.036547781746

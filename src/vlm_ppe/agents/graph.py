@@ -7,24 +7,43 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from vlm_ppe.agents.prompts import cluster_review_prompt
+from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
 from vlm_ppe.agents.tools import (
     append_event,
     build_features_tool,
+    compute_residual_windows_tool,
     compute_medoids_tool,
     export_state_tool,
     ingest_tracks_tool,
     render_evidence_pack_tool,
+    render_window_diagnostics_tool,
     render_medoid_report_tool,
     resample_tracks_tool,
     retry_or_accept_tool,
     run_candidate_clustering_tool,
     state_model,
     validate_review_tool,
+    validate_window_reviews_tool,
 )
 from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
-from vlm_ppe.audit import log_vlm_request, log_vlm_response, setup_audit_logging
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, PPEConfig, PPEState
+from vlm_ppe.audit import (
+    log_vlm_request,
+    log_vlm_response,
+    log_window_vlm_request,
+    log_window_vlm_response,
+    setup_audit_logging,
+)
+from vlm_ppe.schemas import (
+    ClusterMedoid,
+    ClusterReview,
+    EvidenceImage,
+    InterventionWindow,
+    KMetric,
+    PPEConfig,
+    PPEState,
+    WindowClassification,
+    WindowReview,
+)
 
 
 def _node(name: str, fn):
@@ -100,6 +119,88 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
     return _node("vlm_review_clusters", node)
 
 
+def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
+    def node(state: dict) -> dict:
+        current = state_model(state)
+        config = PPEConfig.model_validate(current.config)
+        medoids = [ClusterMedoid.model_validate(item) for item in state.get("medoids", [])]
+        evidence = [EvidenceImage.model_validate(item) for item in current.window_evidence_images]
+        windows = [InterventionWindow.model_validate(item) for item in current.intervention_windows]
+        windows_by_cluster: dict[int, list[InterventionWindow]] = {}
+        for window in windows:
+            windows_by_cluster.setdefault(int(window.cluster_id), []).append(window)
+
+        reviews: list[WindowReview] = []
+        review_paths: list[str] = []
+        review_dir = Path(current.run_dir) / "vlm_reviews" / "windows"
+        review_dir.mkdir(parents=True, exist_ok=True)
+
+        for medoid in sorted(medoids, key=lambda item: item.cluster_id):
+            cluster_id = int(medoid.cluster_id)
+            cluster_windows = windows_by_cluster.get(cluster_id, [])
+            prompt = window_review_prompt(cluster_id, cluster_windows)
+            cluster_evidence = _cluster_window_evidence(evidence, cluster_id)
+            offline_override = current.chosen_k_override is not None or not cluster_windows
+            log_window_vlm_request(
+                run_dir=current.run_dir,
+                cluster_id=cluster_id,
+                model=config.vlm_model,
+                prompt=prompt,
+                evidence_images=cluster_evidence,
+                windows=cluster_windows,
+                offline_override=offline_override,
+            )
+            if not cluster_windows:
+                review = WindowReview(
+                    cluster_id=cluster_id,
+                    windows=[],
+                    outlier_notes=["No deterministic candidate intervention windows were detected."],
+                    suggested_action="accept",
+                )
+            elif current.chosen_k_override is not None:
+                review = WindowReview(
+                    cluster_id=cluster_id,
+                    windows=[
+                        WindowClassification(
+                            window_id=window.window_id,
+                            class_name="other",
+                            confidence=1.0,
+                            visual_reason="Offline/manual run: candidate window detected, VLM classification bypassed.",
+                        )
+                        for window in cluster_windows
+                    ],
+                    outlier_notes=[],
+                    suggested_action="accept",
+                )
+            else:
+                client = vlm_client or OpenRouterVLMClient(model=config.vlm_model)
+                review = client.review_windows(
+                    cluster_id=cluster_id,
+                    windows=cluster_windows,
+                    evidence_images=cluster_evidence,
+                    prompt=prompt,
+                )
+            review_path = review_dir / f"cluster_{cluster_id:02d}.json"
+            review_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
+            log_window_vlm_response(run_dir=current.run_dir, review=review, response_path=review_path.as_posix())
+            reviews.append(review)
+            review_paths.append(review_path.as_posix())
+
+        return {
+            "window_reviews": [review.model_dump() for review in reviews],
+            "window_review_paths": review_paths,
+            "status": "vlm_reviewed_windows",
+        }
+
+    return _node("vlm_classify_windows", node)
+
+
+def _cluster_window_evidence(evidence: list[EvidenceImage], cluster_id: int) -> list[EvidenceImage]:
+    marker = f"Cluster {int(cluster_id)} "
+    selected = [image for image in evidence if image.caption.startswith(marker)]
+    return selected or evidence
+
+
 def _should_retry(state: dict) -> str:
     return "retry" if bool(state.get("should_retry")) else "accept"
 
@@ -116,6 +217,10 @@ def build_graph(vlm_client: ClusterReviewClient | None = None):
     graph.add_node("retry_or_accept", _node("retry_or_accept", retry_or_accept_tool))
     graph.add_node("compute_cluster_medoids", _node("compute_cluster_medoids", compute_medoids_tool))
     graph.add_node("render_medoid_report", _node("render_medoid_report", render_medoid_report_tool))
+    graph.add_node("compute_residual_windows", _node("compute_residual_windows", compute_residual_windows_tool))
+    graph.add_node("render_window_diagnostics", _node("render_window_diagnostics", render_window_diagnostics_tool))
+    graph.add_node("vlm_classify_windows", _vlm_window_review_node(vlm_client))
+    graph.add_node("validate_window_reviews", _node("validate_window_reviews", validate_window_reviews_tool))
     graph.add_node("export_state", _node("export_state", export_state_tool))
 
     graph.add_edge(START, "ingest_tracks")
@@ -132,7 +237,11 @@ def build_graph(vlm_client: ClusterReviewClient | None = None):
         {"retry": "run_candidate_clustering", "accept": "compute_cluster_medoids"},
     )
     graph.add_edge("compute_cluster_medoids", "render_medoid_report")
-    graph.add_edge("render_medoid_report", "export_state")
+    graph.add_edge("render_medoid_report", "compute_residual_windows")
+    graph.add_edge("compute_residual_windows", "render_window_diagnostics")
+    graph.add_edge("render_window_diagnostics", "vlm_classify_windows")
+    graph.add_edge("vlm_classify_windows", "validate_window_reviews")
+    graph.add_edge("validate_window_reviews", "export_state")
     graph.add_edge("export_state", END)
     return graph.compile()
 

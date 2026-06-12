@@ -9,13 +9,15 @@ import pytest
 from vlm_ppe.agents.graph import run_graph
 from vlm_ppe.agents.vlm_client import ClusterReviewClient
 from vlm_ppe.config import load_config
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric
+from vlm_ppe.geo.projection import LocalProjection
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
 
 
 class FakeReviewClient(ClusterReviewClient):
     def __init__(self, *, retry_once: bool = False) -> None:
         self.retry_once = retry_once
         self.calls = 0
+        self.window_calls = 0
 
     def review_clusters(
         self,
@@ -47,6 +49,33 @@ class FakeReviewClient(ClusterReviewClient):
             rejected_alternatives=["K=1 merges separate offsets."],
             clusters_to_recheck=[],
             retry_requested=False,
+            suggested_action="accept",
+        )
+
+    def review_windows(
+        self,
+        *,
+        cluster_id: int,
+        windows: list[InterventionWindow],
+        evidence_images: list[EvidenceImage],
+        prompt: str | None = None,
+    ) -> WindowReview:
+        self.window_calls += 1
+        assert prompt
+        assert evidence_images
+        assert windows
+        return WindowReview(
+            cluster_id=cluster_id,
+            windows=[
+                {
+                    "window_id": window.window_id,
+                    "class_name": "dogleg",
+                    "confidence": 0.82,
+                    "visual_reason": "One outward excursion and one closure back to the template.",
+                }
+                for window in windows
+            ],
+            outlier_notes=[],
             suggested_action="accept",
         )
 
@@ -126,6 +155,91 @@ def _write_fixture(tmp_path: Path) -> Path:
     return config_path
 
 
+def _write_window_fixture(tmp_path: Path) -> Path:
+    catalog_path = tmp_path / "catalog.csv"
+    compressed_path = tmp_path / "compressed.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    config_path = tmp_path / "config.yaml"
+    origin_lat = 32.0
+    origin_lon = -97.0
+    projection = LocalProjection.from_origin(origin_lat, origin_lon)
+
+    pd.DataFrame(
+        {
+            "date": ["2026-04-01"] * 3,
+            "flight_id": ["T0", "T1", "T2"],
+            "callsign": ["T0", "T1", "T2"],
+            "icao24": ["a", "b", "c"],
+            "operation": ["arrival"] * 3,
+            "runway": ["18R"] * 3,
+            "event_time": [600] * 3,
+            "event_lat": [origin_lat] * 3,
+            "event_lon": [origin_lon] * 3,
+            "threshold_lat": [origin_lat] * 3,
+            "threshold_lon": [origin_lon] * 3,
+        }
+    ).to_csv(catalog_path, index=False)
+
+    station_x = [float(value) for value in range(11)]
+    tracks_xy = {
+        "T0": [(x, 0.0) for x in station_x],
+        "T1": [(x, 3.0 if 3 <= index <= 6 else 0.0) for index, x in enumerate(station_x)],
+        "T2": [(x, -3.0 if 3 <= index <= 6 else 0.0) for index, x in enumerate(station_x)],
+    }
+    with compressed_path.open("w", encoding="utf-8") as stream:
+        for flight_id, points in tracks_xy.items():
+            x_nm = [point[0] for point in points]
+            y_nm = [point[1] for point in points]
+            lat, lon = projection.unproject_nm(x_nm, y_nm)
+            payload = {
+                "flight_id": flight_id,
+                "callsign": flight_id,
+                "icao24": flight_id.lower(),
+                "columns": ["time", "lat", "lon", "geoaltitude_m", "breakpoint_mask"],
+                "points": [
+                    [index * 60, float(lat[index]), float(lon[index]), 1000.0 - index, 3]
+                    for index in range(len(points))
+                ],
+            }
+            stream.write(json.dumps(payload) + "\n")
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "2026-04-01": {
+                    "landings_and_departures": catalog_path.as_posix(),
+                    "adsb_compressed_trajectories": compressed_path.as_posix(),
+                    "default": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path.write_text(
+        "\n".join(
+            [
+                'dataset_id: "2026-04-01"',
+                'operation: "arrival"',
+                f'manifest_path: "{manifest_path.as_posix()}"',
+                f'output_root: "{(tmp_path / "out").as_posix()}"',
+                "n_resample: 11",
+                "k_min: 1",
+                "k_max: 1",
+                "kmeans_n_init: 1",
+                "kmeans_random_state: 5",
+                "max_retries: 0",
+                'vlm_model: "google/gemini-2.5-flash"',
+                "residual_energy_lambda: 3.0",
+                "min_window_length_nm: 2.0",
+                "merge_windows_gap_nm: 1.0",
+                "heading_dispersion_threshold: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_graph_runs_through_medoid_with_fake_vlm(tmp_path: Path) -> None:
     config = load_config(_write_fixture(tmp_path))
     client = FakeReviewClient()
@@ -138,11 +252,14 @@ def test_graph_runs_through_medoid_with_fake_vlm(tmp_path: Path) -> None:
     assert Path(result["state_path"]).exists()
     assert Path(result["medoids_path"]).exists()
     assert Path(result["medoid_report_path"]).exists()
+    assert Path(result["residual_profiles_path"]).exists()
+    assert Path(result["intervention_windows_path"]).exists()
     assert Path(result["run_dir"], "audit.log").exists()
     assert Path(result["run_dir"], "vlm_interactions.jsonl").exists()
     assert Path(result["run_dir"], "vlm_reviews", "attempt_00_request.json").exists()
     assert Path(result["run_dir"], "vlm_reviews", "attempt_00_prompt.txt").exists()
     assert len(result["vlm_reviews"]) == 1
+    assert "window_reviews" in result
 
 
 def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
@@ -158,6 +275,20 @@ def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
     assert len(result["vlm_reviews"]) == 2
 
 
+def test_graph_classifies_detected_windows_with_fake_vlm(tmp_path: Path) -> None:
+    config = load_config(_write_window_fixture(tmp_path))
+    client = FakeReviewClient()
+
+    result = run_graph(config, run_id="window-run", vlm_client=client)
+
+    assert result["status"] == "complete"
+    assert client.window_calls == 1
+    assert len(result["intervention_windows"]) == 1
+    assert result["window_reviews"][0]["windows"][0]["class_name"] == "dogleg"
+    assert Path(result["window_review_paths"][0]).exists()
+    assert result["window_evidence_images"]
+
+
 def test_offline_chosen_k_bypasses_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config = load_config(_write_fixture(tmp_path))
@@ -166,6 +297,7 @@ def test_offline_chosen_k_bypasses_missing_api_key(tmp_path: Path, monkeypatch: 
 
     assert result["status"] == "complete"
     assert result["vlm_reviews"][-1]["confidence"] == 1.0
+    assert result["window_reviews"]
 
 
 def test_missing_api_key_without_override_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,3 +14,4 @@ def test_cli_smoke_runs_offline_chosen_k(tmp_path: Path, capsys) -> None:
     captured = capsys.readouterr()
     assert exit_code == 0
     assert '"status": "complete"' in captured.out
+    assert '"intervention_windows_path":' in captured.out

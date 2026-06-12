@@ -26,6 +26,10 @@ class PPEConfig(BaseModel):
     track_filter_center_lat: float | None = Field(default=None, ge=-90.0, le=90.0)
     track_filter_center_lon: float | None = Field(default=None, ge=-180.0, le=180.0)
     track_filter_radius_nm: float | None = Field(default=None, gt=0.0)
+    residual_energy_lambda: float = Field(default=3.0, gt=0.0)
+    min_window_length_nm: float = Field(default=2.0, ge=0.0)
+    merge_windows_gap_nm: float = Field(default=1.0, ge=0.0)
+    heading_dispersion_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_to_console: bool = True
 
@@ -111,6 +115,66 @@ class ClusterMedoid(BaseModel):
     template_points: list[tuple[float, float]]
 
 
+InterventionClass = Literal["no_stretch", "dogleg", "trombone", "PMS", "other"]
+
+
+class InterventionWindow(BaseModel):
+    cluster_id: int
+    window_id: str
+    start_station_index: int = Field(ge=0)
+    end_station_index: int = Field(ge=0)
+    start_s_fraction: float = Field(ge=0.0, le=1.0)
+    end_s_fraction: float = Field(ge=0.0, le=1.0)
+    start_s_nm: float = Field(ge=0.0)
+    end_s_nm: float = Field(ge=0.0)
+    length_nm: float = Field(ge=0.0)
+    peak_residual_energy_nm2: float = Field(ge=0.0)
+    peak_heading_dispersion: float = Field(ge=0.0, le=1.0)
+    trigger_reasons: list[Literal["residual_energy", "heading_dispersion"]] = Field(default_factory=list)
+    track_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_window_bounds(self) -> Self:
+        if self.end_station_index < self.start_station_index:
+            raise ValueError("end_station_index must be greater than or equal to start_station_index")
+        if self.end_s_fraction < self.start_s_fraction:
+            raise ValueError("end_s_fraction must be greater than or equal to start_s_fraction")
+        if self.end_s_nm < self.start_s_nm:
+            raise ValueError("end_s_nm must be greater than or equal to start_s_nm")
+        return self
+
+
+class WindowClassification(BaseModel):
+    window_id: str
+    class_name: InterventionClass
+    confidence: float = Field(ge=0.0, le=1.0)
+    visual_reason: str = ""
+
+    @field_validator("visual_reason")
+    @classmethod
+    def clean_visual_reason(cls, value: str) -> str:
+        return value.strip()
+
+
+class WindowReview(BaseModel):
+    cluster_id: int
+    windows: list[WindowClassification] = Field(default_factory=list)
+    outlier_notes: list[str] = Field(default_factory=list)
+    suggested_action: Literal["accept", "human_review"] = "accept"
+
+    @field_validator("outlier_notes", mode="before")
+    @classmethod
+    def coerce_outlier_notes(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("outlier_notes")
+    @classmethod
+    def clean_outlier_notes(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+
 class PPEState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -138,6 +202,12 @@ class PPEState(BaseModel):
     medoids_path: str | None = None
     medoid_summary_path: str | None = None
     medoid_report_path: str | None = None
+    residual_profiles_path: str | None = None
+    intervention_windows_path: str | None = None
+    intervention_windows: list[dict] = Field(default_factory=list)
+    window_evidence_images: list[dict] = Field(default_factory=list)
+    window_reviews: list[dict] = Field(default_factory=list)
+    window_review_paths: list[str] = Field(default_factory=list)
     status: str = "initialized"
     errors: list[dict] = Field(default_factory=list)
 
