@@ -14,8 +14,8 @@ subcluster_review_enabled: true
 subcluster_min_tracks: 4
 subcluster_k_max: 4
 subcluster_max_reviews: 64
-vlm_model: "openai/gpt-5.5"
-vlm_reasoning_effort: "medium"
+vlm_model: "google/gemini-3.5-flash"
+vlm_reasoning_effort: "high"
 window_review_max_attempts: 3
 # KDFW runway-endpoint centroid from data/kdfw_procs/kdfw-runways.txt.
 track_filter_center_lat: 32.897102378968
