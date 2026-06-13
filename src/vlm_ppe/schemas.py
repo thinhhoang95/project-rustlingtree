@@ -23,6 +23,7 @@ class PPEConfig(BaseModel):
     max_k_expansion: int = Field(default=12, ge=1)
     vlm_model: str = "google/gemini-2.5-flash"
     window_review_max_attempts: int = Field(default=3, ge=1, le=10)
+    window_review_max_patterns: int = Field(default=8, ge=1, le=20)
     min_track_points: int = Field(default=2, ge=2)
     track_filter_center_lat: float | None = Field(default=None, ge=-90.0, le=90.0)
     track_filter_center_lon: float | None = Field(default=None, ge=-180.0, le=180.0)
@@ -170,8 +171,10 @@ class WindowProposal(BaseModel):
 
 class WindowReview(BaseModel):
     cluster_id: int
+    pattern_count: int | None = Field(default=None, ge=0)
     windows: list[WindowProposal] = Field(default_factory=list)
     outlier_notes: list[str] = Field(default_factory=list)
+    all_patterns_identified: bool = False
     suggested_action: Literal["accept", "revise", "human_review"] = "accept"
 
     @field_validator("outlier_notes", mode="before")

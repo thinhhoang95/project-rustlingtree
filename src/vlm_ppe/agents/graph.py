@@ -41,6 +41,7 @@ from vlm_ppe.schemas import (
     KMetric,
     PPEConfig,
     PPEState,
+    WindowProposal,
     WindowReview,
 )
 
@@ -136,65 +137,126 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
         for medoid in sorted(medoids, key=lambda item: item.cluster_id):
             cluster_id = int(medoid.cluster_id)
             baseline_evidence = _cluster_window_evidence(evidence, cluster_id)
-            highlighted_evidence: list[EvidenceImage] = []
-            previous_review_json: str | None = None
-            final_review: WindowReview | None = None
+            accepted_windows: list[WindowProposal] = []
+            outlier_notes: list[str] = []
+            pattern_count: int | None = None
+            all_patterns_identified = False
+            final_action = "accept"
+            global_attempt = 0
+            max_patterns = int(config.window_review_max_patterns)
 
-            for attempt in range(max_attempts):
-                prompt = window_review_prompt(
-                    cluster_id,
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    previous_review_json=previous_review_json,
-                )
-                attempt_evidence = [*baseline_evidence, *highlighted_evidence]
-                log_window_vlm_request(
-                    run_dir=current.run_dir,
-                    cluster_id=cluster_id,
-                    attempt=attempt,
-                    model=config.vlm_model,
-                    prompt=prompt,
-                    evidence_images=attempt_evidence,
-                    offline_override=False,
-                )
-                review = client.review_windows(
-                    cluster_id=cluster_id,
-                    evidence_images=attempt_evidence,
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    previous_review_json=previous_review_json,
-                    prompt=prompt,
-                )
-                if int(review.cluster_id) != cluster_id:
-                    raise ValueError(f"window review returned cluster_id={review.cluster_id}; expected {cluster_id}")
-                review_path = review_dir / f"cluster_{cluster_id:02d}_attempt_{attempt:02d}.json"
-                review_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
-                log_window_vlm_response(
-                    run_dir=current.run_dir,
-                    attempt=attempt,
-                    review=review,
-                    response_path=review_path.as_posix(),
-                )
-                review_paths.append(review_path.as_posix())
-                final_review = review
+            while len(accepted_windows) < max_patterns:
+                highlighted_evidence: list[EvidenceImage] = []
+                previous_review_json: str | None = None
+                final_pattern_review: WindowReview | None = None
 
-                should_confirm_highlight = attempt == 0 and bool(review.windows)
-                should_revise = review.suggested_action == "revise"
-                can_continue = attempt < max_attempts - 1
-                if not can_continue or review.suggested_action == "human_review" or not (should_confirm_highlight or should_revise):
+                for attempt in range(max_attempts):
+                    accepted_windows_json = _window_proposals_json(accepted_windows)
+                    prompt = window_review_prompt(
+                        cluster_id,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        previous_review_json=previous_review_json,
+                        accepted_windows_json=accepted_windows_json,
+                        pattern_index=len(accepted_windows) + 1,
+                        pattern_count=pattern_count,
+                    )
+                    attempt_evidence = [*baseline_evidence, *highlighted_evidence]
+                    logged_attempt = global_attempt
+                    log_window_vlm_request(
+                        run_dir=current.run_dir,
+                        cluster_id=cluster_id,
+                        attempt=logged_attempt,
+                        model=config.vlm_model,
+                        prompt=prompt,
+                        evidence_images=attempt_evidence,
+                        offline_override=False,
+                    )
+                    review = client.review_windows(
+                        cluster_id=cluster_id,
+                        evidence_images=attempt_evidence,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        previous_review_json=previous_review_json,
+                        prompt=prompt,
+                    )
+                    if int(review.cluster_id) != cluster_id:
+                        raise ValueError(f"window review returned cluster_id={review.cluster_id}; expected {cluster_id}")
+                    review = _normalize_window_ids(cluster_id, review, accepted_windows)
+                    if review.pattern_count is not None:
+                        pattern_count = int(review.pattern_count)
+                    outlier_notes.extend(review.outlier_notes)
+                    all_patterns_identified = all_patterns_identified or review.all_patterns_identified
+                    final_action = review.suggested_action
+                    review_path = review_dir / f"cluster_{cluster_id:02d}_attempt_{logged_attempt:02d}.json"
+                    review_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
+                    log_window_vlm_response(
+                        run_dir=current.run_dir,
+                        attempt=logged_attempt,
+                        review=review,
+                        response_path=review_path.as_posix(),
+                    )
+                    review_paths.append(review_path.as_posix())
+                    final_pattern_review = review
+                    global_attempt += 1
+
+                    should_confirm_highlight = attempt == 0 and bool(review.windows)
+                    should_revise = review.suggested_action == "revise"
+                    can_continue = attempt < max_attempts - 1
+                    if (
+                        not can_continue
+                        or review.suggested_action == "human_review"
+                        or not (should_confirm_highlight or should_revise)
+                    ):
+                        break
+
+                    previous_review_json = review.model_dump_json()
+                    highlighted_review = WindowReview(
+                        cluster_id=cluster_id,
+                        pattern_count=pattern_count,
+                        windows=[*accepted_windows, *review.windows],
+                        outlier_notes=review.outlier_notes,
+                        all_patterns_identified=review.all_patterns_identified,
+                        suggested_action=review.suggested_action,
+                    )
+                    highlighted_evidence = render_window_review_diagnostics(
+                        state,
+                        highlighted_review,
+                        proposal_attempt=logged_attempt,
+                    )
+                    all_evidence.extend(highlighted_evidence)
+
+                if final_pattern_review is None:
+                    break
+                if final_pattern_review.suggested_action == "human_review":
+                    break
+                if not final_pattern_review.windows:
+                    all_patterns_identified = True
                     break
 
-                previous_review_json = review.model_dump_json()
-                highlighted_evidence = render_window_review_diagnostics(
-                    state,
-                    review,
-                    proposal_attempt=attempt,
-                )
-                all_evidence.extend(highlighted_evidence)
+                accepted_windows.extend(final_pattern_review.windows)
 
-            if final_review is None:
+                # Backward compatibility: older clients that omit pattern_count
+                # are interpreted as returning the complete current best list.
+                if pattern_count is None:
+                    all_patterns_identified = True
+                    break
+                if all_patterns_identified or len(accepted_windows) >= pattern_count:
+                    all_patterns_identified = True
+                    break
+
+            if global_attempt == 0:
                 raise ValueError(f"window review did not run for cluster_id={cluster_id}")
-            reviews.append(final_review)
+            reviews.append(
+                WindowReview(
+                    cluster_id=cluster_id,
+                    pattern_count=pattern_count,
+                    windows=accepted_windows,
+                    outlier_notes=_dedupe_text(outlier_notes),
+                    all_patterns_identified=all_patterns_identified,
+                    suggested_action=final_action,
+                )
+            )
 
         return {
             "window_evidence_images": [item.model_dump() for item in all_evidence],
@@ -210,6 +272,39 @@ def _cluster_window_evidence(evidence: list[EvidenceImage], cluster_id: int) -> 
     marker = f"Cluster {int(cluster_id)} "
     selected = [image for image in evidence if image.caption.startswith(marker)]
     return selected or evidence
+
+
+def _window_proposals_json(windows: list[WindowProposal]) -> str | None:
+    if not windows:
+        return None
+    return "[" + ",".join(window.model_dump_json() for window in windows) + "]"
+
+
+def _normalize_window_ids(cluster_id: int, review: WindowReview, accepted_windows: list[WindowProposal]) -> WindowReview:
+    used = {window.window_id for window in accepted_windows}
+    normalized: list[WindowProposal] = []
+    next_index = len(used) + 1
+    for window in review.windows:
+        if window.window_id in used:
+            while f"C{cluster_id}_W{next_index}" in used:
+                next_index += 1
+            window = window.model_copy(update={"window_id": f"C{cluster_id}_W{next_index}"})
+        used.add(window.window_id)
+        normalized.append(window)
+    if normalized == review.windows:
+        return review
+    return review.model_copy(update={"windows": normalized})
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        text = item.strip()
+        if text and text not in seen:
+            seen.add(text)
+            deduped.append(text)
+    return deduped
 
 
 def _should_retry(state: dict) -> str:

@@ -18,8 +18,11 @@ def test_window_review_prompt_uses_literal_classification_example() -> None:
     assert '"class_name": "dogleg"' in prompt
     assert '"start_station_index": 32' in prompt
     assert '"end_station_index": 61' in prompt
+    assert '"pattern_count": 2' in prompt
+    assert '"all_patterns_identified": false' in prompt
     assert '"outlier_notes": ["Two tracks appear visually different from the main window pattern."]' in prompt
-    assert "Your task is to propose the intervention window boundaries" in prompt
+    assert "Your task is to count distinct intervention patterns" in prompt
+    assert "The window must be tight" in prompt
     assert "unhighlighted residual diagnostics" in prompt
 
 
@@ -28,6 +31,7 @@ def test_window_review_prompt_describes_highlight_revision_attempt() -> None:
 
     assert "highlighted diagnostic image based on your previous proposal" in prompt
     assert 'suggested_action set to "revise"' in prompt
+    assert "If the highlighted window range is tight" in prompt
     assert 'Previous window proposal JSON: {"cluster_id":2}' in prompt
 
 

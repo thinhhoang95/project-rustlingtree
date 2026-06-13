@@ -37,28 +37,42 @@ def window_review_prompt(
     attempt: int = 0,
     max_attempts: int = 3,
     previous_review_json: str | None = None,
+    accepted_windows_json: str | None = None,
+    pattern_index: int = 1,
+    pattern_count: int | None = None,
 ) -> str:
     attempt_block = (
-        f"Attempt {attempt + 1} of {max_attempts}. This first attempt uses unhighlighted residual diagnostics. "
-        "If you return one or more windows, the graph will render your proposed range highlighted and send it back "
-        "for confirmation or revision.\n"
+        f"Attempt {attempt + 1} of {max_attempts} for the current unconfirmed pattern. "
+        "This first attempt uses unhighlighted residual diagnostics. First estimate how many distinct intervention "
+        "patterns/windows exist in this cluster, then return the next unconfirmed pattern only. If you return a "
+        "window, the graph will render your proposed range highlighted and send it back for confirmation or revision.\n"
         if attempt == 0
         else (
-            f"Attempt {attempt + 1} of {max_attempts}. You are now seeing both the original residual diagnostics "
-            "and a highlighted diagnostic image based on your previous proposal. If the highlighted window range is "
-            'correct, return suggested_action set to "accept". If it is wrong, return a revised complete window list '
-            'with suggested_action set to "revise".\n'
+            f"Attempt {attempt + 1} of {max_attempts} for the current unconfirmed pattern. "
+            "You are now seeing both the original residual diagnostics and a highlighted diagnostic image based on "
+            "your previous proposal. If the highlighted window range is tight, return suggested_action set to "
+            '"accept". If it starts too early, ends too late, misses part of the pattern, or includes quiet common-flow '
+            'sections, return the adjusted current window with suggested_action set to "revise".\n'
         )
     )
     previous_block = f"Previous window proposal JSON: {previous_review_json}\n\n" if previous_review_json else ""
+    accepted_block = f"Already accepted windows JSON: {accepted_windows_json}\n\n" if accepted_windows_json else ""
+    count_block = (
+        f"Previously estimated pattern_count: {pattern_count}. Return the same count unless the evidence clearly shows it was wrong.\n"
+        if pattern_count is not None
+        else "Estimate pattern_count before choosing boundaries. pattern_count is the total number of distinct intervention windows in this cluster.\n"
+    )
     return (
         "You are reviewing one VLM-PPE trajectory cluster.\n"
         "Use only the provided ADS-B trajectory plots, medoid overlay, residual-energy curve, heading-dispersion curve, "
         "and station-index labels. Do not infer from AIP charts.\n"
-        "Your task is to propose the intervention window boundaries and classify the pattern at the same time.\n"
+        "Your task is to count distinct intervention patterns, then propose and classify tight intervention window boundaries.\n"
         "Use station indices shown on the diagnostic plot. Return no windows if the cluster has no meaningful intervention.\n\n"
         f"{attempt_block}"
         f"{previous_block}"
+        f"{accepted_block}"
+        f"{count_block}"
+        f"Current unconfirmed pattern number: {pattern_index}.\n\n"
         "Class definitions:\n"
         "- no_stretch: no meaningful deviation program; max cross-track deviation and added path length appear small.\n"
         "- dogleg: one outward vector-like leg followed by one closure/rejoin leg.\n"
@@ -69,13 +83,18 @@ def window_review_prompt(
         "Window boundary rules:\n"
         "- start_station_index and end_station_index must be integers from the plotted station axis.\n"
         "- end_station_index must be greater than or equal to start_station_index.\n"
-        "- Pick the smallest station interval that covers the visually meaningful maneuver.\n"
-        "- Do not pad the window to include quiet common-flow sections unless they are needed for the pattern.\n"
-        "- Always return the full current best window list, not only edits from a previous attempt.\n\n"
+        "- The window must be tight: start exactly where the pattern begins and end exactly where it rejoins common flow.\n"
+        "- Pick the smallest station interval that covers the visually meaningful maneuver, no longer and no shorter.\n"
+        "- Do not pad the window to include quiet common-flow sections unless they are part of the pattern.\n"
+        "- If the highlighted range is not tight enough, use this attempt to adjust the station range.\n"
+        "- Do not duplicate already accepted windows.\n"
+        "- Return only the current unconfirmed pattern in windows; accepted windows are provided only as context.\n"
+        "- If all patterns have already been identified, return windows as [] and all_patterns_identified as true.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item:\n"
         "{\n"
         f'  "cluster_id": {cluster_id},\n'
+        '  "pattern_count": 2,\n'
         '  "windows": [\n'
         "    {\n"
         '      "window_id": "C2_W1",\n'
@@ -87,6 +106,7 @@ def window_review_prompt(
         "    }\n"
         "  ],\n"
         '  "outlier_notes": ["Two tracks appear visually different from the main window pattern."],\n'
+        '  "all_patterns_identified": false,\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )

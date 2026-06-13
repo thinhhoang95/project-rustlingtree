@@ -104,6 +104,56 @@ class FakeReviewClient(ClusterReviewClient):
         )
 
 
+class MultiPatternReviewClient(FakeReviewClient):
+    def __init__(self) -> None:
+        super().__init__(propose_window=True)
+        self.window_prompts: list[str] = []
+
+    def review_windows(
+        self,
+        *,
+        cluster_id: int,
+        evidence_images: list[EvidenceImage],
+        attempt: int = 0,
+        max_attempts: int = 3,
+        previous_review_json: str | None = None,
+        prompt: str | None = None,
+    ) -> WindowReview:
+        self.window_calls += 1
+        assert prompt
+        self.window_prompts.append(prompt)
+        assert evidence_images
+        assert attempt < max_attempts
+
+        pattern_number = 2 if "Current unconfirmed pattern number: 2." in prompt else 1
+        if pattern_number == 2:
+            assert "Already accepted windows JSON" in prompt
+
+        start = 2 if attempt == 0 else 3
+        end = 8 if attempt == 0 else 6
+        if pattern_number == 2:
+            start = 7 if attempt == 0 else 8
+            end = 10 if attempt == 0 else 9
+
+        return WindowReview(
+            cluster_id=cluster_id,
+            pattern_count=2,
+            windows=[
+                {
+                    "window_id": f"C{cluster_id}_W{pattern_number}",
+                    "start_station_index": start,
+                    "end_station_index": end,
+                    "class_name": "dogleg" if pattern_number == 1 else "trombone",
+                    "confidence": 0.74 if attempt == 0 else 0.86,
+                    "visual_reason": "Tight after highlighted confirmation." if attempt else "First pass needs highlighting.",
+                }
+            ],
+            outlier_notes=[],
+            all_patterns_identified=pattern_number == 2 and attempt > 0,
+            suggested_action="accept",
+        )
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     catalog_path = tmp_path / "catalog.csv"
     compressed_path = tmp_path / "compressed.jsonl"
@@ -311,6 +361,23 @@ def test_graph_enriches_vlm_proposed_windows(tmp_path: Path) -> None:
     assert all(Path(path).exists() for path in result["window_review_paths"])
     assert result["window_evidence_images"]
     assert any("highlighted" in image["caption"] for image in result["window_evidence_images"])
+
+
+def test_graph_loops_until_declared_window_patterns_are_identified(tmp_path: Path) -> None:
+    config = load_config(_write_window_fixture(tmp_path))
+    client = MultiPatternReviewClient()
+
+    result = run_graph(config, run_id="multi-window-run", vlm_client=client)
+
+    assert result["status"] == "complete"
+    assert client.window_calls == 4
+    assert len(result["intervention_windows"]) == 2
+    assert [window["window_id"] for window in result["intervention_windows"]] == ["C0_W1", "C0_W2"]
+    assert [window["start_station_index"] for window in result["intervention_windows"]] == [3, 8]
+    assert [window["end_station_index"] for window in result["intervention_windows"]] == [6, 9]
+    assert result["window_reviews"][0]["pattern_count"] == 2
+    assert result["window_reviews"][0]["all_patterns_identified"] is True
+    assert any("Current unconfirmed pattern number: 2." in prompt for prompt in client.window_prompts)
 
 
 def test_chosen_k_override_still_uses_fake_vlm_for_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
