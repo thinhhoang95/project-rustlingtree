@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from vlm_ppe.clustering.features import build_shape_features, load_features, write_features
+from vlm_ppe.agents.prompts import subcluster_review_prompt
+from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
+from vlm_ppe.clustering.features import build_shape_features, load_features, subset_features, write_features
 from vlm_ppe.clustering.kmeans_runner import load_labels, run_candidate_kmeans, write_clustering_runs
 from vlm_ppe.clustering.medoid import compute_cluster_medoids, write_medoids
 from vlm_ppe.clustering.residual_windows import (
@@ -20,7 +22,7 @@ from vlm_ppe.diagnostics.report import write_medoid_report
 from vlm_ppe.io.adsb_loader import ingest_adsb_tracks
 from vlm_ppe.io.parquet_store import read_parquet, write_parquet
 from vlm_ppe.processing import resample_track_frame
-from vlm_ppe.audit import log_graph_event
+from vlm_ppe.audit import log_graph_event, log_subcluster_vlm_request, log_subcluster_vlm_response
 from vlm_ppe.schemas import (
     ClusterMedoid,
     ClusterReview,
@@ -159,12 +161,253 @@ def retry_or_accept_tool(state: dict) -> dict:
     return {"status": "cluster_choice_accepted", "should_retry": False}
 
 
+def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | None = None) -> dict:
+    current = state_model(state)
+    config = config_model(state)
+    if current.features_path is None or current.resampled_tracks_path is None:
+        raise ValueError("features and resampled tracks are required before subcluster refinement")
+    if current.clustering_dir is None or current.chosen_k is None:
+        raise ValueError("clustering_dir and chosen_k are required before subcluster refinement")
+
+    base_labels = load_labels(current.clustering_dir, current.chosen_k)
+    base_labels["flight_id"] = base_labels["flight_id"].astype(str)
+    base_labels["cluster_id"] = base_labels["cluster_id"].astype(int)
+    features = load_features(current.features_path)
+    resampled = read_parquet(current.resampled_tracks_path)
+
+    final_assignments: list[dict[str, object]] = []
+    tree_nodes: list[dict[str, object]] = []
+    review_paths: list[str] = []
+    reviews: list[dict[str, object]] = []
+    review_count = 0
+    final_cluster_id = 0
+    resolved_client: ClusterReviewClient | None = None
+
+    def client() -> ClusterReviewClient:
+        nonlocal resolved_client
+        if resolved_client is None:
+            resolved_client = vlm_client or OpenRouterVLMClient(
+                model=config.vlm_model,
+                reasoning_effort=config.vlm_reasoning_effort,
+            )
+        return resolved_client
+
+    def lineage_label(lineage: list[int]) -> str:
+        return ".".join(str(item) for item in lineage)
+
+    def accept_leaf(node: dict[str, object], track_ids: list[str], reason: str) -> dict[str, object]:
+        nonlocal final_cluster_id
+        leaf_cluster_id = final_cluster_id
+        final_cluster_id += 1
+        node["status"] = "accepted_leaf"
+        node["stop_reason"] = reason
+        node["final_cluster_id"] = leaf_cluster_id
+        for track_id in track_ids:
+            final_assignments.append({"flight_id": track_id, "cluster_id": leaf_cluster_id})
+        return node
+
+    def inspect_node(track_ids: list[str], *, root_cluster_id: int, lineage: list[int], depth: int) -> dict[str, object]:
+        nonlocal review_count
+        node_id = f"node_{len(tree_nodes):04d}"
+        node: dict[str, object] = {
+            "node_id": node_id,
+            "root_cluster_id": int(root_cluster_id),
+            "lineage": [int(item) for item in lineage],
+            "depth": int(depth),
+            "n_tracks": len(track_ids),
+            "track_ids": list(track_ids),
+            "children": [],
+        }
+        tree_nodes.append(node)
+
+        if not config.subcluster_review_enabled:
+            return accept_leaf(node, track_ids, "subcluster review disabled")
+        if depth >= 1:
+            return accept_leaf(node, track_ids, "subcluster depth 1 reached")
+        if len(track_ids) < config.subcluster_min_tracks:
+            return accept_leaf(node, track_ids, "below subcluster minimum track count")
+        if len(track_ids) < 2:
+            return accept_leaf(node, track_ids, "fewer than two tracks")
+        if review_count >= config.subcluster_max_reviews:
+            return accept_leaf(node, track_ids, "subcluster review budget exhausted")
+
+        local_k_max = min(int(config.subcluster_k_max), len(track_ids))
+        available_k = list(range(1, local_k_max + 1))
+        if len(available_k) <= 1:
+            return accept_leaf(node, track_ids, "only K=1 is available")
+
+        local_features = subset_features(features, track_ids)
+        runs = run_candidate_kmeans(
+            local_features,
+            k_min=1,
+            k_max=local_k_max,
+            n_init=config.kmeans_n_init,
+            random_state=config.kmeans_random_state + review_count,
+        )
+        clustering_dir = Path(current.run_dir) / "clustering" / "subclusters" / node_id
+        metrics_path, clustering_dir_path = write_clustering_runs(runs, local_features.track_ids, clustering_dir)
+        evidence_dir = Path(current.run_dir) / "evidence" / "subclustering" / node_id
+        evidence = render_cluster_panels(resampled, runs, local_features.track_ids, evidence_dir)
+        evidence = [
+            image.model_copy(
+                update={
+                    "kind": "subcluster_panel",
+                    "caption": (
+                        f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: {image.caption}"
+                    ),
+                }
+            )
+            for image in evidence
+        ]
+        metrics_image = render_metrics_chart(runs, evidence_dir).model_copy(
+            update={
+                "kind": "subcluster_metrics_chart",
+                "caption": f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: inertia and silhouette by K",
+            }
+        )
+        evidence.append(metrics_image)
+        metrics = [run.metric for run in runs]
+        prompt = subcluster_review_prompt(
+            metrics,
+            available_k,
+            root_cluster_id=root_cluster_id,
+            lineage=lineage,
+            depth=depth,
+            n_tracks=len(track_ids),
+            min_tracks=config.subcluster_min_tracks,
+        )
+        log_subcluster_vlm_request(
+            run_dir=current.run_dir,
+            node_id=node_id,
+            root_cluster_id=root_cluster_id,
+            lineage=lineage,
+            depth=depth,
+            model=config.vlm_model,
+            prompt=prompt,
+            evidence_images=evidence,
+            metrics=metrics,
+            available_k=available_k,
+        )
+        review_count += 1
+        review = client().review_clusters(
+            evidence_images=evidence,
+            metrics=metrics,
+            available_k=available_k,
+            attempt=0,
+            max_retries=0,
+            prompt=prompt,
+        )
+        if int(review.chosen_k) not in set(available_k):
+            raise ValueError(
+                f"subcluster review for {node_id} chose unavailable K={review.chosen_k}; available={available_k}"
+            )
+        review_dir = Path(current.run_dir) / "vlm_reviews" / "subclusters"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        review_path = review_dir / f"{node_id}.json"
+        review_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
+        log_subcluster_vlm_response(
+            run_dir=current.run_dir,
+            node_id=node_id,
+            root_cluster_id=root_cluster_id,
+            lineage=lineage,
+            depth=depth,
+            review=review,
+            response_path=review_path.as_posix(),
+        )
+        review_paths.append(review_path.as_posix())
+        reviews.append(
+            {
+                "node_id": node_id,
+                "root_cluster_id": int(root_cluster_id),
+                "lineage": [int(item) for item in lineage],
+                "depth": int(depth),
+                "review": review.model_dump(),
+            }
+        )
+        node.update(
+            {
+                "status": "reviewed",
+                "k_metrics_path": metrics_path,
+                "clustering_dir": clustering_dir_path,
+                "evidence_images": [image.model_dump() for image in evidence],
+                "chosen_k": int(review.chosen_k),
+                "review_path": review_path.as_posix(),
+            }
+        )
+
+        if review.suggested_action == "human_review":
+            return accept_leaf(node, track_ids, "subcluster review requested human review")
+        if int(review.chosen_k) <= 1:
+            return accept_leaf(node, track_ids, "VLM chose K=1")
+
+        chosen_labels = load_labels(clustering_dir_path, int(review.chosen_k))
+        chosen_labels["flight_id"] = chosen_labels["flight_id"].astype(str)
+        chosen_labels["cluster_id"] = chosen_labels["cluster_id"].astype(int)
+        child_node_ids: list[str] = []
+        for child_cluster_id in sorted(chosen_labels["cluster_id"].unique()):
+            child_track_ids = (
+                chosen_labels.loc[chosen_labels["cluster_id"] == int(child_cluster_id), "flight_id"]
+                .astype(str)
+                .tolist()
+            )
+            child_node = inspect_node(
+                child_track_ids,
+                root_cluster_id=root_cluster_id,
+                lineage=[*lineage, int(child_cluster_id)],
+                depth=depth + 1,
+            )
+            child_node_ids.append(str(child_node["node_id"]))
+        node["children"] = child_node_ids
+        node["status"] = "split"
+        return node
+
+    for root_cluster_id in sorted(base_labels["cluster_id"].unique()):
+        root_track_ids = (
+            base_labels.loc[base_labels["cluster_id"] == int(root_cluster_id), "flight_id"].astype(str).tolist()
+        )
+        inspect_node(root_track_ids, root_cluster_id=int(root_cluster_id), lineage=[int(root_cluster_id)], depth=0)
+
+    order_by_track_id = {track_id: index for index, track_id in enumerate(features.track_ids)}
+    refined = pd.DataFrame(final_assignments)
+    refined["_order"] = refined["flight_id"].map(order_by_track_id)
+    refined = refined.sort_values("_order", kind="stable").drop(columns=["_order"])
+
+    output_dir = Path(current.run_dir) / "clustering"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    assignments_path = output_dir / "refined_cluster_assignments.csv"
+    refined.to_csv(assignments_path, index=False)
+    tree_path = output_dir / "subcluster_tree.json"
+    tree_payload = {
+        "enabled": bool(config.subcluster_review_enabled),
+        "global_chosen_k": int(current.chosen_k),
+        "final_cluster_count": int(final_cluster_id),
+        "review_count": int(review_count),
+        "nodes": tree_nodes,
+    }
+    with tree_path.open("w", encoding="utf-8") as stream:
+        json.dump(tree_payload, stream, indent=2)
+
+    return {
+        "cluster_assignments_path": assignments_path.as_posix(),
+        "subcluster_tree_path": tree_path.as_posix(),
+        "subcluster_reviews": reviews,
+        "subcluster_review_paths": review_paths,
+        "final_cluster_count": final_cluster_id,
+        "status": "subclusters_refined",
+    }
+
+
 def compute_medoids_tool(state: dict) -> dict:
     current = state_model(state)
-    if current.resampled_tracks_path is None or current.clustering_dir is None or current.chosen_k is None:
-        raise ValueError("resampled tracks, clustering_dir, and chosen_k are required before medoid extraction")
+    if current.resampled_tracks_path is None:
+        raise ValueError("resampled tracks are required before medoid extraction")
     resampled = read_parquet(current.resampled_tracks_path)
-    labels = load_labels(current.clustering_dir, current.chosen_k)
+    if current.cluster_assignments_path is not None:
+        labels = pd.read_csv(current.cluster_assignments_path)
+    elif current.clustering_dir is not None and current.chosen_k is not None:
+        labels = load_labels(current.clustering_dir, current.chosen_k)
+    else:
+        raise ValueError("cluster assignments or chosen clustering outputs are required before medoid extraction")
     medoids = compute_cluster_medoids(resampled, labels)
     templates_dir = Path(current.run_dir) / "templates"
     medoids_path, summary_path = write_medoids(medoids, templates_dir)

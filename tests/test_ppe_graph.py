@@ -345,6 +345,28 @@ def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
     assert len(result["vlm_reviews"]) == 2
 
 
+def test_graph_refines_subclusters_before_medoids(tmp_path: Path) -> None:
+    config = load_config(_write_fixture(tmp_path)).model_copy(
+        update={
+            "subcluster_min_tracks": 2,
+            "subcluster_k_max": 2,
+        }
+    )
+    client = FakeReviewClient()
+
+    result = run_graph(config, run_id="subcluster-run", vlm_client=client)
+
+    labels = pd.read_csv(result["cluster_assignments_path"])
+    tree = json.loads(Path(result["subcluster_tree_path"]).read_text(encoding="utf-8"))
+    assert result["status"] == "complete"
+    assert client.calls == 3
+    assert result["final_cluster_count"] == 4
+    assert labels["cluster_id"].nunique() == 4
+    assert tree["review_count"] == 2
+    assert len(result["subcluster_review_paths"]) == 2
+    assert all(Path(path).exists() for path in result["subcluster_review_paths"])
+
+
 def test_graph_enriches_vlm_proposed_windows(tmp_path: Path) -> None:
     config = load_config(_write_window_fixture(tmp_path))
     client = FakeReviewClient(propose_window=True)

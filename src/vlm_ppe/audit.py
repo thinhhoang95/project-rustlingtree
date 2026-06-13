@@ -219,6 +219,105 @@ def log_vlm_response(
         logger.info("VLM rationale %02d: %s", index, rationale)
 
 
+def log_subcluster_vlm_request(
+    *,
+    run_dir: str | Path,
+    node_id: str,
+    root_cluster_id: int,
+    lineage: list[int],
+    depth: int,
+    model: str,
+    prompt: str,
+    evidence_images: list[EvidenceImage],
+    metrics: list[KMetric],
+    available_k: list[int],
+) -> str:
+    root = Path(run_dir)
+    review_dir = root / "vlm_reviews" / "subclusters"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    stem = str(node_id)
+    image_records = [_image_record(image) for image in evidence_images]
+    prompt_path = review_dir / f"{stem}_prompt.txt"
+    request_path = review_dir / f"{stem}_request.json"
+    request_payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_subcluster_request",
+        "node_id": stem,
+        "root_cluster_id": int(root_cluster_id),
+        "lineage": [int(item) for item in lineage],
+        "depth": int(depth),
+        "model": model,
+        "available_k": available_k,
+        "prompt_path": prompt_path.as_posix(),
+        "images": image_records,
+        "metrics": [metric.model_dump() for metric in metrics],
+    }
+    prompt_path.write_text(prompt, encoding="utf-8")
+    with request_path.open("w", encoding="utf-8") as stream:
+        json.dump(_json_safe({**request_payload, "prompt": prompt}), stream, indent=2, ensure_ascii=False)
+    _append_jsonl(root / "vlm_interactions.jsonl", request_payload)
+
+    logger = get_audit_logger(root)
+    logger.info(
+        "VLM subcluster review prepared: node=%s root_cluster=%s depth=%s available_k=%s images=%d",
+        stem,
+        root_cluster_id,
+        depth,
+        available_k,
+        len(image_records),
+    )
+    for index, image in enumerate(image_records, start=1):
+        logger.info(
+            "VLM subcluster image %02d/%02d node=%s kind=%s exists=%s bytes=%s path=%s caption=%s",
+            index,
+            len(image_records),
+            stem,
+            image["kind"],
+            image["exists"],
+            image["bytes"],
+            image["path"],
+            image["caption"],
+        )
+    return request_path.as_posix()
+
+
+def log_subcluster_vlm_response(
+    *,
+    run_dir: str | Path,
+    node_id: str,
+    root_cluster_id: int,
+    lineage: list[int],
+    depth: int,
+    review: ClusterReview,
+    response_path: str,
+) -> None:
+    root = Path(run_dir)
+    payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_subcluster_response",
+        "node_id": str(node_id),
+        "root_cluster_id": int(root_cluster_id),
+        "lineage": [int(item) for item in lineage],
+        "depth": int(depth),
+        "response_path": response_path,
+        "review": review.model_dump(),
+    }
+    _append_jsonl(root / "vlm_interactions.jsonl", payload)
+    logger = get_audit_logger(root)
+    logger.info(
+        "VLM subcluster response: node=%s root_cluster=%s depth=%s chosen_k=%s confidence=%.3f action=%s response=%s",
+        node_id,
+        root_cluster_id,
+        depth,
+        review.chosen_k,
+        review.confidence,
+        review.suggested_action,
+        response_path,
+    )
+    for index, rationale in enumerate(review.rationale, start=1):
+        logger.info("VLM subcluster rationale node=%s %02d: %s", node_id, index, rationale)
+
+
 def log_window_vlm_request(
     *,
     run_dir: str | Path,

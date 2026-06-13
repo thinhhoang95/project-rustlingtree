@@ -4,7 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
 from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
@@ -45,10 +45,12 @@ class OpenRouterVLMClient:
         model: str,
         api_key: str | None = None,
         base_url: str | None = None,
+        reasoning_effort: Literal["low", "medium", "high"] | None = "medium",
         app_referer: str | None = None,
         app_title: str | None = None,
     ) -> None:
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required for VLM-led runs")
@@ -101,12 +103,15 @@ class OpenRouterVLMClient:
             contents.append({"type": "text", "text": f"Image: {image.caption}"})
             contents.append({"type": "image_url", "image_url": {"url": _image_data_url(Path(image.path))}})
 
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": contents}],
-            response_format={"type": "json_object"},
-            extra_headers=_openrouter_headers(self.app_referer, self.app_title),
-        )
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": contents}],
+            "response_format": {"type": "json_object"},
+            "extra_headers": _openrouter_headers(self.app_referer, self.app_title),
+        }
+        if self.reasoning_effort is not None:
+            request["extra_body"] = {"reasoning": {"effort": self.reasoning_effort}}
+        response = client.chat.completions.create(**request)
         text = _message_text(response.choices[0].message.content)
         if not text:
             raise ValueError("OpenRouter response did not contain text")

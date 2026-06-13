@@ -225,7 +225,15 @@ Meaning:
 - `kmeans_random_state`: deterministic clustering seed.
 - `max_retries`: maximum VLM-requested reclustering attempts.
 - `max_k_expansion`: upper bound if the VLM requests a larger `Kmax`.
-- `vlm_model`: Gemini model name.
+- `subcluster_review_enabled`: whether accepted global clusters are reviewed for
+  one local subcluster split before medoid extraction.
+- `subcluster_min_tracks`: minimum track count required before a leaf cluster is
+  eligible for a VLM-guided local KMeans review.
+- `subcluster_k_max`: maximum local K considered for each subcluster review.
+- `subcluster_max_reviews`: maximum number of subcluster VLM reviews in one run.
+- `vlm_model`: OpenRouter model slug.
+- `vlm_reasoning_effort`: OpenRouter reasoning effort for reasoning-capable
+  models.
 - `window_review_max_attempts`: maximum VLM attempts per cluster for proposing,
   viewing the highlighted proposal, and revising residual-window bounds.
 - `track_filter_center_lat`, `track_filter_center_lon`: optional center of the
@@ -295,7 +303,8 @@ START
   -> validate_review
   -> retry_or_accept
        -> run_candidate_clustering, if retry requested and allowed
-       -> compute_cluster_medoids, otherwise
+       -> refine_subclusters, otherwise
+  -> compute_cluster_medoids
   -> render_medoid_report
   -> compute_residual_profiles
   -> render_window_diagnostics
@@ -324,6 +333,8 @@ Key state fields include:
 - `vlm_reviews`
 - `chosen_k`
 - `cluster_assignments_path`
+- `subcluster_tree_path`
+- `subcluster_review_paths`
 - `medoids_path`
 - `medoid_summary_path`
 - `medoid_report_path`
@@ -545,7 +556,38 @@ Retry behavior:
 
 The retry loop is deliberately bounded. There is no open-ended agent loop.
 
-### Stage 7: Medoid Extraction
+### Stage 7: Subcluster Refinement
+
+Implemented by:
+
+- `refine_subclusters_tool()` in `agents/tools.py`
+- `subcluster_review_prompt()` in `agents/prompts.py`
+- `run_candidate_kmeans()` in `clustering/kmeans_runner.py`
+
+After the global K is accepted, each accepted cluster with at least
+`subcluster_min_tracks` tracks is reviewed independently. The workflow runs
+local KMeans candidates from K=1 through `subcluster_k_max`, renders local
+evidence panels, and asks the VLM to choose the local K. K=1 accepts the node as
+a leaf; K>1 performs one local split. Split children are accepted as final
+depth-1 leaves, so the workflow does not continue looping until the VLM
+green-lights deeper descendants.
+
+The subcluster prompt requires clean trajectory separation: operational
+subclusters should be visibly distinct trajectory families, not spacing,
+density, or minor noisy variations. It may choose a higher K when extra clusters
+isolate noise or outliers and the remaining trajectory subclusters separate
+cleanly. Final leaves are flattened back to integer cluster IDs so the
+downstream medoid, residual, and window logic remains unchanged.
+
+Outputs:
+
+- `clustering/refined_cluster_assignments.csv`
+- `clustering/subcluster_tree.json`
+- `clustering/subclusters/node_XXXX/k_YY_labels.csv`
+- `evidence/subclustering/node_XXXX/k_YY/cluster_panel.png`
+- `vlm_reviews/subclusters/node_XXXX*.json`
+
+### Stage 8: Medoid Extraction
 
 This corresponds to Section 6 of the PPE plan.
 

@@ -11,8 +11,9 @@ def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attemp
         "You are the visual reviewer and orchestrator for VLM-PPE.\n"
         "Use only the provided ADS-B trajectory plots and numeric metrics. Do not infer from AIP charts.\n"
         "Choose the most plausible number of practical path clusters. Prefer fewer clusters when differences look like noise, "
-        "and more clusters only when common geometry is visually distinct. You may request a bounded retry if the evidence is "
-        "insufficient or K should be expanded.\n\n"
+        "and more clusters only when common geometry is visually distinct. Do not chase fine-grained one-off track differences; "
+        "capture the main repeated path patterns with enough clusters, but no more detail than the evidence supports. "
+        "You may request a bounded retry if the evidence is insufficient or K should be expanded.\n\n"
         f"Attempt: {attempt + 1}. Maximum retries: {max_retries}.\n"
         f"Available K values: {available_k}.\n"
         f"K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
@@ -24,6 +25,53 @@ def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attemp
         '  "rationale": ["K=4 separates visually distinct trajectory families."],\n'
         '  "rejected_alternatives": ["K=5 creates a small cluster that looks like noise."],\n'
         '  "clusters_to_recheck": [1],\n'
+        '  "retry_requested": false,\n'
+        '  "requested_k_max": null,\n'
+        '  "suggested_action": "accept"\n'
+        "}\n"
+    )
+
+
+def subcluster_review_prompt(
+    metrics: list[KMetric],
+    available_k: list[int],
+    *,
+    root_cluster_id: int,
+    lineage: list[int],
+    depth: int,
+    n_tracks: int,
+    min_tracks: int,
+) -> str:
+    metrics_payload = [metric.model_dump() for metric in metrics]
+    lineage_text = " -> ".join(str(item) for item in lineage)
+    return (
+        "You are inspecting one accepted VLM-PPE trajectory cluster for possible subclusters.\n"
+        "Use only the provided ADS-B trajectory plots and numeric metrics. Do not infer from AIP charts.\n"
+        "Choose the local K for this cluster: K=1 means the cluster is already one practical path pattern; "
+        "K>1 means there are visually distinct, repeated subcluster patterns worth splitting.\n"
+        "Require clean separation: every trajectory subcluster you keep as an operational pattern must have visibly "
+        "distinct geometry from the others. Do not split one trajectory family on spacing, density, or minor noisy variation.\n"
+        "You may choose a higher K when extra clusters isolate noise, one-off tracks, or outliers and the remaining "
+        "trajectory subclusters separate cleanly. Do not choose a higher K only because it improves a metric.\n"
+        "This is a single local split pass. If you choose K>1, the resulting child clusters become final leaves; "
+        "the workflow will not keep looping until another VLM review green-lights them.\n\n"
+        f"Root/global cluster ID: {root_cluster_id}.\n"
+        f"Current lineage: {lineage_text}.\n"
+        f"Current subcluster depth: {depth}. Maximum reviewed depth: 0; split children stop at depth 1.\n"
+        f"Track count in this cluster: {n_tracks}. Minimum tracks for local review: {min_tracks}.\n"
+        f"Available local K values: {available_k}.\n"
+        f"Local K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
+        "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
+        "even when there is only one item. `chosen_k` is the local K for this cluster. Set `clusters_to_recheck` to [] "
+        "because this pass does not recursively review child clusters. "
+        '`suggested_action` must be exactly one of "accept", "retry", or "human_review"; do not return "split". '
+        "Choosing K>1 is how you request a split, while suggested_action remains \"accept\" when the local K choice is usable:\n"
+        "{\n"
+        '  "chosen_k": 2,\n'
+        '  "confidence": 0.78,\n'
+        '  "rationale": ["K=2 cleanly separates two repeated trajectory families."],\n'
+        '  "rejected_alternatives": ["K=3 only improves the metric by isolating minor spacing noise."],\n'
+        '  "clusters_to_recheck": [],\n'
         '  "retry_requested": false,\n'
         '  "requested_k_max": null,\n'
         '  "suggested_action": "accept"\n'

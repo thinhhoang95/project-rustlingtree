@@ -48,6 +48,28 @@ def build_shape_features(resampled: pd.DataFrame) -> FeatureSet:
     )
 
 
+def subset_features(feature_set: FeatureSet, track_ids: list[str]) -> FeatureSet:
+    requested = [str(track_id) for track_id in track_ids]
+    row_by_track_id = {track_id: index for index, track_id in enumerate(feature_set.track_ids)}
+    missing = [track_id for track_id in requested if track_id not in row_by_track_id]
+    if missing:
+        raise ValueError(f"track_ids are not present in feature set: {missing}")
+    rows = [row_by_track_id[track_id] for track_id in requested]
+    raw = feature_set.raw[rows]
+    mean = raw.mean(axis=0)
+    scale = raw.std(axis=0)
+    scale = np.where(scale <= 1e-12, 1.0, scale)
+    standardized = (raw - mean) / scale
+    return FeatureSet(
+        track_ids=requested,
+        raw=raw,
+        standardized=standardized,
+        mean=mean,
+        scale=scale,
+        n_resample=feature_set.n_resample,
+    )
+
+
 def write_features(feature_set: FeatureSet, path: str | Path, metadata_path: str | Path) -> tuple[str, str]:
     feature_path = Path(path)
     feature_path.parent.mkdir(parents=True, exist_ok=True)

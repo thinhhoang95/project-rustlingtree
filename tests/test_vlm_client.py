@@ -63,6 +63,7 @@ def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeyp
     request = calls["request"]
     assert request["model"] == "google/gemini-2.5-flash"
     assert request["response_format"] == {"type": "json_object"}
+    assert request["extra_body"] == {"reasoning": {"effort": "medium"}}
     assert request["extra_headers"] == {
         "HTTP-Referer": "https://example.test",
         "X-OpenRouter-Title": "VLM PPE Test",

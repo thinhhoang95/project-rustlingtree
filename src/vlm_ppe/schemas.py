@@ -21,7 +21,12 @@ class PPEConfig(BaseModel):
     kmeans_random_state: int = 17
     max_retries: int = Field(default=2, ge=0)
     max_k_expansion: int = Field(default=12, ge=1)
-    vlm_model: str = "google/gemini-2.5-flash"
+    subcluster_review_enabled: bool = True
+    subcluster_min_tracks: int = Field(default=4, ge=2)
+    subcluster_k_max: int = Field(default=4, ge=1)
+    subcluster_max_reviews: int = Field(default=64, ge=1)
+    vlm_model: str = "openai/gpt-5.5"
+    vlm_reasoning_effort: Literal["low", "medium", "high"] = "medium"
     window_review_max_attempts: int = Field(default=3, ge=1, le=10)
     window_review_max_patterns: int = Field(default=8, ge=1, le=20)
     min_track_points: int = Field(default=2, ge=2)
@@ -214,6 +219,9 @@ class PPEState(BaseModel):
     vlm_reviews: list[dict] = Field(default_factory=list)
     chosen_k: int | None = None
     cluster_assignments_path: str | None = None
+    subcluster_tree_path: str | None = None
+    subcluster_reviews: list[dict] = Field(default_factory=list)
+    subcluster_review_paths: list[str] = Field(default_factory=list)
     medoids_path: str | None = None
     medoid_summary_path: str | None = None
     medoid_report_path: str | None = None

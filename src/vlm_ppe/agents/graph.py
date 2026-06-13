@@ -20,6 +20,7 @@ from vlm_ppe.agents.tools import (
     render_window_review_diagnostics,
     render_medoid_report_tool,
     resample_tracks_tool,
+    refine_subclusters_tool,
     retry_or_accept_tool,
     run_candidate_clustering_tool,
     state_model,
@@ -91,7 +92,10 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
                 suggested_action="accept",
             )
         else:
-            client = vlm_client or OpenRouterVLMClient(model=config.vlm_model)
+            client = vlm_client or OpenRouterVLMClient(
+                model=config.vlm_model,
+                reasoning_effort=config.vlm_reasoning_effort,
+            )
             review = client.review_clusters(
                 evidence_images=evidence,
                 metrics=metrics,
@@ -126,7 +130,10 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
         medoids = [ClusterMedoid.model_validate(item) for item in state.get("medoids", [])]
         evidence = [EvidenceImage.model_validate(item) for item in current.window_evidence_images]
         max_attempts = int(config.window_review_max_attempts)
-        client = vlm_client or OpenRouterVLMClient(model=config.vlm_model)
+        client = vlm_client or OpenRouterVLMClient(
+            model=config.vlm_model,
+            reasoning_effort=config.vlm_reasoning_effort,
+        )
 
         reviews: list[WindowReview] = []
         review_paths: list[str] = []
@@ -321,6 +328,10 @@ def build_graph(vlm_client: ClusterReviewClient | None = None):
     graph.add_node("vlm_review_clusters", _vlm_review_node(vlm_client))
     graph.add_node("validate_review", _node("validate_review", validate_review_tool))
     graph.add_node("retry_or_accept", _node("retry_or_accept", retry_or_accept_tool))
+    graph.add_node(
+        "refine_subclusters",
+        _node("refine_subclusters", lambda state: refine_subclusters_tool(state, vlm_client=vlm_client)),
+    )
     graph.add_node("compute_cluster_medoids", _node("compute_cluster_medoids", compute_medoids_tool))
     graph.add_node("render_medoid_report", _node("render_medoid_report", render_medoid_report_tool))
     graph.add_node("compute_residual_profiles", _node("compute_residual_profiles", compute_residual_profiles_tool))
@@ -340,8 +351,9 @@ def build_graph(vlm_client: ClusterReviewClient | None = None):
     graph.add_conditional_edges(
         "retry_or_accept",
         _should_retry,
-        {"retry": "run_candidate_clustering", "accept": "compute_cluster_medoids"},
+        {"retry": "run_candidate_clustering", "accept": "refine_subclusters"},
     )
+    graph.add_edge("refine_subclusters", "compute_cluster_medoids")
     graph.add_edge("compute_cluster_medoids", "render_medoid_report")
     graph.add_edge("render_medoid_report", "compute_residual_profiles")
     graph.add_edge("compute_residual_profiles", "render_window_diagnostics")
