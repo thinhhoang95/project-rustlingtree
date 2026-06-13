@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from vlm_ppe.clustering.community_detection import run_candidate_community_detection
 from vlm_ppe.clustering.features import build_shape_features
-from vlm_ppe.clustering.kmeans_runner import run_candidate_kmeans
 from vlm_ppe.clustering.medoid import compute_cluster_medoids
 
 
@@ -36,14 +36,20 @@ def test_shape_features_standardize_flattened_resampled_points() -> None:
     np.testing.assert_allclose(features.standardized.mean(axis=0), np.zeros(10), atol=1e-12)
 
 
-def test_kmeans_candidate_runs_include_metrics() -> None:
+def test_community_detection_candidate_runs_include_metrics() -> None:
     features = build_shape_features(_resampled_frame())
 
-    runs = run_candidate_kmeans(features, k_min=1, k_max=2, n_init=5, random_state=3)
+    runs = run_candidate_community_detection(
+        features,
+        threshold_min_nm=0.0,
+        threshold_max_nm=3.0,
+        threshold_steps=2,
+    )
 
-    assert [run.k for run in runs] == [1, 2]
-    assert runs[0].metric.silhouette is None
-    assert runs[1].metric.silhouette is not None
+    assert [run.threshold_nm for run in runs] == [0.0, 3.0]
+    assert [run.metric.community_count for run in runs] == [3, 1]
+    assert runs[0].metric.singleton_count == 3
+    assert runs[1].metric.edge_density == 1.0
 
 
 def test_medoid_selects_track_with_lowest_pairwise_distance_sum() -> None:

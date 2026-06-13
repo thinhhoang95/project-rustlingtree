@@ -10,7 +10,7 @@ from vlm_ppe.agents.graph import run_graph
 from vlm_ppe.agents.vlm_client import ClusterReviewClient
 from vlm_ppe.config import load_config
 from vlm_ppe.geo.projection import LocalProjection
-from vlm_ppe.schemas import ClusterMedoid, ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
+from vlm_ppe.schemas import ClusterMedoid, ClusterReview, CommunityMetric, EvidenceImage, WindowClusterSelection, WindowReview
 
 
 class FakeReviewClient(ClusterReviewClient):
@@ -25,8 +25,8 @@ class FakeReviewClient(ClusterReviewClient):
         self,
         *,
         evidence_images: list[EvidenceImage],
-        metrics: list[KMetric],
-        available_k: list[int],
+        metrics: list[CommunityMetric],
+        available_thresholds_nm: list[float],
         attempt: int,
         max_retries: int,
         prompt: str | None = None,
@@ -37,18 +37,26 @@ class FakeReviewClient(ClusterReviewClient):
         assert metrics
         if self.retry_once and self.calls == 1:
             return ClusterReview(
-                chosen_k=available_k[-1],
+                chosen_threshold_nm=available_thresholds_nm[-1],
                 confidence=0.45,
-                rationale=["Expand K once for clearer separation."],
+                rationale=["Expand threshold range once for clearer separation."],
                 retry_requested=True,
-                requested_k_max=max(available_k) + 1,
+                requested_threshold_max_nm=max(available_thresholds_nm) * 1.5,
                 suggested_action="retry",
             )
+        if max_retries == 0:
+            chosen_threshold = available_thresholds_nm[0]
+            rationale = "The lowest local threshold cleanly separates subcluster geometry."
+            rejected = []
+        else:
+            chosen_threshold = available_thresholds_nm[len(available_thresholds_nm) // 2]
+            rationale = "The middle threshold separates two stable geometry groups."
+            rejected = ["The lowest threshold over-splits noise."]
         return ClusterReview(
-            chosen_k=2 if 2 in available_k else available_k[-1],
+            chosen_threshold_nm=chosen_threshold,
             confidence=0.91,
-            rationale=["Two stable geometry groups are visible."],
-            rejected_alternatives=["K=1 merges separate offsets."],
+            rationale=[rationale],
+            rejected_alternatives=rejected,
             clusters_to_recheck=[],
             retry_requested=False,
             suggested_action="accept",
@@ -235,12 +243,11 @@ def _write_fixture(tmp_path: Path) -> Path:
                 f'manifest_path: "{manifest_path.as_posix()}"',
                 f'output_root: "{(tmp_path / "out").as_posix()}"',
                 "n_resample: 8",
-                "k_min: 1",
-                "k_max: 2",
-                "kmeans_n_init: 3",
-                "kmeans_random_state: 5",
+                "cd_threshold_min_nm: 0.0",
+                "cd_threshold_max_nm: null",
+                "cd_threshold_steps: 3",
+                "cd_threshold_retry_growth: 1.5",
                 "max_retries: 1",
-                "max_k_expansion: 3",
                 'vlm_model: "google/gemini-2.5-flash"',
             ]
         ),
@@ -317,10 +324,9 @@ def _write_window_fixture(tmp_path: Path) -> Path:
                 f'manifest_path: "{manifest_path.as_posix()}"',
                 f'output_root: "{(tmp_path / "out").as_posix()}"',
                 "n_resample: 11",
-                "k_min: 1",
-                "k_max: 1",
-                "kmeans_n_init: 1",
-                "kmeans_random_state: 5",
+                "cd_threshold_min_nm: 0.0",
+                "cd_threshold_max_nm: null",
+                "cd_threshold_steps: 1",
                 "max_retries: 0",
                 'vlm_model: "google/gemini-2.5-flash"',
             ]
@@ -337,7 +343,7 @@ def test_graph_runs_through_medoid_with_fake_vlm(tmp_path: Path) -> None:
     result = run_graph(config, run_id="test-run", vlm_client=client)
 
     assert result["status"] == "complete"
-    assert result["chosen_k"] == 2
+    assert result["chosen_threshold_nm"] >= 0.0
     assert client.calls == 1
     assert Path(result["state_path"]).exists()
     assert Path(result["medoids_path"]).exists()
@@ -360,7 +366,7 @@ def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
 
     assert result["status"] == "complete"
     assert result["retry_count"] == 1
-    assert result["k_max_current"] == 3
+    assert result["threshold_max_current_nm"] > 0.0
     assert client.calls == 2
     assert len(result["vlm_reviews"]) == 2
 
@@ -369,7 +375,6 @@ def test_graph_refines_subclusters_before_medoids(tmp_path: Path) -> None:
     config = load_config(_write_fixture(tmp_path)).model_copy(
         update={
             "subcluster_min_tracks": 2,
-            "subcluster_k_max": 2,
         }
     )
     client = FakeReviewClient()
@@ -426,12 +431,15 @@ def test_graph_loops_until_declared_window_patterns_are_identified(tmp_path: Pat
     assert any("Current unconfirmed pattern number: 2." in prompt for prompt in client.window_prompts)
 
 
-def test_chosen_k_override_still_uses_fake_vlm_for_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chosen_threshold_override_still_uses_fake_vlm_for_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config = load_config(_write_fixture(tmp_path))
     client = FakeReviewClient()
 
-    result = run_graph(config, chosen_k=2, run_id="offline-run", vlm_client=client)
+    result = run_graph(config, chosen_threshold_nm=0.0, run_id="offline-run", vlm_client=client)
 
     assert result["status"] == "complete"
     assert result["vlm_reviews"][-1]["confidence"] == 1.0

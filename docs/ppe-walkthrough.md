@@ -11,9 +11,9 @@ The current implementation covers PPE ingestion through PPE plan Sections 7 and
 2. project them into a common local coordinate frame,
 3. resample each track by arc length,
 4. build shape features,
-5. run candidate KMeans clusterings,
+5. run candidate community-detection threshold clusterings,
 6. render VLM evidence packs,
-7. ask the VLM to choose or retry the cluster count,
+7. ask the VLM to choose or retry the CD threshold,
 8. validate the VLM decision,
 9. compute one medoid trajectory per accepted cluster,
 10. compute residual-energy and heading-dispersion profiles,
@@ -34,7 +34,7 @@ The VLM is the visible orchestrator:
 
 - it receives rendered trajectory evidence,
 - it sees metrics and plots,
-- it chooses the practical cluster count,
+- it chooses the practical community-detection threshold,
 - it can request bounded retries,
 - it proposes residual-window boundaries and classifications,
 - it explains its decision through a structured rationale.
@@ -45,7 +45,7 @@ outputs:
 - ADS-B loading,
 - projection,
 - resampling,
-- KMeans labels,
+- community-detection labels,
 - metric computation,
 - artifact writing,
 - medoid trajectory selection,
@@ -88,7 +88,7 @@ Primary files:
 - `src/vlm_ppe/geo/resample.py`: arc-length resampling.
 - `src/vlm_ppe/processing.py`: track-frame resampling.
 - `src/vlm_ppe/clustering/features.py`: shape feature construction.
-- `src/vlm_ppe/clustering/kmeans_runner.py`: candidate KMeans runs.
+- `src/vlm_ppe/clustering/community_detection.py`: thresholded graph community detection.
 - `src/vlm_ppe/clustering/medoid.py`: cluster medoid extraction.
 - `src/vlm_ppe/clustering/residual_windows.py`: residual-energy and
   heading-dispersion profile computation.
@@ -121,7 +121,8 @@ Important dependencies:
 - `pyproj`: local projected coordinate frame.
 - `pydantic>=2`: schema validation.
 - `pyyaml`: YAML config loading.
-- `scikit-learn`: KMeans and silhouette metrics.
+- `scikit-learn`: silhouette metrics.
+- `scipy`: connected-component community detection on threshold graphs.
 - `matplotlib`: diagnostic image rendering.
 
 Install the project in editable mode:
@@ -136,7 +137,7 @@ For VLM-led runs, export an OpenRouter API key:
 export OPENROUTER_API_KEY="..."
 ```
 
-`--chosen-k` only bypasses the cluster-count review. Window proposal still
+`--chosen-threshold-nm` only bypasses the cluster-threshold review. Window proposal still
 requires the configured VLM unless tests inject a fake review client.
 
 ## Running The Pipeline
@@ -148,12 +149,12 @@ vlm-ppe run-through-medoid \
   --config configs/ppe_kdfw_arrivals.yaml
 ```
 
-Offline/manual cluster-count run:
+Offline/manual threshold run:
 
 ```sh
 vlm-ppe run-through-medoid \
   --config configs/ppe_kdfw_arrivals.yaml \
-  --chosen-k 2 \
+  --chosen-threshold-nm 1.5 \
   --run-id smoke-offline
 ```
 
@@ -196,12 +197,11 @@ runway: null
 manifest_path: "data_manifest.json"
 output_root: "data/artifacts/ppe/2026-04-01"
 n_resample: 100
-k_min: 1
-k_max: 8
-kmeans_n_init: 50
-kmeans_random_state: 17
+cd_threshold_min_nm: 0.0
+cd_threshold_max_nm: null
+cd_threshold_steps: 8
+cd_threshold_retry_growth: 1.5
 max_retries: 2
-max_k_expansion: 12
 vlm_model: "gemini-3.5-flash"
 window_review_max_attempts: 3
 track_filter_center_lat: 32.897102378968
@@ -220,16 +220,17 @@ Meaning:
 - `manifest_path`: resource manifest.
 - `output_root`: directory where run folders are written.
 - `n_resample`: number of equal arc-length samples per track.
-- `k_min`, `k_max`: candidate KMeans cluster-count range.
-- `kmeans_n_init`: number of KMeans initializations.
-- `kmeans_random_state`: deterministic clustering seed.
+- `cd_threshold_min_nm`: lowest RMS trajectory-distance threshold to try.
+- `cd_threshold_max_nm`: highest threshold to try; `null` uses the observed
+  maximum pairwise trajectory distance.
+- `cd_threshold_steps`: number of evenly spaced threshold candidates.
+- `cd_threshold_retry_growth`: multiplier used when the VLM requests a wider
+  threshold search range without specifying an explicit maximum.
 - `max_retries`: maximum VLM-requested reclustering attempts.
-- `max_k_expansion`: upper bound if the VLM requests a larger `Kmax`.
 - `subcluster_review_enabled`: whether accepted global clusters are reviewed for
   one local subcluster split before medoid extraction.
 - `subcluster_min_tracks`: minimum track count required before a leaf cluster is
-  eligible for a VLM-guided local KMeans review.
-- `subcluster_k_max`: maximum local K considered for each subcluster review.
+  eligible for a VLM-guided local CD-threshold review.
 - `subcluster_max_reviews`: maximum number of subcluster VLM reviews in one run.
 - `vlm_model`: OpenRouter model slug.
 - `vlm_reasoning_effort`: OpenRouter reasoning effort for reasoning-capable
@@ -323,15 +324,16 @@ Key state fields include:
 - `run_dir`
 - `config`
 - `retry_count`
-- `k_max_current`
+- `threshold_max_current_nm`
 - `tracks_path`
 - `resampled_tracks_path`
 - `features_path`
-- `k_metrics_path`
+- `community_metrics_path`
 - `clustering_dir`
 - `evidence_images`
 - `vlm_reviews`
-- `chosen_k`
+- `chosen_threshold_nm`
+- `chosen_threshold_candidate_id`
 - `cluster_assignments_path`
 - `subcluster_tree_path`
 - `subcluster_review_paths`
@@ -445,24 +447,32 @@ scale, and resample count.
 Implemented by:
 
 - `run_candidate_clustering_tool()` in `agents/tools.py`
-- `run_candidate_kmeans()` in `clustering/kmeans_runner.py`
+- `run_candidate_community_detection()` in `clustering/community_detection.py`
 
-KMeans is run for every `K` from `k_min` through the current `k_max_current`.
+The tool builds a pairwise RMS trajectory-distance matrix in nautical miles.
+For each candidate threshold, it creates an undirected graph where tracks are
+connected when their RMS distance is less than or equal to the threshold.
+Connected components become practical path communities.
+
 For each candidate, the tool records:
 
 - labels,
-- inertia,
+- threshold in NM,
+- number of communities,
+- graph edge count and density,
 - silhouette score when valid,
-- minimum cluster size,
-- maximum cluster size,
-- mean cluster size.
+- minimum community size,
+- maximum community size,
+- mean community size,
+- singleton count,
+- mean and max intra-community distance.
 
 Outputs:
 
-- `clustering/attempt_XX/k_metrics.csv`
-- `clustering/attempt_XX/k_01_labels.csv`
-- `clustering/attempt_XX/k_02_labels.csv`
-- one label CSV per candidate K.
+- `clustering/attempt_XX/cd_metrics.csv`
+- `clustering/attempt_XX/threshold_00_labels.csv`
+- `clustering/attempt_XX/threshold_01_labels.csv`
+- one label CSV per candidate threshold.
 
 If the VLM requests a retry, a new attempt directory is created:
 
@@ -478,16 +488,16 @@ Implemented by:
 - `render_cluster_panels()` in `diagnostics/plots_clustering.py`
 - `render_metrics_chart()` in `diagnostics/plots_clustering.py`
 
-For every candidate K, a cluster panel image is rendered. A metrics chart is
-also rendered.
+For every candidate threshold, a community panel image is rendered. A metrics
+chart is also rendered.
 
 Outputs:
 
 ```text
-evidence/clustering/attempt_XX/k_01/cluster_panel.png
-evidence/clustering/attempt_XX/k_02/cluster_panel.png
+evidence/clustering/attempt_XX/threshold_00/cluster_panel.png
+evidence/clustering/attempt_XX/threshold_01/cluster_panel.png
 ...
-evidence/clustering/attempt_XX/k_metrics.png
+evidence/clustering/attempt_XX/cd_metrics.png
 ```
 
 The graph state records these as `evidence_images`, each with:
@@ -511,7 +521,7 @@ The VLM receives:
 - cluster panel images,
 - metrics chart,
 - compact metrics JSON,
-- available K values,
+- available threshold values in NM,
 - attempt number,
 - retry budget.
 
@@ -519,17 +529,17 @@ The prompt asks the model to return strict JSON:
 
 ```json
 {
-  "chosen_k": 3,
+  "chosen_threshold_nm": 1.75,
   "confidence": 0.78,
   "rationale": [
-    "K=2 merges two visually distinct downwind-extension groups."
+    "A 1.75 NM threshold separates the visually distinct downwind-extension groups."
   ],
   "rejected_alternatives": [
-    "K=4 splits one coherent group without a meaningful new procedure."
+    "A 0.75 NM threshold splits one coherent group without a meaningful new procedure."
   ],
   "clusters_to_recheck": [1],
   "retry_requested": false,
-  "requested_k_max": null,
+  "requested_threshold_max_nm": null,
   "suggested_action": "accept"
 }
 ```
@@ -538,8 +548,9 @@ The response is validated by `ClusterReview`.
 
 Offline mode:
 
-If `--chosen-k` is supplied, no Gemini call is made. The graph still creates a
-synthetic `ClusterReview` and writes the same audit files.
+If `--chosen-threshold-nm` is supplied, no cluster-review Gemini call is made.
+The graph still creates a synthetic `ClusterReview` and writes the same audit
+files.
 
 ### Stage 6: Review Validation And Retry
 
@@ -548,13 +559,15 @@ Implemented by:
 - `validate_review_tool()` in `agents/tools.py`
 - `retry_or_accept_tool()` in `agents/tools.py`
 
-Validation checks that the VLM-chosen K is one of the candidate K values.
+Validation checks that the VLM-chosen threshold is one of the candidate
+threshold values.
 
 Retry behavior:
 
 - retry if `retry_requested` is true or `suggested_action == "retry"`,
 - only retry while `retry_count < max_retries`,
-- expand `k_max_current` up to `max_k_expansion`,
+- expand `threshold_max_current_nm` using either `requested_threshold_max_nm` or
+  `cd_threshold_retry_growth`,
 - return to `run_candidate_clustering`.
 
 The retry loop is deliberately bounded. There is no open-ended agent loop.
@@ -565,29 +578,29 @@ Implemented by:
 
 - `refine_subclusters_tool()` in `agents/tools.py`
 - `subcluster_review_prompt()` in `agents/prompts.py`
-- `run_candidate_kmeans()` in `clustering/kmeans_runner.py`
+- `run_candidate_community_detection()` in `clustering/community_detection.py`
 
-After the global K is accepted, each accepted cluster with at least
+After the global threshold is accepted, each accepted cluster with at least
 `subcluster_min_tracks` tracks is reviewed independently. The workflow runs
-local KMeans candidates from K=1 through `subcluster_k_max`, renders local
-evidence panels, and asks the VLM to choose the local K. K=1 accepts the node as
-a leaf; K>1 performs one local split. Split children are accepted as final
-depth-1 leaves, so the workflow does not continue looping until the VLM
-green-lights deeper descendants.
+local CD-threshold candidates, renders local evidence panels, and asks the VLM
+to choose the local threshold. A one-community threshold accepts the node as a
+leaf; a threshold yielding multiple communities performs one local split. Split
+children are accepted as final depth-1 leaves, so the workflow does not continue
+looping until the VLM green-lights deeper descendants.
 
 The subcluster prompt requires clean trajectory separation: operational
 subclusters should be visibly distinct trajectory families, not spacing,
-density, or minor noisy variations. It may choose a higher K when extra clusters
-isolate noise or outliers and the remaining trajectory subclusters separate
-cleanly. Final leaves are flattened back to integer cluster IDs so the
+density, or minor noisy variations. It may choose a lower threshold when extra
+communities isolate noise or outliers and the remaining trajectory subclusters
+separate cleanly. Final leaves are flattened back to integer cluster IDs so the
 downstream medoid, residual, and window logic remains unchanged.
 
 Outputs:
 
 - `clustering/refined_cluster_assignments.csv`
 - `clustering/subcluster_tree.json`
-- `clustering/subclusters/node_XXXX/k_YY_labels.csv`
-- `evidence/subclustering/node_XXXX/k_YY/cluster_panel.png`
+- `clustering/subclusters/node_XXXX/threshold_YY_labels.csv`
+- `evidence/subclustering/node_XXXX/threshold_YY/cluster_panel.png`
 - `vlm_reviews/subclusters/node_XXXX*.json`
 
 ### Stage 8: Medoid Extraction
@@ -738,9 +751,9 @@ This is the easiest file to read first. It includes:
 Example console/file lines:
 
 ```text
-[vlm-ppe] run_candidate_clustering: completed | k_metrics_path='...' candidate_k_values=[1, 2, 3, 4, 5, 6, 7, 8]
-[vlm-ppe] VLM image 02/09 kind=cluster_panel exists=True bytes=317330 path=.../k_02/cluster_panel.png caption=Cluster overlay panel for K=2
-[vlm-ppe] VLM response attempt 00: chosen_k=2 confidence=1.000 action=accept retry=False response=.../attempt_00.json
+[vlm-ppe] run_candidate_clustering: completed | community_metrics_path='...' candidate_thresholds_nm=[0.0, 0.7, 1.4]
+[vlm-ppe] VLM image 02/09 kind=cluster_panel exists=True bytes=317330 path=.../threshold_01/cluster_panel.png caption=Community overlay panel for threshold=0.700 NM
+[vlm-ppe] VLM response attempt 00: chosen_threshold_nm=0.700000 confidence=1.000 action=accept retry=False response=.../attempt_00.json
 ```
 
 ### Structured Graph Events
@@ -783,7 +796,7 @@ The request event includes:
 - attempt number,
 - model name,
 - offline or live mode,
-- available K values,
+- available threshold values,
 - prompt path,
 - image list,
 - metrics.
@@ -836,7 +849,7 @@ Useful fields:
 ```json
 {
   "status": "complete",
-  "chosen_k": 2,
+  "chosen_threshold_nm": 0.7,
   "audit_log_path": ".../audit.log",
   "graph_events_path": ".../graph_events.jsonl",
   "vlm_interactions_path": ".../vlm_interactions.jsonl",
@@ -858,8 +871,8 @@ Then inspect the model-visible evidence:
 ```sh
 cat <run_dir>/vlm_reviews/attempt_00_prompt.txt
 cat <run_dir>/vlm_reviews/attempt_00_request.json
-open <run_dir>/evidence/clustering/attempt_00/k_02/cluster_panel.png
-open <run_dir>/evidence/clustering/attempt_00/k_metrics.png
+open <run_dir>/evidence/clustering/attempt_00/threshold_01/cluster_panel.png
+open <run_dir>/evidence/clustering/attempt_00/cd_metrics.png
 cat <run_dir>/vlm_reviews/attempt_00.json
 ```
 
@@ -871,7 +884,7 @@ import pandas as pd
 from pathlib import Path
 
 run = Path("<run_dir>")
-print(pd.read_csv(run / "clustering/attempt_00/k_metrics.csv"))
+print(pd.read_csv(run / "clustering/attempt_00/cd_metrics.csv"))
 print(pd.read_parquet(run / "templates/cluster_medoids.parquet").head())
 PY
 ```
@@ -901,7 +914,7 @@ export OPENROUTER_API_KEY="..."
 Or run in offline mode:
 
 ```sh
-vlm-ppe run-through-medoid --config configs/ppe_kdfw_arrivals.yaml --chosen-k 2
+vlm-ppe run-through-medoid --config configs/ppe_kdfw_arrivals.yaml --chosen-threshold-nm 1.5
 ```
 
 ### No Tracks Selected
@@ -921,11 +934,11 @@ cat data_manifest.json
 head data/adsb/catalogs/2026-04-01_landings_and_departures.csv
 ```
 
-### VLM Chooses An Unavailable K
+### VLM Chooses An Unavailable Threshold
 
-The graph validates that `chosen_k` is in `candidate_k_values`.
+The graph validates that `chosen_threshold_nm` is in `candidate_thresholds_nm`.
 
-If Gemini returns a value outside the available K range, the run fails at:
+If Gemini returns a value outside the available threshold range, the run fails at:
 
 ```text
 validate_review
@@ -941,8 +954,8 @@ cat <run_dir>/graph_events.jsonl
 Possible fixes:
 
 - improve the prompt,
-- increase `k_max`,
-- use `--chosen-k` for manual debugging,
+- increase `cd_threshold_max_nm`,
+- use `--chosen-threshold-nm` for manual debugging,
 - rerun with `--log-level DEBUG`.
 
 ### VLM Requests Retry Forever
@@ -952,7 +965,7 @@ It cannot retry forever.
 The graph enforces:
 
 - `max_retries`,
-- `max_k_expansion`.
+- bounded `threshold_max_current_nm` expansion.
 
 Once retry budget is exhausted, the current accepted choice is used.
 
@@ -993,11 +1006,11 @@ PY
 
 The medoid is selected by pairwise average resampled distance. If it looks wrong:
 
-- inspect cluster labels for the chosen K,
+- inspect cluster labels for the chosen threshold,
 - check whether one cluster combines multiple visual flows,
-- check whether the VLM should have chosen a different K,
-- inspect outlier-sized clusters in `k_metrics.csv`,
-- rerun with a different `--chosen-k` for comparison.
+- check whether the VLM should have chosen a different threshold,
+- inspect outlier-sized clusters in `cd_metrics.csv`,
+- rerun with a different `--chosen-threshold-nm` for comparison.
 
 ## Verification Commands
 
@@ -1032,14 +1045,14 @@ Real-data offline smoke:
 ```sh
 vlm-ppe run-through-medoid \
   --config configs/ppe_kdfw_arrivals.yaml \
-  --chosen-k 2 \
+  --chosen-threshold-nm 1.5 \
   --run-id audit-smoke
 ```
 
 ## Current Limitations
 
 - Only stages through residual-window classification are implemented.
-- The VLM review is currently used for cluster-count choice, bounded retry
+- The VLM review is currently used for CD-threshold choice, bounded retry
   orchestration, and residual-window classification.
 - The final exported geometry is a medoid trajectory, not yet a procedure
   program with intervention tokens.

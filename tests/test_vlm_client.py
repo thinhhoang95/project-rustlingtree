@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from vlm_ppe.agents.vlm_client import OpenRouterVLMClient
-from vlm_ppe.schemas import ClusterMedoid, EvidenceImage, KMetric
+from vlm_ppe.schemas import ClusterMedoid, CommunityMetric, EvidenceImage
 
 
 def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeypatch) -> None:
@@ -21,13 +21,13 @@ def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeyp
             calls["request"] = kwargs
             content = json.dumps(
                 {
-                    "chosen_k": 2,
+                    "chosen_threshold_nm": 1.25,
                     "confidence": 0.9,
-                    "rationale": ["K=2 is visually distinct."],
+                    "rationale": ["A 1.25 NM threshold is visually distinct."],
                     "rejected_alternatives": [],
                     "clusters_to_recheck": [],
                     "retry_requested": False,
-                    "requested_k_max": None,
+                    "requested_threshold_max_nm": None,
                     "suggested_action": "accept",
                 }
             )
@@ -51,14 +51,27 @@ def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeyp
         evidence_images=[
             EvidenceImage(kind="cluster_panel", path=image_path.as_posix(), caption="Cluster panel")
         ],
-        metrics=[KMetric(k=2, inertia=1.0, silhouette=0.5, cluster_count_min=1, cluster_count_max=3, cluster_count_mean=2.0)],
-        available_k=[1, 2],
+        metrics=[
+            CommunityMetric(
+                candidate_id=1,
+                threshold_nm=1.25,
+                community_count=2,
+                edge_count=2,
+                edge_density=0.5,
+                silhouette=0.5,
+                community_count_min=1,
+                community_count_max=3,
+                community_count_mean=2.0,
+                singleton_count=1,
+            )
+        ],
+        available_thresholds_nm=[0.0, 1.25],
         attempt=0,
         max_retries=1,
         prompt="Return JSON.",
     )
 
-    assert review.chosen_k == 2
+    assert review.chosen_threshold_nm == 1.25
     assert calls["client"] == {"api_key": "test-key", "base_url": "https://openrouter.ai/api/v1"}
     request = calls["request"]
     assert request["model"] == "google/gemini-2.5-flash"
@@ -84,13 +97,13 @@ def test_openrouter_client_accepts_single_string_rationale(tmp_path: Path, monke
         def create(self, **kwargs: Any) -> Any:
             content = json.dumps(
                 {
-                    "chosen_k": 4,
+                    "chosen_threshold_nm": 2.0,
                     "confidence": 0.9,
-                    "rationale": "K=4 is visually distinct.",
-                    "rejected_alternatives": "K=5 splits a coherent group.",
+                    "rationale": "A 2.0 NM threshold is visually distinct.",
+                    "rejected_alternatives": "A 1.0 NM threshold splits a coherent group.",
                     "clusters_to_recheck": [],
                     "retry_requested": False,
-                    "requested_k_max": None,
+                    "requested_threshold_max_nm": None,
                     "suggested_action": "accept",
                 }
             )
@@ -108,14 +121,14 @@ def test_openrouter_client_accepts_single_string_rationale(tmp_path: Path, monke
     review = client.review_clusters(
         evidence_images=[EvidenceImage(kind="cluster_panel", path=image_path.as_posix(), caption="Cluster panel")],
         metrics=[],
-        available_k=[4],
+        available_thresholds_nm=[2.0],
         attempt=0,
         max_retries=1,
         prompt="Return JSON.",
     )
 
-    assert review.rationale == ["K=4 is visually distinct."]
-    assert review.rejected_alternatives == ["K=5 splits a coherent group."]
+    assert review.rationale == ["A 2.0 NM threshold is visually distinct."]
+    assert review.rejected_alternatives == ["A 1.0 NM threshold splits a coherent group."]
 
 
 def test_openrouter_client_reviews_windows(tmp_path: Path, monkeypatch) -> None:

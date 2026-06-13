@@ -2,39 +2,46 @@ from __future__ import annotations
 
 import json
 
-from vlm_ppe.schemas import ClusterMedoid, KMetric
+from vlm_ppe.schemas import ClusterMedoid, CommunityMetric
 
 
-def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attempt: int, max_retries: int) -> str:
+def cluster_review_prompt(
+    metrics: list[CommunityMetric],
+    available_thresholds_nm: list[float],
+    attempt: int,
+    max_retries: int,
+) -> str:
     metrics_payload = [metric.model_dump() for metric in metrics]
     return (
         "You are the visual reviewer and orchestrator for VLM-PPE.\n"
         "Use only the provided ADS-B trajectory plots and numeric metrics. Do not infer from AIP charts.\n"
-        "Choose the most plausible number of practical path clusters. Prefer fewer clusters when differences look like noise, "
-        "and more clusters only when common geometry is visually distinct. Do not chase fine-grained one-off track differences; "
-        "capture the main repeated path patterns with enough clusters, but no more detail than the evidence supports. "
-        "You may request a bounded retry if the evidence is insufficient or K should be expanded.\n\n"
+        "Choose the most plausible community-detection distance threshold in nautical miles. The threshold builds a graph "
+        "where tracks are connected when their RMS trajectory distance is less than or equal to that value; connected "
+        "components become practical path communities. Prefer larger thresholds when differences look like noise, and lower "
+        "thresholds only when common geometry is visually distinct. Do not chase fine-grained one-off track differences; "
+        "capture the main repeated path patterns with enough communities, but no more detail than the evidence supports. "
+        "You may request a bounded retry if the evidence is insufficient or the threshold range should be expanded.\n\n"
         f"Attempt: {attempt + 1}. Maximum retries: {max_retries}.\n"
-        f"Available K values: {available_k}.\n"
-        f"K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
+        f"Available threshold_nm values: {available_thresholds_nm}.\n"
+        f"Community-detection metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item:\n"
         "{\n"
-        '  "chosen_k": 4,\n'
+        '  "chosen_threshold_nm": 1.75,\n'
         '  "confidence": 0.82,\n'
-        '  "rationale": ["K=4 separates visually distinct trajectory families."],\n'
-        '  "rejected_alternatives": ["K=5 creates a small cluster that looks like noise."],\n'
+        '  "rationale": ["A 1.75 NM threshold separates visually distinct trajectory communities."],\n'
+        '  "rejected_alternatives": ["A 1.25 NM threshold creates tiny communities that look like noise."],\n'
         '  "clusters_to_recheck": [1],\n'
         '  "retry_requested": false,\n'
-        '  "requested_k_max": null,\n'
+        '  "requested_threshold_max_nm": null,\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )
 
 
 def subcluster_review_prompt(
-    metrics: list[KMetric],
-    available_k: list[int],
+    metrics: list[CommunityMetric],
+    available_thresholds_nm: list[float],
     *,
     root_cluster_id: int,
     lineage: list[int],
@@ -47,36 +54,38 @@ def subcluster_review_prompt(
     return (
         "You are inspecting one accepted VLM-PPE trajectory cluster for possible subclusters.\n"
         "Use only the provided ADS-B trajectory plots and numeric metrics. Do not infer from AIP charts.\n"
-        "Choose the local K for this cluster: K=1 means the cluster is already one practical path pattern; "
-        "K>1 means there are visually distinct, repeated subcluster patterns worth splitting.\n"
+        "Choose the local community-detection distance threshold for this cluster. A threshold that yields one community "
+        "means the cluster is already one practical path pattern; a threshold that yields multiple communities means there "
+        "are visually distinct, repeated subcluster patterns worth splitting.\n"
         "Require clean separation: every trajectory subcluster you keep as an operational pattern must have visibly "
         "distinct geometry from the others. Do not split one trajectory family on spacing, density, or minor noisy variation.\n"
-        "Outliers can hide real repeated geometry. When comparing K values, first identify tiny, scattered, or one-off "
+        "Outliers can hide real repeated geometry. When comparing threshold values, first identify tiny, scattered, or one-off "
         "clusters as outlier/noise quarantine candidates, then judge whether the remaining non-outlier clusters expose "
-        "cleanly distinct repeated trajectory families. A higher K is appropriate when it both quarantines outliers/noise "
-        "and separates repeated geometries that lower K leaves merged. Do not choose a higher K only because it improves "
-        "a metric, and do not reject a higher K only because it contains tiny outlier/noise clusters.\n"
-        "This is a single local split pass. If you choose K>1, the resulting child clusters become final leaves; "
+        "cleanly distinct repeated trajectory families. A lower threshold is appropriate when it both quarantines outliers/noise "
+        "and separates repeated geometries that higher thresholds leave merged. Do not choose a lower threshold only because "
+        "it improves a metric, and do not reject a lower threshold only because it contains tiny outlier/noise communities.\n"
+        "This is a single local split pass. If your chosen threshold yields multiple communities, the resulting child clusters become final leaves; "
         "the workflow will not keep looping until another VLM review green-lights them.\n\n"
         f"Root/global cluster ID: {root_cluster_id}.\n"
         f"Current lineage: {lineage_text}.\n"
         f"Current subcluster depth: {depth}. Maximum reviewed depth: 0; split children stop at depth 1.\n"
         f"Track count in this cluster: {n_tracks}. Minimum tracks for local review: {min_tracks}.\n"
-        f"Available local K values: {available_k}.\n"
-        f"Local K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
+        f"Available local threshold_nm values: {available_thresholds_nm}.\n"
+        f"Local community-detection metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
-        "even when there is only one item. `chosen_k` is the local K for this cluster. Set `clusters_to_recheck` to [] "
+        "even when there is only one item. `chosen_threshold_nm` is the local threshold for this cluster. Set `clusters_to_recheck` to [] "
         "because this pass does not recursively review child clusters. "
         '`suggested_action` must be exactly one of "accept", "retry", or "human_review"; do not return "split". '
-        "Choosing K>1 is how you request a split, while suggested_action remains \"accept\" when the local K choice is usable:\n"
+        "Choosing a threshold that yields multiple communities is how you request a split, while suggested_action remains "
+        "\"accept\" when the local threshold choice is usable:\n"
         "{\n"
-        '  "chosen_k": 2,\n'
+        '  "chosen_threshold_nm": 0.85,\n'
         '  "confidence": 0.78,\n'
-        '  "rationale": ["K=2 cleanly separates two repeated trajectory families."],\n'
-        '  "rejected_alternatives": ["K=3 only improves the metric by isolating minor spacing noise."],\n'
+        '  "rationale": ["A 0.85 NM threshold cleanly separates two repeated trajectory families."],\n'
+        '  "rejected_alternatives": ["A 0.40 NM threshold only isolates minor spacing noise."],\n'
         '  "clusters_to_recheck": [],\n'
         '  "retry_requested": false,\n'
-        '  "requested_k_max": null,\n'
+        '  "requested_threshold_max_nm": null,\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )

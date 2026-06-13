@@ -40,8 +40,8 @@ from vlm_ppe.audit import (
 from vlm_ppe.schemas import (
     ClusterMedoid,
     ClusterReview,
+    CommunityMetric,
     EvidenceImage,
-    KMetric,
     PPEConfig,
     PPEState,
     WindowProposal,
@@ -70,9 +70,9 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
         current = state_model(state)
         config = PPEConfig.model_validate(current.config)
         evidence = [EvidenceImage.model_validate(item) for item in current.evidence_images]
-        metrics = [KMetric.model_validate(item) for item in state.get("clustering_metrics", [])]
-        available_k = [int(k) for k in state.get("candidate_k_values", [])]
-        prompt = cluster_review_prompt(metrics, available_k, current.retry_count, config.max_retries)
+        metrics = [CommunityMetric.model_validate(item) for item in state.get("clustering_metrics", [])]
+        available_thresholds_nm = [float(value) for value in state.get("candidate_thresholds_nm", [])]
+        prompt = cluster_review_prompt(metrics, available_thresholds_nm, current.retry_count, config.max_retries)
         log_vlm_request(
             run_dir=current.run_dir,
             attempt=current.retry_count,
@@ -80,18 +80,18 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
             prompt=prompt,
             evidence_images=evidence,
             metrics=metrics,
-            available_k=available_k,
-            offline_override=current.chosen_k_override is not None,
+            available_thresholds_nm=available_thresholds_nm,
+            offline_override=current.chosen_threshold_override_nm is not None,
         )
-        if current.chosen_k_override is not None:
+        if current.chosen_threshold_override_nm is not None:
             review = ClusterReview(
-                chosen_k=current.chosen_k_override,
+                chosen_threshold_nm=current.chosen_threshold_override_nm,
                 confidence=1.0,
-                rationale=["Offline/manual cluster count override supplied by --chosen-k."],
+                rationale=["Offline/manual community-detection threshold override supplied by --chosen-threshold-nm."],
                 rejected_alternatives=[],
                 clusters_to_recheck=[],
                 retry_requested=False,
-                requested_k_max=None,
+                requested_threshold_max_nm=None,
                 suggested_action="accept",
             )
         else:
@@ -102,7 +102,7 @@ def _vlm_review_node(vlm_client: ClusterReviewClient | None):
             review = client.review_clusters(
                 evidence_images=evidence,
                 metrics=metrics,
-                available_k=available_k,
+                available_thresholds_nm=available_thresholds_nm,
                 attempt=current.retry_count,
                 max_retries=config.max_retries,
                 prompt=prompt,
@@ -420,7 +420,7 @@ def initial_state(
     config: PPEConfig,
     *,
     run_id: str | None = None,
-    chosen_k: int | None = None,
+    chosen_threshold_nm: float | None = None,
     require_api_key: bool = True,
 ) -> dict[str, Any]:
     resolved_run_id = run_id or uuid.uuid4().hex[:12]
@@ -433,17 +433,28 @@ def initial_state(
         graph_events_path=(run_dir / "graph_events.jsonl").as_posix(),
         vlm_interactions_path=(run_dir / "vlm_interactions.jsonl").as_posix(),
         config=config.model_dump(mode="json"),
-        k_max_current=config.k_max,
-        chosen_k_override=chosen_k,
+        threshold_max_current_nm=config.cd_threshold_max_nm,
+        chosen_threshold_override_nm=chosen_threshold_nm,
     )
     if require_api_key and not os.environ.get("OPENROUTER_API_KEY"):
         raise RuntimeError("OPENROUTER_API_KEY is required for VLM-led runs")
     return state.model_dump(mode="json")
 
 
-def run_graph(config: PPEConfig, *, chosen_k: int | None = None, run_id: str | None = None, vlm_client: ClusterReviewClient | None = None) -> dict:
+def run_graph(
+    config: PPEConfig,
+    *,
+    chosen_threshold_nm: float | None = None,
+    run_id: str | None = None,
+    vlm_client: ClusterReviewClient | None = None,
+) -> dict:
     graph = build_graph(vlm_client=vlm_client)
-    state = initial_state(config, run_id=run_id, chosen_k=chosen_k, require_api_key=vlm_client is None)
+    state = initial_state(
+        config,
+        run_id=run_id,
+        chosen_threshold_nm=chosen_threshold_nm,
+        require_api_key=vlm_client is None,
+    )
     setup_audit_logging(state["run_dir"], level=config.log_level, console=config.log_to_console)
     return graph.invoke(
         state

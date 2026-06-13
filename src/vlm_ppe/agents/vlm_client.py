@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from vlm_ppe.agents.prompts import cluster_review_prompt, window_cluster_selection_prompt, window_review_prompt
-from vlm_ppe.schemas import ClusterMedoid, ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
+from vlm_ppe.schemas import ClusterMedoid, ClusterReview, CommunityMetric, EvidenceImage, WindowClusterSelection, WindowReview
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -17,8 +17,8 @@ class ClusterReviewClient(Protocol):
         self,
         *,
         evidence_images: list[EvidenceImage],
-        metrics: list[KMetric],
-        available_k: list[int],
+        metrics: list[CommunityMetric],
+        available_thresholds_nm: list[float],
         attempt: int,
         max_retries: int,
         prompt: str | None = None,
@@ -71,13 +71,13 @@ class OpenRouterVLMClient:
         self,
         *,
         evidence_images: list[EvidenceImage],
-        metrics: list[KMetric],
-        available_k: list[int],
+        metrics: list[CommunityMetric],
+        available_thresholds_nm: list[float],
         attempt: int,
         max_retries: int,
         prompt: str | None = None,
     ) -> ClusterReview:
-        resolved_prompt = prompt or cluster_review_prompt(metrics, available_k, attempt, max_retries)
+        resolved_prompt = prompt or cluster_review_prompt(metrics, available_thresholds_nm, attempt, max_retries)
         text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
         return ClusterReview.model_validate(json.loads(text))
 

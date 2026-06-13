@@ -17,7 +17,7 @@ def _run_through_medoid(args: argparse.Namespace) -> int:
         if args.quiet:
             updates["log_to_console"] = False
         config = config.model_copy(update=updates)
-    result = run_graph(config, chosen_k=args.chosen_k, run_id=args.run_id)
+    result = run_graph(config, chosen_threshold_nm=args.chosen_threshold_nm, run_id=args.run_id)
     print(
         json.dumps(
             {
@@ -41,7 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run PPE through medoid extraction, residual diagnostics, and VLM window proposal",
     )
     run_parser.add_argument("--config", required=True, type=Path)
-    run_parser.add_argument("--chosen-k", type=int, default=None, help="Offline/manual cluster-count override")
+    run_parser.add_argument(
+        "--chosen-threshold-nm",
+        type=float,
+        default=None,
+        help="Offline/manual community-detection distance-threshold override in NM",
+    )
     run_parser.add_argument("--run-id", type=str, default=None)
     run_parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default=None)
     run_parser.add_argument("--quiet", action="store_true", help="Disable console audit logging; audit.log is still written")

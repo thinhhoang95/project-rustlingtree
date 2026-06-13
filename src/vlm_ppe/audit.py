@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
+from vlm_ppe.schemas import ClusterReview, CommunityMetric, EvidenceImage, WindowClusterSelection, WindowReview
 
 LOGGER_NAME = "vlm_ppe.audit"
 
@@ -84,7 +84,7 @@ def _payload_summary(payload: dict[str, Any]) -> str:
             "medoids",
             "intervention_windows",
             "window_reviews",
-            "config",
+    "config",
         }:
             if isinstance(value, list):
                 parts.append(f"{key}=<{len(value)} items>")
@@ -149,8 +149,8 @@ def log_vlm_request(
     model: str,
     prompt: str,
     evidence_images: list[EvidenceImage],
-    metrics: list[KMetric],
-    available_k: list[int],
+    metrics: list[CommunityMetric],
+    available_thresholds_nm: list[float],
     offline_override: bool,
 ) -> None:
     root = Path(run_dir)
@@ -163,7 +163,7 @@ def log_vlm_request(
         "attempt": attempt,
         "model": model,
         "offline_override": offline_override,
-        "available_k": available_k,
+        "available_thresholds_nm": available_thresholds_nm,
         "prompt_path": (review_dir / f"attempt_{attempt:02d}_prompt.txt").as_posix(),
         "images": image_records,
         "metrics": [metric.model_dump() for metric in metrics],
@@ -175,7 +175,14 @@ def log_vlm_request(
 
     logger = get_audit_logger(root)
     mode = "offline override" if offline_override else "OpenRouter request"
-    logger.info("VLM attempt %02d prepared: %s model=%s available_k=%s images=%d", attempt, mode, model, available_k, len(image_records))
+    logger.info(
+        "VLM attempt %02d prepared: %s model=%s available_thresholds_nm=%s images=%d",
+        attempt,
+        mode,
+        model,
+        available_thresholds_nm,
+        len(image_records),
+    )
     for index, image in enumerate(image_records, start=1):
         logger.info(
             "VLM image %02d/%02d kind=%s exists=%s bytes=%s path=%s caption=%s",
@@ -207,9 +214,9 @@ def log_vlm_response(
     _append_jsonl(root / "vlm_interactions.jsonl", payload)
     logger = get_audit_logger(root)
     logger.info(
-        "VLM response attempt %02d: chosen_k=%s confidence=%.3f action=%s retry=%s response=%s",
+        "VLM response attempt %02d: chosen_threshold_nm=%.6f confidence=%.3f action=%s retry=%s response=%s",
         attempt,
-        review.chosen_k,
+        review.chosen_threshold_nm,
         review.confidence,
         review.suggested_action,
         review.retry_requested,
@@ -229,8 +236,8 @@ def log_subcluster_vlm_request(
     model: str,
     prompt: str,
     evidence_images: list[EvidenceImage],
-    metrics: list[KMetric],
-    available_k: list[int],
+    metrics: list[CommunityMetric],
+    available_thresholds_nm: list[float],
 ) -> str:
     root = Path(run_dir)
     review_dir = root / "vlm_reviews" / "subclusters"
@@ -247,7 +254,7 @@ def log_subcluster_vlm_request(
         "lineage": [int(item) for item in lineage],
         "depth": int(depth),
         "model": model,
-        "available_k": available_k,
+        "available_thresholds_nm": available_thresholds_nm,
         "prompt_path": prompt_path.as_posix(),
         "images": image_records,
         "metrics": [metric.model_dump() for metric in metrics],
@@ -259,11 +266,11 @@ def log_subcluster_vlm_request(
 
     logger = get_audit_logger(root)
     logger.info(
-        "VLM subcluster review prepared: node=%s root_cluster=%s depth=%s available_k=%s images=%d",
+        "VLM subcluster review prepared: node=%s root_cluster=%s depth=%s available_thresholds_nm=%s images=%d",
         stem,
         root_cluster_id,
         depth,
-        available_k,
+        available_thresholds_nm,
         len(image_records),
     )
     for index, image in enumerate(image_records, start=1):
@@ -305,11 +312,11 @@ def log_subcluster_vlm_response(
     _append_jsonl(root / "vlm_interactions.jsonl", payload)
     logger = get_audit_logger(root)
     logger.info(
-        "VLM subcluster response: node=%s root_cluster=%s depth=%s chosen_k=%s confidence=%.3f action=%s response=%s",
+        "VLM subcluster response: node=%s root_cluster=%s depth=%s chosen_threshold_nm=%.6f confidence=%.3f action=%s response=%s",
         node_id,
         root_cluster_id,
         depth,
-        review.chosen_k,
+        review.chosen_threshold_nm,
         review.confidence,
         review.suggested_action,
         response_path,
