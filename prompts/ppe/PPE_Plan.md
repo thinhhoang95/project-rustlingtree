@@ -35,7 +35,7 @@ My recommended framework stack is:
 | Data validation     | **Pydantic v2**                                    | Useful for strict procedure-program schemas, structured VLM outputs, and JSON Schema export. Pydantic’s docs emphasize type-driven validation and JSON Schema generation. ([Pydantic][4])                             |
 | Experiment tracking | **MLflow**                                         | Track clustering decisions, VLM calls, optimization metrics, plots, parameters, and exported programs. MLflow supports traces/metrics for agents, LLMs, and ML models. ([MLflow AI Platform][5])                      |
 | Geometry            | **NumPy + Shapely + pyproj**                       | NumPy for vectorized fitting; Shapely for planar geometry checks; pyproj/PROJ for coordinate conversion. Shapely is designed for manipulation and analysis of planar geometric objects. ([Shapely][6])                |
-| Clustering          | **thresholded graph community detection first**    | Build a trajectory-distance graph and use connected components as communities. The review problem becomes choosing a distance threshold rather than prespecifying the number of communities.                         |
+| Clustering          | **scikit-learn KMeans first**                      | KMeans is simple, fast, and requires a prespecified cluster count. Its docs note that it can fall into local minima, so multiple restarts are appropriate. ([Scikit-Learn][7])                                        |
 | Visualization       | **matplotlib / Plotly**                            | Generate deterministic evidence packs for the VLM and humans.                                                                                                                                                         |
 | Storage             | **Parquet + JSON + GeoJSON**                       | Tracks in Parquet; procedure programs in JSON; reconstructable paths in GeoJSON.                                                                                                                                      |
 
@@ -62,7 +62,7 @@ $$
 The VLM may decide:
 
 $
-\tau=1.5\text{ NM looks better than }\tau=0.5\text{ NM},
+K=3 \text{ looks better than } K=2,
 $
 
 or:
@@ -273,36 +273,37 @@ Do not add too many handcrafted features initially. The goal is to let the clust
 
 ## Stage 3 — Candidate clustering
 
-Run thresholded graph community detection for candidate values:
+Run KMeans for candidate values:
 
 $
-\tau_1,\tau_2,\dots,\tau_N.
+K=1,2,\dots,K_{\max}.
 $
 
 Recommended:
 
 $
-N=8
+K_{\max}=8
 $
 
-for a single runway/arrival context, with thresholds measured in nautical miles
-over pairwise RMS trajectory distance.
+for a single runway/arrival context.
 
-For each threshold:
+For each $K$:
 
-1. connect tracks whose RMS trajectory distance is less than or equal to the threshold;
-2. use connected components as communities;
-3. compute graph/community metrics;
+1. run KMeans with multiple seeds;
+2. compute inertia;
+3. compute silhouette if there are enough tracks;
 4. render cluster overlays;
 5. render a “small multiples” plot of all clusters.
+
+KMeans is a good initial tool because it is fast and simple, but because it can fall into local minima, do not rely on a single initialization. ([Scikit-Learn][7])
 
 Output:
 
 ```text
-artifacts/clustering/threshold_00/cluster_panel.png
-artifacts/clustering/threshold_01/cluster_panel.png
+artifacts/clustering/k_01/cluster_panel.png
+artifacts/clustering/k_02/cluster_panel.png
 ...
-artifacts/clustering/cd_metrics.csv
+artifacts/clustering/k_metrics.csv
 ```
 
 ---
@@ -311,8 +312,8 @@ artifacts/clustering/cd_metrics.csv
 
 The VLM receives:
 
-1. one panel per threshold;
-2. community-count/silhouette chart;
+1. one panel per (K);
+2. inertia/silhouette chart;
 3. cluster overlays;
 4. examples of tracks near each cluster medoid;
 5. instruction: “Use ADS-B plots only. Do not infer from AIP.”
@@ -321,11 +322,11 @@ The VLM returns structured JSON:
 
 ```json
 {
-  "chosen_threshold_nm": 1.75,
+  "chosen_k": 3,
   "confidence": 0.78,
   "rationale": [
-    "A 1.75 NM threshold separates two visually distinct downwind-extension groups.",
-    "A 0.75 NM threshold splits one coherent group without a meaningful new procedure."
+    "K=2 merges two visually distinct downwind-extension groups.",
+    "K=4 splits one coherent group without a meaningful new procedure."
   ],
   "clusters_to_recheck": [1],
   "suggested_action": "accept"
@@ -901,9 +902,9 @@ class PPEState(BaseModel):
     tracks_path: str
     resampled_tracks_path: str | None = None
 
-    candidate_thresholds_nm: list[float] = []
+    candidate_k_values: list[int] = []
     clustering_runs: list[dict] = []
-    chosen_threshold_nm: float | None = None
+    chosen_k: int | None = None
     cluster_assignments_path: str | None = None
 
     cluster_diagnostics: list[dict] = []
@@ -1005,7 +1006,7 @@ vlm-ppe/
 
     clustering/
       features.py
-      community_detection.py
+      kmeans_runner.py
       metrics.py
       medoid.py
 
@@ -1205,20 +1206,20 @@ You are reviewing ADS-B arrival tracks. Use only the trajectory plots and metric
 Do not infer from AIP charts, waypoint names, or expected procedures.
 
 Task:
-Choose the most plausible community-detection distance threshold.
+Choose the most plausible number of practical path clusters.
 
 Prefer:
-- larger thresholds when the difference is only noise;
-- lower thresholds when paths have clearly different common geometry;
+- fewer clusters when the difference is only noise;
+- more clusters when paths have clearly different common geometry;
 - an "outlier" bucket instead of forcing rare tracks into normal clusters.
 
 Return valid JSON matching the schema:
 {
-  "chosen_threshold_nm": float,
+  "chosen_k": int,
   "confidence": float,
   "rationale": [string],
   "clusters_to_recheck": [int],
-  "suggested_action": "accept" | "retry" | "human_review"
+  "suggested_action": "accept" | "retry_with_larger_k" | "retry_with_smaller_k" | "human_review"
 }
 ```
 
@@ -1464,7 +1465,7 @@ Deliver:
 
 ```text
 shape features
-community-detection threshold candidate runs
+KMeans candidate runs
 cluster plots
 residual-energy windows
 heading-dispersion plots
@@ -1590,8 +1591,8 @@ The recomputed metrics should match the stored metrics.
 | Failure mode                    | Guardrail                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------- |
 | VLM hallucinates a procedure    | VLM cannot write geometry; only deterministic tools export programs       |
-| CD threshold splits noise       | VLM sees cluster panels; deterministic metrics and human review available |
-| CD threshold merges rare class  | Keep outlier bucket; do not force all tracks into normal clusters         |
+| KMeans splits noise             | VLM sees cluster panels; deterministic metrics and human review available |
+| KMeans misses rare class        | Keep outlier bucket; do not force all tracks into normal clusters         |
 | Residual window too broad       | Hysteresis, minimum/maximum length, heading-dispersion confirmation       |
 | Dogleg/trombone overfit         | Fixed token count, minimum leg length, improvement-ratio rule             |
 | PMS confused with dogleg        | PMS accepted only when merge-point/direct-to structure is detected        |
@@ -1643,14 +1644,14 @@ def run_vlm_ppe(dataset_id: str, config: PPEConfig) -> list[ProcedureProgram]:
     features = build_shape_features(resampled, config.features)
 
     clustering_runs = []
-    for threshold_nm in config.cd_thresholds_nm:
-        labels = run_community_detection(features, threshold_nm=threshold_nm)
-        metrics = compute_community_metrics(features, labels)
+    for k in range(1, config.k_max + 1):
+        labels = run_kmeans(features, k=k, n_init=config.kmeans_n_init)
+        metrics = compute_cluster_metrics(features, labels)
         plots = render_cluster_diagnostics(resampled, labels, metrics)
-        clustering_runs.append({"threshold_nm": threshold_nm, "labels": labels, "metrics": metrics, "plots": plots})
+        clustering_runs.append({"k": k, "labels": labels, "metrics": metrics, "plots": plots})
 
-    chosen = vlm_select_cd_threshold(clustering_runs)
-    labels = clustering_runs[chosen.candidate_id]["labels"]
+    chosen = vlm_select_cluster_count(clustering_runs)
+    labels = clustering_runs[chosen.k]["labels"]
 
     programs = []
 
@@ -1737,4 +1738,5 @@ This preserves the flexibility of an agentic loop while keeping the actual geome
 [4]: https://pydantic.dev/docs/validation/latest/get-started/ "Welcome to Pydantic | Pydantic Docs"
 [5]: https://mlflow.org/ "MLflow - Open Source AI Platform for Agents, LLMs & Models"
 [6]: https://shapely.readthedocs.io/ "Shapely — Shapely 2.1.2 documentation"
+[7]: https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html "KMeans — scikit-learn 1.9.0 documentation"
 [8]: https://www.eurocontrol.int/point-merge "Point Merge | EUROCONTROL"

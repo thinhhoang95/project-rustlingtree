@@ -6,42 +6,32 @@ from vlm_ppe.agents.prompts import (
     window_cluster_selection_prompt,
     window_review_prompt,
 )
-from vlm_ppe.schemas import ClusterMedoid, CommunityMetric
+from vlm_ppe.schemas import ClusterMedoid, KMetric
 from vlm_ppe.schemas import WindowReview
 
 
 def test_cluster_review_prompt_uses_literal_array_examples() -> None:
-    prompt = cluster_review_prompt(metrics=[], available_thresholds_nm=[0.5, 1.0, 1.5], attempt=0, max_retries=1)
+    prompt = cluster_review_prompt(metrics=[], available_k=[2, 3, 4], attempt=0, max_retries=1)
 
-    assert (
-        '"rationale": ["A 1.75 NM threshold separates visually distinct trajectory communities."]' in prompt
-    )
-    assert (
-        '"rejected_alternatives": ["A 1.25 NM threshold creates tiny communities that look like noise."]'
-        in prompt
-    )
+    assert '"rationale": ["K=4 separates visually distinct trajectory families."]' in prompt
+    assert '"rejected_alternatives": ["K=5 creates a small cluster that looks like noise."]' in prompt
     assert '"rationale": [string]' not in prompt
     assert "main repeated path patterns" in prompt
-    assert '"chosen_threshold_nm": 1.75' in prompt
 
 
-def test_subcluster_review_prompt_explains_local_threshold_and_overdetail_guardrail() -> None:
+def test_subcluster_review_prompt_explains_local_k_and_overdetail_guardrail() -> None:
     prompt = subcluster_review_prompt(
         metrics=[
-            CommunityMetric(
-                candidate_id=1,
-                threshold_nm=0.8,
-                community_count=2,
-                edge_count=3,
-                edge_density=0.3,
+            KMetric(
+                k=2,
+                inertia=1.0,
                 silhouette=0.4,
-                community_count_min=2,
-                community_count_max=3,
-                community_count_mean=2.5,
-                singleton_count=0,
+                cluster_count_min=2,
+                cluster_count_max=3,
+                cluster_count_mean=2.5,
             )
         ],
-        available_thresholds_nm=[0.4, 0.8],
+        available_k=[1, 2],
         root_cluster_id=3,
         lineage=[3],
         depth=0,
@@ -49,16 +39,16 @@ def test_subcluster_review_prompt_explains_local_threshold_and_overdetail_guardr
         min_tracks=4,
     )
 
-    assert "Choose the local community-detection distance threshold" in prompt
-    assert "yields one community" in prompt
+    assert "Choose the local K for this cluster" in prompt
+    assert "K=1 means the cluster is already one practical path pattern" in prompt
     assert "Require clean separation" in prompt
     assert "Outliers can hide real repeated geometry" in prompt
-    assert "do not reject a lower threshold only because it contains tiny outlier/noise communities" in prompt
+    assert "do not reject a higher K only because it contains tiny outlier/noise clusters" in prompt
     assert "split children stop at depth 1" in prompt
     assert "will not keep looping" in prompt
     assert 'do not return "split"' in prompt
     assert '"clusters_to_recheck": []' in prompt
-    assert '"chosen_threshold_nm": 0.85' in prompt
+    assert '"chosen_k": 2' in prompt
 
 
 def test_window_cluster_selection_prompt_selects_only_meaningful_clusters() -> None:

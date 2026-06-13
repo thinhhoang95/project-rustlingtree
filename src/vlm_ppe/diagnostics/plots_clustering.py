@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from vlm_ppe.clustering.community_detection import CommunityDetectionRun
+from vlm_ppe.clustering.kmeans_runner import ClusteringRun
 from vlm_ppe.schemas import EvidenceImage
 
 
@@ -31,7 +31,7 @@ def _plot_tracks(ax, resampled: pd.DataFrame, labels: pd.DataFrame | None = None
 
 def render_cluster_panels(
     resampled: pd.DataFrame,
-    runs: list[CommunityDetectionRun],
+    runs: list[ClusteringRun],
     track_ids: list[str],
     output_dir: str | Path,
 ) -> list[EvidenceImage]:
@@ -40,56 +40,47 @@ def render_cluster_panels(
     evidence: list[EvidenceImage] = []
     for run in runs:
         labels = pd.DataFrame({"flight_id": track_ids, "cluster_id": run.labels})
-        community_count = int(run.metric.community_count)
-        cols = min(3, community_count)
-        rows = int(np.ceil(community_count / cols))
+        cols = min(3, run.k)
+        rows = int(np.ceil(run.k / cols))
         fig, axes = plt.subplots(rows, cols, figsize=(5.0 * cols, 4.5 * rows), squeeze=False)
-        for cluster_id in range(community_count):
+        for cluster_id in range(run.k):
             ax = axes[cluster_id // cols][cluster_id % cols]
             _plot_tracks(ax, resampled, labels, cluster_id)
             count = int((run.labels == cluster_id).sum())
-            ax.set_title(f"threshold={run.threshold_nm:.3f} NM community {cluster_id} ({count} tracks)")
-        for empty_index in range(community_count, rows * cols):
+            ax.set_title(f"K={run.k} cluster {cluster_id} ({count} tracks)")
+        for empty_index in range(run.k, rows * cols):
             axes[empty_index // cols][empty_index % cols].axis("off")
-        fig.suptitle(f"Candidate threshold={run.threshold_nm:.3f} NM: community overlays")
+        fig.suptitle(f"Candidate K={run.k}: cluster overlays")
         fig.tight_layout()
-        path = root / f"threshold_{run.candidate_id:02d}" / "cluster_panel.png"
+        path = root / f"k_{run.k:02d}" / "cluster_panel.png"
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=150)
         plt.close(fig)
         evidence.append(
-            EvidenceImage(
-                kind="cluster_panel",
-                path=path.as_posix(),
-                caption=f"Community overlay panel for threshold={run.threshold_nm:.3f} NM",
-            )
+            EvidenceImage(kind="cluster_panel", path=path.as_posix(), caption=f"Cluster overlay panel for K={run.k}")
         )
     return evidence
 
 
-def render_metrics_chart(runs: list[CommunityDetectionRun], output_dir: str | Path) -> EvidenceImage:
+def render_metrics_chart(runs: list[ClusteringRun], output_dir: str | Path) -> EvidenceImage:
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    thresholds = [run.threshold_nm for run in runs]
-    community_counts = [run.metric.community_count for run in runs]
+    k_values = [run.k for run in runs]
+    inertia = [run.metric.inertia for run in runs]
     silhouette = [np.nan if run.metric.silhouette is None else run.metric.silhouette for run in runs]
     fig, ax1 = plt.subplots(figsize=(8, 4.5))
-    ax1.plot(thresholds, community_counts, marker="o", color="#1f77b4")
-    ax1.set_xlabel("Threshold (NM)")
-    ax1.set_ylabel("Communities", color="#1f77b4")
+    ax1.plot(k_values, inertia, marker="o", color="#1f77b4")
+    ax1.set_xlabel("K")
+    ax1.set_ylabel("Inertia", color="#1f77b4")
     ax1.tick_params(axis="y", labelcolor="#1f77b4")
     ax1.grid(True, alpha=0.25)
     ax2 = ax1.twinx()
-    ax2.plot(thresholds, silhouette, marker="s", color="#d62728")
+    ax2.plot(k_values, silhouette, marker="s", color="#d62728")
     ax2.set_ylabel("Silhouette", color="#d62728")
     ax2.tick_params(axis="y", labelcolor="#d62728")
-    fig.suptitle("Community-detection candidate metrics")
+    fig.suptitle("KMeans candidate metrics")
     fig.tight_layout()
-    path = root / "cd_metrics.png"
+    path = root / "k_metrics.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    return EvidenceImage(
-        kind="metrics_chart",
-        path=path.as_posix(),
-        caption="Community count and silhouette by threshold",
-    )
+    return EvidenceImage(kind="metrics_chart", path=path.as_posix(), caption="Inertia and silhouette by K")

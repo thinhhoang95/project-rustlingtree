@@ -15,13 +15,15 @@ class PPEConfig(BaseModel):
     manifest_path: Path = Path("data_manifest.json")
     output_root: Path = Path("data/artifacts/ppe/2026-04-01")
     n_resample: int = Field(default=100, ge=2)
-    cd_threshold_min_nm: float = Field(default=0.0, ge=0.0)
-    cd_threshold_max_nm: float | None = Field(default=None, gt=0.0)
-    cd_threshold_steps: int = Field(default=8, ge=1)
-    cd_threshold_retry_growth: float = Field(default=1.5, gt=1.0)
+    k_min: int = Field(default=1, ge=1)
+    k_max: int = Field(default=8, ge=1)
+    kmeans_n_init: int = Field(default=50, ge=1)
+    kmeans_random_state: int = 17
     max_retries: int = Field(default=2, ge=0)
+    max_k_expansion: int = Field(default=12, ge=1)
     subcluster_review_enabled: bool = True
     subcluster_min_tracks: int = Field(default=4, ge=2)
+    subcluster_k_max: int = Field(default=4, ge=1)
     subcluster_max_reviews: int = Field(default=64, ge=1)
     vlm_model: str = "openai/gpt-5.5"
     vlm_reasoning_effort: Literal["low", "medium", "high"] = "medium"
@@ -42,14 +44,12 @@ class PPEConfig(BaseModel):
             raise ValueError("operation must be arrival or departure")
         return normalized
 
-    @field_validator("cd_threshold_max_nm")
+    @field_validator("k_max")
     @classmethod
-    def validate_threshold_max(cls, value: float | None, info) -> float | None:
-        if value is None:
-            return value
-        threshold_min = float(info.data.get("cd_threshold_min_nm", 0.0))
-        if value < threshold_min:
-            raise ValueError("cd_threshold_max_nm must be greater than or equal to cd_threshold_min_nm")
+    def validate_k_max(cls, value: int, info) -> int:
+        k_min = info.data.get("k_min", 1)
+        if value < k_min:
+            raise ValueError("k_max must be greater than or equal to k_min")
         return value
 
     @model_validator(mode="after")
@@ -71,19 +71,13 @@ class CoordinateSystem(BaseModel):
     proj4: str
 
 
-class CommunityMetric(BaseModel):
-    candidate_id: int
-    threshold_nm: float = Field(ge=0.0)
-    community_count: int = Field(ge=1)
-    edge_count: int = Field(ge=0)
-    edge_density: float = Field(ge=0.0, le=1.0)
+class KMetric(BaseModel):
+    k: int
+    inertia: float
     silhouette: float | None = None
-    community_count_min: int
-    community_count_max: int
-    community_count_mean: float
-    singleton_count: int = Field(ge=0)
-    mean_intra_community_distance_nm: float | None = None
-    max_intra_community_distance_nm: float | None = None
+    cluster_count_min: int
+    cluster_count_max: int
+    cluster_count_mean: float
 
 
 class EvidenceImage(BaseModel):
@@ -93,13 +87,13 @@ class EvidenceImage(BaseModel):
 
 
 class ClusterReview(BaseModel):
-    chosen_threshold_nm: float = Field(ge=0.0)
+    chosen_k: int
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: list[str] = Field(default_factory=list)
     rejected_alternatives: list[str] = Field(default_factory=list)
     clusters_to_recheck: list[int] = Field(default_factory=list)
     retry_requested: bool = False
-    requested_threshold_max_nm: float | None = Field(default=None, gt=0.0)
+    requested_k_max: int | None = Field(default=None, ge=1)
     suggested_action: Literal["accept", "retry", "human_review"] = "accept"
 
     @field_validator("rationale", "rejected_alternatives", mode="before")
@@ -240,20 +234,19 @@ class PPEState(BaseModel):
     vlm_interactions_path: str | None = None
     config: dict
     retry_count: int = 0
-    threshold_max_current_nm: float | None = None
-    chosen_threshold_override_nm: float | None = None
+    k_max_current: int
+    chosen_k_override: int | None = None
     coordinate_system: dict | None = None
     tracks_path: str | None = None
     track_index_path: str | None = None
     resampled_tracks_path: str | None = None
     features_path: str | None = None
     feature_metadata_path: str | None = None
-    community_metrics_path: str | None = None
+    k_metrics_path: str | None = None
     clustering_dir: str | None = None
     evidence_images: list[dict] = Field(default_factory=list)
     vlm_reviews: list[dict] = Field(default_factory=list)
-    chosen_threshold_nm: float | None = None
-    chosen_threshold_candidate_id: int | None = None
+    chosen_k: int | None = None
     cluster_assignments_path: str | None = None
     subcluster_tree_path: str | None = None
     subcluster_reviews: list[dict] = Field(default_factory=list)

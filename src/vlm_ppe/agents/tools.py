@@ -7,8 +7,8 @@ import pandas as pd
 
 from vlm_ppe.agents.prompts import subcluster_review_prompt
 from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
-from vlm_ppe.clustering.community_detection import load_labels, run_candidate_community_detection, write_clustering_runs
 from vlm_ppe.clustering.features import build_shape_features, load_features, subset_features, write_features
+from vlm_ppe.clustering.kmeans_runner import load_labels, run_candidate_kmeans, write_clustering_runs
 from vlm_ppe.clustering.medoid import compute_cluster_medoids, write_medoids
 from vlm_ppe.clustering.residual_windows import (
     compute_cluster_residual_profiles,
@@ -26,9 +26,9 @@ from vlm_ppe.audit import log_graph_event, log_subcluster_vlm_request, log_subcl
 from vlm_ppe.schemas import (
     ClusterMedoid,
     ClusterReview,
-    CommunityMetric,
     EvidenceImage,
     InterventionWindow,
+    KMetric,
     PPEConfig,
     PPEState,
     WindowReview,
@@ -46,28 +46,6 @@ def config_model(state: dict) -> PPEConfig:
 def append_event(state: dict, node: str, status: str, message: str | None = None, payload: dict | None = None) -> None:
     current = state_model(state)
     log_graph_event(run_dir=current.run_dir, node=node, status=status, message=message, payload=payload or {})
-
-
-def _match_threshold_candidate(
-    metrics: list[CommunityMetric],
-    threshold_nm: float,
-) -> CommunityMetric | None:
-    if not metrics:
-        return None
-    for metric in metrics:
-        if abs(float(metric.threshold_nm) - float(threshold_nm)) <= 1e-6:
-            return metric
-    nearest = min(metrics, key=lambda item: abs(float(item.threshold_nm) - float(threshold_nm)))
-    spacings = [
-        abs(float(right.threshold_nm) - float(left.threshold_nm))
-        for left, right in zip(metrics, metrics[1:], strict=False)
-        if abs(float(right.threshold_nm) - float(left.threshold_nm)) > 1e-9
-    ]
-    spacing_tolerance = min(spacings) * 0.25 if spacings else 0.01
-    tolerance = max(1e-6, min(0.01, spacing_tolerance))
-    if abs(float(nearest.threshold_nm) - float(threshold_nm)) <= tolerance:
-        return nearest
-    return None
 
 
 def ingest_tracks_tool(state: dict) -> dict:
@@ -116,25 +94,20 @@ def run_candidate_clustering_tool(state: dict) -> dict:
     if current.features_path is None:
         raise ValueError("features_path is required before clustering")
     features = load_features(current.features_path)
-    extra_thresholds = []
-    if current.chosen_threshold_override_nm is not None:
-        extra_thresholds.append(float(current.chosen_threshold_override_nm))
-    runs = run_candidate_community_detection(
+    runs = run_candidate_kmeans(
         features,
-        threshold_min_nm=config.cd_threshold_min_nm,
-        threshold_max_nm=current.threshold_max_current_nm,
-        threshold_steps=config.cd_threshold_steps,
-        extra_thresholds_nm=extra_thresholds,
+        k_min=config.k_min,
+        k_max=current.k_max_current,
+        n_init=config.kmeans_n_init,
+        random_state=config.kmeans_random_state,
     )
     clustering_dir = Path(current.run_dir) / "clustering" / f"attempt_{current.retry_count:02d}"
     metrics_path, clustering_dir_path = write_clustering_runs(runs, features.track_ids, clustering_dir)
     metrics = [run.metric.model_dump() for run in runs]
-    thresholds = [float(run.threshold_nm) for run in runs]
     return {
-        "community_metrics_path": metrics_path,
+        "k_metrics_path": metrics_path,
         "clustering_dir": clustering_dir_path,
-        "candidate_thresholds_nm": thresholds,
-        "threshold_max_current_nm": max(thresholds),
+        "candidate_k_values": [run.k for run in runs],
         "clustering_metrics": metrics,
         "status": "candidate_clustering_done",
     }
@@ -145,23 +118,13 @@ def render_evidence_pack_tool(state: dict) -> dict:
     if current.features_path is None or current.resampled_tracks_path is None or current.clustering_dir is None:
         raise ValueError("features, resampled tracks, and clustering_dir are required before rendering evidence")
     features = load_features(current.features_path)
-    metrics_frame = pd.read_csv(Path(current.community_metrics_path))
+    metrics_frame = pd.read_csv(Path(current.k_metrics_path))
     runs = []
-    from vlm_ppe.clustering.community_detection import CommunityDetectionRun
+    from vlm_ppe.clustering.kmeans_runner import ClusteringRun
 
     for row in metrics_frame.to_dict("records"):
-        candidate_id = int(row["candidate_id"])
-        labels = pd.read_csv(Path(current.clustering_dir) / f"threshold_{candidate_id:02d}_labels.csv")[
-            "cluster_id"
-        ].to_numpy()
-        runs.append(
-            CommunityDetectionRun(
-                candidate_id=candidate_id,
-                threshold_nm=float(row["threshold_nm"]),
-                labels=labels,
-                metric=CommunityMetric.model_validate(row),
-            )
-        )
+        labels = pd.read_csv(Path(current.clustering_dir) / f"k_{int(row['k']):02d}_labels.csv")["cluster_id"].to_numpy()
+        runs.append(ClusteringRun(k=int(row["k"]), labels=labels, metric=KMetric.model_validate(row)))
     resampled = read_parquet(current.resampled_tracks_path)
     evidence_dir = Path(current.run_dir) / "evidence" / "clustering" / f"attempt_{current.retry_count:02d}"
     evidence = render_cluster_panels(resampled, runs, features.track_ids, evidence_dir)
@@ -174,18 +137,10 @@ def validate_review_tool(state: dict) -> dict:
     if not current.vlm_reviews:
         raise ValueError("vlm review is required")
     review = ClusterReview.model_validate(current.vlm_reviews[-1])
-    metrics = [CommunityMetric.model_validate(item) for item in state.get("clustering_metrics", [])]
-    candidate = _match_threshold_candidate(metrics, review.chosen_threshold_nm)
-    if candidate is None:
-        available = [float(metric.threshold_nm) for metric in metrics]
-        raise ValueError(
-            f"VLM chose unavailable threshold_nm={review.chosen_threshold_nm}; available={available}"
-        )
-    return {
-        "chosen_threshold_nm": candidate.threshold_nm,
-        "chosen_threshold_candidate_id": candidate.candidate_id,
-        "status": "review_validated",
-    }
+    available = set(int(k) for k in state.get("candidate_k_values", []))
+    if review.chosen_k not in available:
+        raise ValueError(f"VLM chose unavailable K={review.chosen_k}; available={sorted(available)}")
+    return {"chosen_k": review.chosen_k, "status": "review_validated"}
 
 
 def retry_or_accept_tool(state: dict) -> dict:
@@ -195,12 +150,11 @@ def retry_or_accept_tool(state: dict) -> dict:
     retry_requested = review.retry_requested or review.suggested_action == "retry"
     can_retry = current.retry_count < config.max_retries
     if retry_requested and can_retry:
-        current_max = float(current.threshold_max_current_nm or config.cd_threshold_min_nm)
-        requested = review.requested_threshold_max_nm or current_max * config.cd_threshold_retry_growth
-        next_threshold_max = max(current_max, float(requested))
+        requested = review.requested_k_max or current.k_max_current + 2
+        next_k_max = min(config.max_k_expansion, max(current.k_max_current + 1, int(requested)))
         return {
             "retry_count": current.retry_count + 1,
-            "threshold_max_current_nm": next_threshold_max,
+            "k_max_current": next_k_max,
             "status": "retry_requested",
             "should_retry": True,
         }
@@ -212,10 +166,10 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
     config = config_model(state)
     if current.features_path is None or current.resampled_tracks_path is None:
         raise ValueError("features and resampled tracks are required before subcluster refinement")
-    if current.clustering_dir is None or current.chosen_threshold_candidate_id is None:
-        raise ValueError("clustering_dir and chosen threshold candidate are required before subcluster refinement")
+    if current.clustering_dir is None or current.chosen_k is None:
+        raise ValueError("clustering_dir and chosen_k are required before subcluster refinement")
 
-    base_labels = load_labels(current.clustering_dir, current.chosen_threshold_candidate_id)
+    base_labels = load_labels(current.clustering_dir, current.chosen_k)
     base_labels["flight_id"] = base_labels["flight_id"].astype(str)
     base_labels["cluster_id"] = base_labels["cluster_id"].astype(int)
     features = load_features(current.features_path)
@@ -277,18 +231,19 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         if review_count >= config.subcluster_max_reviews:
             return accept_leaf(node, track_ids, "subcluster review budget exhausted")
 
-        local_features = subset_features(features, track_ids)
-        runs = run_candidate_community_detection(
-            local_features,
-            threshold_min_nm=config.cd_threshold_min_nm,
-            threshold_max_nm=None,
-            threshold_steps=config.cd_threshold_steps,
-            extra_thresholds_nm=None,
-        )
-        available_thresholds_nm = [float(run.threshold_nm) for run in runs]
-        if len(available_thresholds_nm) <= 1:
-            return accept_leaf(node, track_ids, "only one local threshold is available")
+        local_k_max = min(int(config.subcluster_k_max), len(track_ids))
+        available_k = list(range(1, local_k_max + 1))
+        if len(available_k) <= 1:
+            return accept_leaf(node, track_ids, "only K=1 is available")
 
+        local_features = subset_features(features, track_ids)
+        runs = run_candidate_kmeans(
+            local_features,
+            k_min=1,
+            k_max=local_k_max,
+            n_init=config.kmeans_n_init,
+            random_state=config.kmeans_random_state + review_count,
+        )
         clustering_dir = Path(current.run_dir) / "clustering" / "subclusters" / node_id
         metrics_path, clustering_dir_path = write_clustering_runs(runs, local_features.track_ids, clustering_dir)
         evidence_dir = Path(current.run_dir) / "evidence" / "subclustering" / node_id
@@ -307,17 +262,14 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         metrics_image = render_metrics_chart(runs, evidence_dir).model_copy(
             update={
                 "kind": "subcluster_metrics_chart",
-                "caption": (
-                    f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: "
-                    "community count and silhouette by threshold"
-                ),
+                "caption": f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: inertia and silhouette by K",
             }
         )
         evidence.append(metrics_image)
         metrics = [run.metric for run in runs]
         prompt = subcluster_review_prompt(
             metrics,
-            available_thresholds_nm,
+            available_k,
             root_cluster_id=root_cluster_id,
             lineage=lineage,
             depth=depth,
@@ -334,22 +286,20 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
             prompt=prompt,
             evidence_images=evidence,
             metrics=metrics,
-            available_thresholds_nm=available_thresholds_nm,
+            available_k=available_k,
         )
         review_count += 1
         review = client().review_clusters(
             evidence_images=evidence,
             metrics=metrics,
-            available_thresholds_nm=available_thresholds_nm,
+            available_k=available_k,
             attempt=0,
             max_retries=0,
             prompt=prompt,
         )
-        chosen_metric = _match_threshold_candidate(metrics, review.chosen_threshold_nm)
-        if chosen_metric is None:
+        if int(review.chosen_k) not in set(available_k):
             raise ValueError(
-                f"subcluster review for {node_id} chose unavailable threshold_nm={review.chosen_threshold_nm}; "
-                f"available={available_thresholds_nm}"
+                f"subcluster review for {node_id} chose unavailable K={review.chosen_k}; available={available_k}"
             )
         review_dir = Path(current.run_dir) / "vlm_reviews" / "subclusters"
         review_dir.mkdir(parents=True, exist_ok=True)
@@ -377,24 +327,22 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         node.update(
             {
                 "status": "reviewed",
-                "community_metrics_path": metrics_path,
+                "k_metrics_path": metrics_path,
                 "clustering_dir": clustering_dir_path,
                 "evidence_images": [image.model_dump() for image in evidence],
-                "chosen_threshold_nm": float(chosen_metric.threshold_nm),
-                "chosen_threshold_candidate_id": int(chosen_metric.candidate_id),
+                "chosen_k": int(review.chosen_k),
                 "review_path": review_path.as_posix(),
             }
         )
 
         if review.suggested_action == "human_review":
             return accept_leaf(node, track_ids, "subcluster review requested human review")
+        if int(review.chosen_k) <= 1:
+            return accept_leaf(node, track_ids, "VLM chose K=1")
 
-        chosen_labels = load_labels(clustering_dir_path, int(chosen_metric.candidate_id))
+        chosen_labels = load_labels(clustering_dir_path, int(review.chosen_k))
         chosen_labels["flight_id"] = chosen_labels["flight_id"].astype(str)
         chosen_labels["cluster_id"] = chosen_labels["cluster_id"].astype(int)
-        if chosen_labels["cluster_id"].nunique() <= 1:
-            return accept_leaf(node, track_ids, "VLM chose a one-community threshold")
-
         child_node_ids: list[str] = []
         for child_cluster_id in sorted(chosen_labels["cluster_id"].unique()):
             child_track_ids = (
@@ -431,7 +379,7 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
     tree_path = output_dir / "subcluster_tree.json"
     tree_payload = {
         "enabled": bool(config.subcluster_review_enabled),
-        "global_chosen_threshold_nm": float(current.chosen_threshold_nm or 0.0),
+        "global_chosen_k": int(current.chosen_k),
         "final_cluster_count": int(final_cluster_id),
         "review_count": int(review_count),
         "nodes": tree_nodes,
@@ -456,8 +404,8 @@ def compute_medoids_tool(state: dict) -> dict:
     resampled = read_parquet(current.resampled_tracks_path)
     if current.cluster_assignments_path is not None:
         labels = pd.read_csv(current.cluster_assignments_path)
-    elif current.clustering_dir is not None and current.chosen_threshold_candidate_id is not None:
-        labels = load_labels(current.clustering_dir, current.chosen_threshold_candidate_id)
+    elif current.clustering_dir is not None and current.chosen_k is not None:
+        labels = load_labels(current.clustering_dir, current.chosen_k)
     else:
         raise ValueError("cluster assignments or chosen clustering outputs are required before medoid extraction")
     medoids = compute_cluster_medoids(resampled, labels)

@@ -20,7 +20,7 @@ def write_medoid_report(
         "",
         "## VLM Cluster Review",
         "",
-        f"- Chosen CD threshold: {review.chosen_threshold_nm:.6f} NM",
+        f"- Chosen K: {review.chosen_k}",
         f"- Confidence: {review.confidence:.3f}",
         f"- Suggested action: {review.suggested_action}",
         "",
