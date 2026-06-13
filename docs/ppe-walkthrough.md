@@ -342,6 +342,9 @@ Key state fields include:
 - `intervention_windows_path`
 - `intervention_windows`
 - `window_evidence_images`
+- `window_cluster_selection`
+- `window_cluster_selection_path`
+- `selected_window_cluster_ids`
 - `window_reviews`
 - `window_review_paths`
 - `audit_log_path`
@@ -671,12 +674,19 @@ Implemented by:
 - `render_window_diagnostics_tool()` in `agents/tools.py`
 - `render_residual_window_diagnostics()` in `diagnostics/plots_residuals.py`
 - `vlm_classify_windows` node in `agents/graph.py`
+- `window_cluster_selection_prompt()` in `agents/prompts.py`
 - `window_review_prompt()` in `agents/prompts.py`
 
-The VLM receives residual plots with station-index guides. The x-axis ticks are
+The VLM first receives all residual diagnostic plots plus cluster summaries and
+selects which clusters should proceed to detailed intervention-window analysis.
+This required triage step skips outlier quarantines, one-off/tiny scattered
+groups, and visually incoherent clusters where window classification would mostly
+describe noise.
+
+Only selected clusters receive residual-window prompts. The x-axis ticks are
 dense enough to expose station choices without labeling every resampled point on
-long templates. The VLM proposes `start_station_index`, `end_station_index`, and
-a class label for each window:
+long templates. For selected clusters, the VLM proposes `start_station_index`,
+`end_station_index`, and a class label for each window:
 
 ```text
 no_stretch, dogleg, trombone, PMS, other
@@ -692,6 +702,12 @@ range or return a complete revised window list. This loop is bounded by
 `validate_window_reviews` checks that proposed station bounds exist for that
 cluster, derives nautical-mile spans and peak metrics from the residual profile,
 and writes `residuals/intervention_windows.parquet`.
+
+Additional outputs:
+
+- `vlm_reviews/windows/cluster_selection.json`
+- `vlm_reviews/windows/cluster_selection_request.json`
+- `vlm_reviews/windows/cluster_selection_prompt.txt`
 
 ## Audit And Logging
 

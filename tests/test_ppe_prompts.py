@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from vlm_ppe.agents.prompts import cluster_review_prompt, subcluster_review_prompt, window_review_prompt
-from vlm_ppe.schemas import KMetric
+from vlm_ppe.agents.prompts import (
+    cluster_review_prompt,
+    subcluster_review_prompt,
+    window_cluster_selection_prompt,
+    window_review_prompt,
+)
+from vlm_ppe.schemas import ClusterMedoid, KMetric
 from vlm_ppe.schemas import WindowReview
 
 
@@ -37,12 +42,34 @@ def test_subcluster_review_prompt_explains_local_k_and_overdetail_guardrail() ->
     assert "Choose the local K for this cluster" in prompt
     assert "K=1 means the cluster is already one practical path pattern" in prompt
     assert "Require clean separation" in prompt
-    assert "higher K when extra clusters isolate noise" in prompt
+    assert "Outliers can hide real repeated geometry" in prompt
+    assert "do not reject a higher K only because it contains tiny outlier/noise clusters" in prompt
     assert "split children stop at depth 1" in prompt
     assert "will not keep looping" in prompt
     assert 'do not return "split"' in prompt
     assert '"clusters_to_recheck": []' in prompt
     assert '"chosen_k": 2' in prompt
+
+
+def test_window_cluster_selection_prompt_selects_only_meaningful_clusters() -> None:
+    prompt = window_cluster_selection_prompt(
+        [
+            ClusterMedoid(
+                cluster_id=0,
+                medoid_track_id="T0",
+                n_tracks=120,
+                mean_distance_nm=1.2,
+                max_distance_nm=5.4,
+                template_points=[(0.0, 0.0), (1.0, 1.0)],
+            )
+        ]
+    )
+
+    assert "Select only clusters that should proceed to detailed intervention-window analysis" in prompt
+    assert "outlier quarantines" in prompt
+    assert '"selected_cluster_ids": [0, 2, 4]' in prompt
+    assert '"skipped_clusters"' in prompt
+    assert '"n_tracks":120' in prompt
 
 
 def test_window_review_prompt_uses_literal_classification_example() -> None:

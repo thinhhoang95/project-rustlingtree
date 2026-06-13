@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from vlm_ppe.schemas import KMetric
+from vlm_ppe.schemas import ClusterMedoid, KMetric
 
 
 def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attempt: int, max_retries: int) -> str:
@@ -51,8 +51,11 @@ def subcluster_review_prompt(
         "K>1 means there are visually distinct, repeated subcluster patterns worth splitting.\n"
         "Require clean separation: every trajectory subcluster you keep as an operational pattern must have visibly "
         "distinct geometry from the others. Do not split one trajectory family on spacing, density, or minor noisy variation.\n"
-        "You may choose a higher K when extra clusters isolate noise, one-off tracks, or outliers and the remaining "
-        "trajectory subclusters separate cleanly. Do not choose a higher K only because it improves a metric.\n"
+        "Outliers can hide real repeated geometry. When comparing K values, first identify tiny, scattered, or one-off "
+        "clusters as outlier/noise quarantine candidates, then judge whether the remaining non-outlier clusters expose "
+        "cleanly distinct repeated trajectory families. A higher K is appropriate when it both quarantines outliers/noise "
+        "and separates repeated geometries that lower K leaves merged. Do not choose a higher K only because it improves "
+        "a metric, and do not reject a higher K only because it contains tiny outlier/noise clusters.\n"
         "This is a single local split pass. If you choose K>1, the resulting child clusters become final leaves; "
         "the workflow will not keep looping until another VLM review green-lights them.\n\n"
         f"Root/global cluster ID: {root_cluster_id}.\n"
@@ -74,6 +77,39 @@ def subcluster_review_prompt(
         '  "clusters_to_recheck": [],\n'
         '  "retry_requested": false,\n'
         '  "requested_k_max": null,\n'
+        '  "suggested_action": "accept"\n'
+        "}\n"
+    )
+
+
+def window_cluster_selection_prompt(medoids: list[ClusterMedoid]) -> str:
+    medoid_payload = [
+        {
+            "cluster_id": medoid.cluster_id,
+            "n_tracks": medoid.n_tracks,
+            "mean_distance_nm": medoid.mean_distance_nm,
+            "max_distance_nm": medoid.max_distance_nm,
+        }
+        for medoid in sorted(medoids, key=lambda item: item.cluster_id)
+    ]
+    return (
+        "You are triaging VLM-PPE trajectory clusters before residual-window classification.\n"
+        "Use only the provided medoid/residual diagnostic images and cluster summary JSON. Do not infer from AIP charts.\n"
+        "Select only clusters that should proceed to detailed intervention-window analysis.\n\n"
+        "Select a cluster when it represents a coherent repeated trajectory family with enough supporting tracks to make "
+        "a meaningful intervention-window judgment. Skip clusters that appear to be outlier quarantines, one-off tracks, "
+        "tiny scattered groups, or visually incoherent mixtures where window classification would mostly describe noise. "
+        "Small clusters may still be selected if the evidence shows a repeated, coherent operational pattern; large clusters "
+        "may be skipped if they are visibly noncoherent.\n\n"
+        f"Cluster summaries JSON: {json.dumps(medoid_payload, separators=(',', ':'))}\n\n"
+        "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
+        "even when there is only one item. `selected_cluster_ids` controls which clusters receive window-review prompts:\n"
+        "{\n"
+        '  "selected_cluster_ids": [0, 2, 4],\n'
+        '  "rationale": ["Selected clusters have coherent repeated geometry and enough tracks for window analysis."],\n'
+        '  "skipped_clusters": [\n'
+        '    {"cluster_id": 1, "reason": "Tiny scattered outlier/noise group, not a stable trajectory family."}\n'
+        "  ],\n"
         '  "suggested_action": "accept"\n'
         "}\n"
     )

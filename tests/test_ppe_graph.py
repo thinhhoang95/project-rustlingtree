@@ -10,7 +10,7 @@ from vlm_ppe.agents.graph import run_graph
 from vlm_ppe.agents.vlm_client import ClusterReviewClient
 from vlm_ppe.config import load_config
 from vlm_ppe.geo.projection import LocalProjection
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
+from vlm_ppe.schemas import ClusterMedoid, ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
 
 
 class FakeReviewClient(ClusterReviewClient):
@@ -19,6 +19,7 @@ class FakeReviewClient(ClusterReviewClient):
         self.propose_window = propose_window
         self.calls = 0
         self.window_calls = 0
+        self.window_cluster_selection_calls = 0
 
     def review_clusters(
         self,
@@ -72,6 +73,7 @@ class FakeReviewClient(ClusterReviewClient):
         if attempt == 0:
             return WindowReview(
                 cluster_id=cluster_id,
+                pattern_count=1,
                 windows=[
                     {
                         "window_id": f"C{cluster_id}_W1",
@@ -89,6 +91,7 @@ class FakeReviewClient(ClusterReviewClient):
         assert any("highlighted" in image.caption for image in evidence_images)
         return WindowReview(
             cluster_id=cluster_id,
+            pattern_count=1,
             windows=[
                 {
                     "window_id": f"C{cluster_id}_W1",
@@ -100,6 +103,23 @@ class FakeReviewClient(ClusterReviewClient):
                 }
             ],
             outlier_notes=[],
+            suggested_action="accept",
+        )
+
+    def review_window_clusters(
+        self,
+        *,
+        evidence_images: list[EvidenceImage],
+        medoids: list[ClusterMedoid],
+        prompt: str | None = None,
+    ) -> WindowClusterSelection:
+        self.window_cluster_selection_calls += 1
+        assert prompt
+        assert evidence_images
+        return WindowClusterSelection(
+            selected_cluster_ids=[int(medoid.cluster_id) for medoid in medoids],
+            rationale=["All fixture clusters are eligible for window review."],
+            skipped_clusters=[],
             suggested_action="accept",
         )
 
@@ -375,6 +395,7 @@ def test_graph_enriches_vlm_proposed_windows(tmp_path: Path) -> None:
 
     assert result["status"] == "complete"
     assert client.window_calls == 2
+    assert client.window_cluster_selection_calls == 1
     assert len(result["intervention_windows"]) == 1
     assert result["intervention_windows"][0]["start_station_index"] == 3
     assert result["intervention_windows"][0]["end_station_index"] == 6
@@ -382,6 +403,8 @@ def test_graph_enriches_vlm_proposed_windows(tmp_path: Path) -> None:
     assert len(result["window_review_paths"]) == 2
     assert all(Path(path).exists() for path in result["window_review_paths"])
     assert result["window_evidence_images"]
+    assert result["selected_window_cluster_ids"] == [0]
+    assert result["window_cluster_selection"]["selected_cluster_ids"] == [0]
     assert any("highlighted" in image["caption"] for image in result["window_evidence_images"])
 
 
@@ -393,6 +416,7 @@ def test_graph_loops_until_declared_window_patterns_are_identified(tmp_path: Pat
 
     assert result["status"] == "complete"
     assert client.window_calls == 4
+    assert client.window_cluster_selection_calls == 1
     assert len(result["intervention_windows"]) == 2
     assert [window["window_id"] for window in result["intervention_windows"]] == ["C0_W1", "C0_W2"]
     assert [window["start_station_index"] for window in result["intervention_windows"]] == [3, 8]
@@ -412,6 +436,38 @@ def test_chosen_k_override_still_uses_fake_vlm_for_windows(tmp_path: Path, monke
     assert result["status"] == "complete"
     assert result["vlm_reviews"][-1]["confidence"] == 1.0
     assert result["window_reviews"]
+
+
+def test_graph_skips_window_review_for_unselected_clusters(tmp_path: Path) -> None:
+    config = load_config(_write_fixture(tmp_path))
+
+    class SkippingReviewClient(FakeReviewClient):
+        def review_window_clusters(
+            self,
+            *,
+            evidence_images: list[EvidenceImage],
+            medoids: list[ClusterMedoid],
+            prompt: str | None = None,
+        ) -> WindowClusterSelection:
+            self.window_cluster_selection_calls += 1
+            assert prompt
+            assert evidence_images
+            return WindowClusterSelection(
+                selected_cluster_ids=[0],
+                rationale=["Only cluster 0 is coherent enough for window review."],
+                skipped_clusters=[{"cluster_id": 1, "reason": "Too small or outlier-like."}],
+                suggested_action="accept",
+            )
+
+    client = SkippingReviewClient()
+
+    result = run_graph(config, run_id="skip-window-clusters-run", vlm_client=client)
+
+    assert result["status"] == "complete"
+    assert client.window_cluster_selection_calls == 1
+    assert client.window_calls == 1
+    assert result["selected_window_cluster_ids"] == [0]
+    assert [review["cluster_id"] for review in result["window_reviews"]] == [0]
 
 
 def test_missing_api_key_without_override_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

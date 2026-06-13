@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
+from vlm_ppe.agents.prompts import cluster_review_prompt, window_cluster_selection_prompt, window_review_prompt
+from vlm_ppe.schemas import ClusterMedoid, ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -35,6 +35,15 @@ class ClusterReviewClient(Protocol):
         previous_review_json: str | None = None,
         prompt: str | None = None,
     ) -> WindowReview:
+        ...
+
+    def review_window_clusters(
+        self,
+        *,
+        evidence_images: list[EvidenceImage],
+        medoids: list[ClusterMedoid],
+        prompt: str | None = None,
+    ) -> WindowClusterSelection:
         ...
 
 
@@ -90,6 +99,17 @@ class OpenRouterVLMClient:
         )
         text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
         return WindowReview.model_validate(json.loads(text))
+
+    def review_window_clusters(
+        self,
+        *,
+        evidence_images: list[EvidenceImage],
+        medoids: list[ClusterMedoid],
+        prompt: str | None = None,
+    ) -> WindowClusterSelection:
+        resolved_prompt = prompt or window_cluster_selection_prompt(medoids)
+        text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
+        return WindowClusterSelection.model_validate(json.loads(text))
 
     def _request_json_text(self, *, prompt: str, evidence_images: list[EvidenceImage]) -> str:
         try:

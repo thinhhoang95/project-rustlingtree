@@ -7,7 +7,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
+from vlm_ppe.agents.prompts import cluster_review_prompt, window_cluster_selection_prompt, window_review_prompt
 from vlm_ppe.agents.tools import (
     append_event,
     build_features_tool,
@@ -31,6 +31,8 @@ from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
 from vlm_ppe.audit import (
     log_vlm_request,
     log_vlm_response,
+    log_window_cluster_selection_request,
+    log_window_cluster_selection_response,
     log_window_vlm_request,
     log_window_vlm_response,
     setup_audit_logging,
@@ -43,6 +45,7 @@ from vlm_ppe.schemas import (
     PPEConfig,
     PPEState,
     WindowProposal,
+    WindowClusterSelection,
     WindowReview,
 )
 
@@ -141,8 +144,32 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
         review_dir = Path(current.run_dir) / "vlm_reviews" / "windows"
         review_dir.mkdir(parents=True, exist_ok=True)
 
+        selection_prompt = window_cluster_selection_prompt(medoids)
+        log_window_cluster_selection_request(
+            run_dir=current.run_dir,
+            model=config.vlm_model,
+            prompt=selection_prompt,
+            evidence_images=evidence,
+        )
+        selection = client.review_window_clusters(
+            evidence_images=evidence,
+            medoids=medoids,
+            prompt=selection_prompt,
+        )
+        selection = _validate_window_cluster_selection(selection, medoids)
+        selection_path = review_dir / "cluster_selection.json"
+        selection_path.write_text(selection.model_dump_json(indent=2), encoding="utf-8")
+        log_window_cluster_selection_response(
+            run_dir=current.run_dir,
+            selection=selection,
+            response_path=selection_path.as_posix(),
+        )
+
+        selected_cluster_ids = set(selection.selected_cluster_ids)
         for medoid in sorted(medoids, key=lambda item: item.cluster_id):
             cluster_id = int(medoid.cluster_id)
+            if cluster_id not in selected_cluster_ids:
+                continue
             baseline_evidence = _cluster_window_evidence(evidence, cluster_id)
             accepted_windows: list[WindowProposal] = []
             outlier_notes: list[str] = []
@@ -243,11 +270,8 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
 
                 accepted_windows.extend(final_pattern_review.windows)
 
-                # Backward compatibility: older clients that omit pattern_count
-                # are interpreted as returning the complete current best list.
                 if pattern_count is None:
-                    all_patterns_identified = True
-                    break
+                    raise ValueError(f"window review for cluster_id={cluster_id} omitted pattern_count")
                 if all_patterns_identified or len(accepted_windows) >= pattern_count:
                     all_patterns_identified = True
                     break
@@ -267,6 +291,9 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
 
         return {
             "window_evidence_images": [item.model_dump() for item in all_evidence],
+            "window_cluster_selection": selection.model_dump(),
+            "window_cluster_selection_path": selection_path.as_posix(),
+            "selected_window_cluster_ids": selection.selected_cluster_ids,
             "window_reviews": [review.model_dump() for review in reviews],
             "window_review_paths": review_paths,
             "status": "vlm_reviewed_windows",
@@ -285,6 +312,31 @@ def _window_proposals_json(windows: list[WindowProposal]) -> str | None:
     if not windows:
         return None
     return "[" + ",".join(window.model_dump_json() for window in windows) + "]"
+
+
+def _validate_window_cluster_selection(
+    selection: WindowClusterSelection,
+    medoids: list[ClusterMedoid],
+) -> WindowClusterSelection:
+    if selection.suggested_action == "human_review":
+        raise ValueError("window cluster selection requested human review")
+
+    known_ids = {int(medoid.cluster_id) for medoid in medoids}
+    selected_ids: list[int] = []
+    seen: set[int] = set()
+    for cluster_id in selection.selected_cluster_ids:
+        normalized = int(cluster_id)
+        if normalized not in known_ids:
+            raise ValueError(f"window cluster selection referenced unknown cluster_id={normalized}")
+        if normalized not in seen:
+            selected_ids.append(normalized)
+            seen.add(normalized)
+
+    for skipped in selection.skipped_clusters:
+        if int(skipped.cluster_id) not in known_ids:
+            raise ValueError(f"window cluster selection skipped unknown cluster_id={skipped.cluster_id}")
+
+    return selection.model_copy(update={"selected_cluster_ids": sorted(selected_ids)})
 
 
 def _normalize_window_ids(cluster_id: int, review: WindowReview, accepted_windows: list[WindowProposal]) -> WindowReview:

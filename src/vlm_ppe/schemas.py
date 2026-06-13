@@ -195,6 +195,35 @@ class WindowReview(BaseModel):
         return [item.strip() for item in value if item.strip()]
 
 
+class WindowClusterSkip(BaseModel):
+    cluster_id: int
+    reason: str = ""
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        return value.strip()
+
+
+class WindowClusterSelection(BaseModel):
+    selected_cluster_ids: list[int] = Field(default_factory=list)
+    rationale: list[str] = Field(default_factory=list)
+    skipped_clusters: list[WindowClusterSkip] = Field(default_factory=list)
+    suggested_action: Literal["accept", "human_review"] = "accept"
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def coerce_rationale(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("rationale")
+    @classmethod
+    def clean_rationale(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+
 class PPEState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -229,6 +258,9 @@ class PPEState(BaseModel):
     intervention_windows_path: str | None = None
     intervention_windows: list[dict] = Field(default_factory=list)
     window_evidence_images: list[dict] = Field(default_factory=list)
+    window_cluster_selection: dict | None = None
+    window_cluster_selection_path: str | None = None
+    selected_window_cluster_ids: list[int] = Field(default_factory=list)
     window_reviews: list[dict] = Field(default_factory=list)
     window_review_paths: list[str] = Field(default_factory=list)
     status: str = "initialized"

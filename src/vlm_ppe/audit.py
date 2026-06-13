@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
 
 LOGGER_NAME = "vlm_ppe.audit"
 
@@ -361,6 +361,66 @@ def log_window_vlm_request(
         len(image_records),
     )
     return request_path.as_posix()
+
+
+def log_window_cluster_selection_request(
+    *,
+    run_dir: str | Path,
+    model: str,
+    prompt: str,
+    evidence_images: list[EvidenceImage],
+) -> str:
+    root = Path(run_dir)
+    review_dir = root / "vlm_reviews" / "windows"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    image_records = [_image_record(image) for image in evidence_images]
+    prompt_path = review_dir / "cluster_selection_prompt.txt"
+    request_path = review_dir / "cluster_selection_request.json"
+    request_payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_window_cluster_selection_request",
+        "model": model,
+        "prompt_path": prompt_path.as_posix(),
+        "images": image_records,
+    }
+    prompt_path.write_text(prompt, encoding="utf-8")
+    with request_path.open("w", encoding="utf-8") as stream:
+        json.dump(_json_safe({**request_payload, "prompt": prompt}), stream, indent=2, ensure_ascii=False)
+    _append_jsonl(root / "vlm_interactions.jsonl", request_payload)
+
+    logger = get_audit_logger(root)
+    logger.info(
+        "VLM window cluster selection prepared: model=%s images=%d",
+        model,
+        len(image_records),
+    )
+    return request_path.as_posix()
+
+
+def log_window_cluster_selection_response(
+    *,
+    run_dir: str | Path,
+    selection: WindowClusterSelection,
+    response_path: str,
+) -> None:
+    root = Path(run_dir)
+    payload = {
+        "timestamp_utc": utc_now_iso(),
+        "event": "vlm_window_cluster_selection_response",
+        "response_path": response_path,
+        "selection": selection.model_dump(),
+    }
+    _append_jsonl(root / "vlm_interactions.jsonl", payload)
+    logger = get_audit_logger(root)
+    logger.info(
+        "VLM window cluster selection response: selected=%s skipped=%d action=%s response=%s",
+        selection.selected_cluster_ids,
+        len(selection.skipped_clusters),
+        selection.suggested_action,
+        response_path,
+    )
+    for skipped in selection.skipped_clusters:
+        logger.info("VLM window cluster skipped: cluster=%s reason=%s", skipped.cluster_id, skipped.reason)
 
 
 def log_window_vlm_response(
