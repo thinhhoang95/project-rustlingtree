@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from vlm_ppe.agents.vlm_client import OpenRouterVLMClient
-from vlm_ppe.schemas import ClusterMedoid, EvidenceImage, KMetric
+from vlm_ppe.schemas import EvidenceImage, KMetric
 
 
 def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeypatch) -> None:
@@ -158,6 +158,8 @@ def test_openrouter_client_reviews_windows(tmp_path: Path, monkeypatch) -> None:
     review = client.review_windows(
         cluster_id=2,
         evidence_images=[EvidenceImage(kind="residual_windows", path=image_path.as_posix(), caption="Cluster 2 windows")],
+        pattern_count=1,
+        pattern_index=1,
         prompt="Classify windows.",
     )
 
@@ -166,8 +168,8 @@ def test_openrouter_client_reviews_windows(tmp_path: Path, monkeypatch) -> None:
     assert calls["request"]["messages"][0]["content"][0] == {"type": "text", "text": "Classify windows."}
 
 
-def test_openrouter_client_selects_window_clusters(tmp_path: Path, monkeypatch) -> None:
-    image_path = tmp_path / "windows.png"
+def test_openrouter_client_reviews_subcluster_polygons(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "subclusters.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     calls: dict[str, Any] = {}
@@ -177,9 +179,18 @@ def test_openrouter_client_selects_window_clusters(tmp_path: Path, monkeypatch) 
             calls["request"] = kwargs
             content = json.dumps(
                 {
-                    "selected_cluster_ids": [0],
-                    "rationale": ["Cluster 0 is coherent enough for window review."],
-                    "skipped_clusters": [{"cluster_id": 1, "reason": "Outlier quarantine."}],
+                    "subcluster_count": 2,
+                    "confidence": 0.8,
+                    "rationale": ["Two repeated paths cross different gates."],
+                    "subclusters": [
+                        {
+                            "subcluster_id": 1,
+                            "label": "Subcluster 1",
+                            "polygon": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+                            "rationale": "Upper path.",
+                        }
+                    ],
+                    "uncaptured_tracks_policy": "keep_as_residual",
                     "suggested_action": "accept",
                 }
             )
@@ -194,21 +205,60 @@ def test_openrouter_client_selects_window_clusters(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
 
     client = OpenRouterVLMClient(model="google/gemini-2.5-flash")
-    selection = client.review_window_clusters(
-        evidence_images=[EvidenceImage(kind="residual_windows", path=image_path.as_posix(), caption="Cluster 0 windows")],
-        medoids=[
-            ClusterMedoid(
-                cluster_id=0,
-                medoid_track_id="T0",
-                n_tracks=12,
-                mean_distance_nm=1.0,
-                max_distance_nm=3.0,
-                template_points=[(0.0, 0.0), (1.0, 1.0)],
-            )
+    review = client.review_subclusters(
+        root_cluster_id=2,
+        evidence_images=[
+            EvidenceImage(kind="subcluster_capture_prompt", path=image_path.as_posix(), caption="Cluster 2")
         ],
-        prompt="Select clusters.",
+        n_tracks=12,
+        max_subclusters=3,
+        coordinate_bounds={"x_min_nm": 0.0, "x_max_nm": 1.0, "y_min_nm": 0.0, "y_max_nm": 1.0},
+        prompt="Draw polygons.",
     )
 
-    assert selection.selected_cluster_ids == [0]
-    assert selection.skipped_clusters[0].reason == "Outlier quarantine."
-    assert calls["request"]["messages"][0]["content"][0] == {"type": "text", "text": "Select clusters."}
+    assert review.subcluster_count == 2
+    assert review.subclusters[0].label == "Subcluster 1"
+    assert calls["request"]["messages"][0]["content"][0] == {"type": "text", "text": "Draw polygons."}
+
+
+def test_openrouter_client_reviews_window_pattern_count(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "windows.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    calls: dict[str, Any] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs: Any) -> Any:
+            calls["request"] = kwargs
+            content = json.dumps(
+                {
+                    "cluster_id": 0,
+                    "pattern_count": 2,
+                    "confidence": 0.83,
+                    "rationale": ["Two separated residual peaks align with distinct maneuver regions."],
+                    "outlier_notes": ["One late deviation is too weak to count."],
+                    "suggested_action": "accept",
+                }
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+
+    client = OpenRouterVLMClient(model="google/gemini-2.5-flash")
+    review = client.review_window_pattern_count(
+        cluster_id=0,
+        evidence_images=[EvidenceImage(kind="residual_windows", path=image_path.as_posix(), caption="Cluster 0 windows")],
+        max_patterns=8,
+        prompt="Count patterns.",
+    )
+
+    assert review.cluster_id == 0
+    assert review.pattern_count == 2
+    assert review.rationale == ["Two separated residual peaks align with distinct maneuver regions."]
+    assert calls["request"]["messages"][0]["content"][0] == {"type": "text", "text": "Count patterns."}

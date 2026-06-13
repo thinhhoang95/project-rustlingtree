@@ -7,7 +7,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from vlm_ppe.agents.prompts import cluster_review_prompt, window_cluster_selection_prompt, window_review_prompt
+from vlm_ppe.agents.prompts import cluster_review_prompt, window_pattern_count_prompt, window_review_prompt
 from vlm_ppe.agents.tools import (
     append_event,
     build_features_tool,
@@ -31,8 +31,8 @@ from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
 from vlm_ppe.audit import (
     log_vlm_request,
     log_vlm_response,
-    log_window_cluster_selection_request,
-    log_window_cluster_selection_response,
+    log_window_pattern_count_vlm_request,
+    log_window_pattern_count_vlm_response,
     log_window_vlm_request,
     log_window_vlm_response,
     setup_audit_logging,
@@ -45,7 +45,7 @@ from vlm_ppe.schemas import (
     PPEConfig,
     PPEState,
     WindowProposal,
-    WindowClusterSelection,
+    WindowPatternCountReview,
     WindowReview,
 )
 
@@ -140,46 +140,73 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
 
         reviews: list[WindowReview] = []
         review_paths: list[str] = []
+        pattern_count_reviews: list[WindowPatternCountReview] = []
+        pattern_count_review_paths: list[str] = []
         all_evidence: list[EvidenceImage] = [*evidence]
         review_dir = Path(current.run_dir) / "vlm_reviews" / "windows"
         review_dir.mkdir(parents=True, exist_ok=True)
 
-        selection_prompt = window_cluster_selection_prompt(medoids)
-        log_window_cluster_selection_request(
-            run_dir=current.run_dir,
-            model=config.vlm_model,
-            prompt=selection_prompt,
-            evidence_images=evidence,
-        )
-        selection = client.review_window_clusters(
-            evidence_images=evidence,
-            medoids=medoids,
-            prompt=selection_prompt,
-        )
-        selection = _validate_window_cluster_selection(selection, medoids)
-        selection_path = review_dir / "cluster_selection.json"
-        selection_path.write_text(selection.model_dump_json(indent=2), encoding="utf-8")
-        log_window_cluster_selection_response(
-            run_dir=current.run_dir,
-            selection=selection,
-            response_path=selection_path.as_posix(),
-        )
-
-        selected_cluster_ids = set(selection.selected_cluster_ids)
         for medoid in sorted(medoids, key=lambda item: item.cluster_id):
             cluster_id = int(medoid.cluster_id)
-            if cluster_id not in selected_cluster_ids:
-                continue
             baseline_evidence = _cluster_window_evidence(evidence, cluster_id)
             accepted_windows: list[WindowProposal] = []
-            outlier_notes: list[str] = []
-            pattern_count: int | None = None
-            all_patterns_identified = False
-            final_action = "accept"
-            global_attempt = 0
             max_patterns = int(config.window_review_max_patterns)
+            count_prompt = window_pattern_count_prompt(cluster_id, max_patterns=max_patterns)
+            log_window_pattern_count_vlm_request(
+                run_dir=current.run_dir,
+                cluster_id=cluster_id,
+                model=config.vlm_model,
+                prompt=count_prompt,
+                evidence_images=baseline_evidence,
+            )
+            count_review = client.review_window_pattern_count(
+                cluster_id=cluster_id,
+                evidence_images=baseline_evidence,
+                max_patterns=max_patterns,
+                prompt=count_prompt,
+            )
+            count_review = _validate_window_pattern_count_review(count_review, cluster_id, max_patterns)
+            count_path = review_dir / f"cluster_{cluster_id:02d}_pattern_count.json"
+            count_path.write_text(count_review.model_dump_json(indent=2), encoding="utf-8")
+            log_window_pattern_count_vlm_response(
+                run_dir=current.run_dir,
+                review=count_review,
+                response_path=count_path.as_posix(),
+            )
+            pattern_count_reviews.append(count_review)
+            pattern_count_review_paths.append(count_path.as_posix())
 
-            while len(accepted_windows) < max_patterns:
+            pattern_count = int(count_review.pattern_count)
+            outlier_notes: list[str] = [*count_review.outlier_notes]
+            all_patterns_identified = False
+            final_action = count_review.suggested_action
+            global_attempt = 0
+
+            if count_review.suggested_action == "human_review":
+                reviews.append(
+                    WindowReview(
+                        cluster_id=cluster_id,
+                        windows=[],
+                        outlier_notes=_dedupe_text(outlier_notes),
+                        all_patterns_identified=False,
+                        suggested_action="human_review",
+                    )
+                )
+                continue
+
+            if pattern_count == 0:
+                reviews.append(
+                    WindowReview(
+                        cluster_id=cluster_id,
+                        windows=[],
+                        outlier_notes=_dedupe_text(outlier_notes),
+                        all_patterns_identified=True,
+                        suggested_action="accept",
+                    )
+                )
+                continue
+
+            while len(accepted_windows) < pattern_count:
                 highlighted_evidence: list[EvidenceImage] = []
                 previous_review_json: str | None = None
                 final_pattern_review: WindowReview | None = None
@@ -190,10 +217,10 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
                         cluster_id,
                         attempt=attempt,
                         max_attempts=max_attempts,
+                        pattern_count=pattern_count,
                         previous_review_json=previous_review_json,
                         accepted_windows_json=accepted_windows_json,
                         pattern_index=len(accepted_windows) + 1,
-                        pattern_count=pattern_count,
                     )
                     attempt_evidence = [*baseline_evidence, *highlighted_evidence]
                     logged_attempt = global_attempt
@@ -209,6 +236,8 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
                     review = client.review_windows(
                         cluster_id=cluster_id,
                         evidence_images=attempt_evidence,
+                        pattern_count=pattern_count,
+                        pattern_index=len(accepted_windows) + 1,
                         attempt=attempt,
                         max_attempts=max_attempts,
                         previous_review_json=previous_review_json,
@@ -217,8 +246,6 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
                     if int(review.cluster_id) != cluster_id:
                         raise ValueError(f"window review returned cluster_id={review.cluster_id}; expected {cluster_id}")
                     review = _normalize_window_ids(cluster_id, review, accepted_windows)
-                    if review.pattern_count is not None:
-                        pattern_count = int(review.pattern_count)
                     outlier_notes.extend(review.outlier_notes)
                     all_patterns_identified = all_patterns_identified or review.all_patterns_identified
                     final_action = review.suggested_action
@@ -247,7 +274,6 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
                     previous_review_json = review.model_dump_json()
                     highlighted_review = WindowReview(
                         cluster_id=cluster_id,
-                        pattern_count=pattern_count,
                         windows=[*accepted_windows, *review.windows],
                         outlier_notes=review.outlier_notes,
                         all_patterns_identified=review.all_patterns_identified,
@@ -265,23 +291,25 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
                 if final_pattern_review.suggested_action == "human_review":
                     break
                 if not final_pattern_review.windows:
-                    all_patterns_identified = True
-                    break
+                    raise ValueError(
+                        f"window review for cluster_id={cluster_id} returned no window for "
+                        f"pattern {len(accepted_windows) + 1} of {pattern_count}"
+                    )
+                if len(final_pattern_review.windows) > 1:
+                    raise ValueError(
+                        f"window review for cluster_id={cluster_id} returned {len(final_pattern_review.windows)} "
+                        "windows; expected one current unconfirmed pattern"
+                    )
 
                 accepted_windows.extend(final_pattern_review.windows)
 
-                if pattern_count is None:
-                    raise ValueError(f"window review for cluster_id={cluster_id} omitted pattern_count")
                 if all_patterns_identified or len(accepted_windows) >= pattern_count:
                     all_patterns_identified = True
                     break
 
-            if global_attempt == 0:
-                raise ValueError(f"window review did not run for cluster_id={cluster_id}")
             reviews.append(
                 WindowReview(
                     cluster_id=cluster_id,
-                    pattern_count=pattern_count,
                     windows=accepted_windows,
                     outlier_notes=_dedupe_text(outlier_notes),
                     all_patterns_identified=all_patterns_identified,
@@ -291,9 +319,8 @@ def _vlm_window_review_node(vlm_client: ClusterReviewClient | None):
 
         return {
             "window_evidence_images": [item.model_dump() for item in all_evidence],
-            "window_cluster_selection": selection.model_dump(),
-            "window_cluster_selection_path": selection_path.as_posix(),
-            "selected_window_cluster_ids": selection.selected_cluster_ids,
+            "window_pattern_count_reviews": [review.model_dump() for review in pattern_count_reviews],
+            "window_pattern_count_review_paths": pattern_count_review_paths,
             "window_reviews": [review.model_dump() for review in reviews],
             "window_review_paths": review_paths,
             "status": "vlm_reviewed_windows",
@@ -314,29 +341,19 @@ def _window_proposals_json(windows: list[WindowProposal]) -> str | None:
     return "[" + ",".join(window.model_dump_json() for window in windows) + "]"
 
 
-def _validate_window_cluster_selection(
-    selection: WindowClusterSelection,
-    medoids: list[ClusterMedoid],
-) -> WindowClusterSelection:
-    if selection.suggested_action == "human_review":
-        raise ValueError("window cluster selection requested human review")
-
-    known_ids = {int(medoid.cluster_id) for medoid in medoids}
-    selected_ids: list[int] = []
-    seen: set[int] = set()
-    for cluster_id in selection.selected_cluster_ids:
-        normalized = int(cluster_id)
-        if normalized not in known_ids:
-            raise ValueError(f"window cluster selection referenced unknown cluster_id={normalized}")
-        if normalized not in seen:
-            selected_ids.append(normalized)
-            seen.add(normalized)
-
-    for skipped in selection.skipped_clusters:
-        if int(skipped.cluster_id) not in known_ids:
-            raise ValueError(f"window cluster selection skipped unknown cluster_id={skipped.cluster_id}")
-
-    return selection.model_copy(update={"selected_cluster_ids": sorted(selected_ids)})
+def _validate_window_pattern_count_review(
+    review: WindowPatternCountReview,
+    cluster_id: int,
+    max_patterns: int,
+) -> WindowPatternCountReview:
+    if int(review.cluster_id) != cluster_id:
+        raise ValueError(f"window pattern count returned cluster_id={review.cluster_id}; expected {cluster_id}")
+    if int(review.pattern_count) > max_patterns:
+        raise ValueError(
+            f"window pattern count for cluster_id={cluster_id} returned {review.pattern_count}; "
+            f"maximum is {max_patterns}"
+        )
+    return review
 
 
 def _normalize_window_ids(cluster_id: int, review: WindowReview, accepted_windows: list[WindowProposal]) -> WindowReview:

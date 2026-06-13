@@ -6,6 +6,8 @@ import pandas as pd
 from vlm_ppe.clustering.features import build_shape_features
 from vlm_ppe.clustering.kmeans_runner import run_candidate_kmeans
 from vlm_ppe.clustering.medoid import compute_cluster_medoids
+from vlm_ppe.clustering.polygon_capture import assign_tracks_to_subcluster_polygons, convex_hull
+from vlm_ppe.schemas import SubclusterPolygon
 
 
 def _resampled_frame() -> pd.DataFrame:
@@ -55,3 +57,32 @@ def test_medoid_selects_track_with_lowest_pairwise_distance_sum() -> None:
     assert len(medoids) == 1
     assert medoids[0].medoid_track_id == "B"
     assert medoids[0].n_tracks == 3
+
+
+def test_convex_hull_normalizes_unordered_polygon_points() -> None:
+    hull = convex_hull([(1.0, 1.0), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 0.5)])
+
+    assert hull == [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+
+
+def test_polygon_capture_assigns_tracks_crossing_convex_gates_once() -> None:
+    resampled = _resampled_frame()
+    subclusters = [
+        SubclusterPolygon(
+            subcluster_id=1,
+            label="Low gate",
+            polygon=[(1.5, -0.2), (2.5, -0.2), (2.5, 0.2), (1.5, 0.2)],
+        ),
+        SubclusterPolygon(
+            subcluster_id=2,
+            label="Middle gate",
+            polygon=[(1.5, 0.8), (2.5, 0.8), (2.5, 1.2), (1.5, 1.2)],
+        ),
+    ]
+
+    result = assign_tracks_to_subcluster_polygons(resampled, ["A", "B", "C"], subclusters)
+
+    assert result.captures[0].track_ids == ["A"]
+    assert result.captures[1].track_ids == ["B"]
+    assert result.uncaptured_track_ids == ["C"]
+    assert result.overlapping_track_ids == {}

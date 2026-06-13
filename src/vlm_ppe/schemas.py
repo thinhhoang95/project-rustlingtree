@@ -23,7 +23,7 @@ class PPEConfig(BaseModel):
     max_k_expansion: int = Field(default=12, ge=1)
     subcluster_review_enabled: bool = True
     subcluster_min_tracks: int = Field(default=4, ge=2)
-    subcluster_k_max: int = Field(default=4, ge=1)
+    subcluster_max_polygons: int = Field(default=4, ge=1)
     subcluster_max_reviews: int = Field(default=64, ge=1)
     vlm_model: str = "openai/gpt-5.5"
     vlm_reasoning_effort: Literal["low", "medium", "high"] = "medium"
@@ -35,6 +35,18 @@ class PPEConfig(BaseModel):
     track_filter_radius_nm: float | None = Field(default=None, gt=0.0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_to_console: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_subcluster_config(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "subcluster_k_max" in payload:
+            if "subcluster_max_polygons" in payload:
+                raise ValueError("use only one of subcluster_k_max or subcluster_max_polygons")
+            payload["subcluster_max_polygons"] = payload.pop("subcluster_k_max")
+        return payload
 
     @field_validator("operation")
     @classmethod
@@ -109,6 +121,102 @@ class ClusterReview(BaseModel):
         return [item.strip() for item in value if item.strip()]
 
 
+class SubclusterPolygon(BaseModel):
+    subcluster_id: int = Field(ge=1)
+    label: str = ""
+    polygon: list[tuple[float, float]] = Field(min_length=3)
+    rationale: str = ""
+
+    @field_validator("label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("rationale")
+    @classmethod
+    def clean_rationale(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("polygon", mode="before")
+    @classmethod
+    def coerce_polygon_payload(cls, value: object) -> object:
+        if isinstance(value, dict):
+            for key in ("polygon", "vertices", "points", "coordinates"):
+                if key in value:
+                    return value[key]
+        return value
+
+
+class SubclusterReview(BaseModel):
+    subcluster_count: int = Field(ge=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: list[str] = Field(default_factory=list)
+    subclusters: list[SubclusterPolygon] = Field(default_factory=list)
+    uncaptured_tracks_policy: Literal["keep_as_residual", "human_review"] = "keep_as_residual"
+    suggested_action: Literal["accept", "human_review"] = "accept"
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_subcluster_payload(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+
+        payload = dict(value)
+        if "subcluster_count" not in payload:
+            for key in ("n_subclusters", "num_subclusters", "N"):
+                if key in payload:
+                    payload["subcluster_count"] = payload[key]
+                    break
+
+        direct_subclusters: list[dict[str, object]] = []
+        for key in list(payload.keys()):
+            normalized = str(key).strip().lower()
+            if not normalized.startswith("subcluster "):
+                continue
+            polygon = payload.pop(key)
+            suffix = normalized.removeprefix("subcluster ").strip()
+            subcluster_id = int(suffix) if suffix.isdigit() else len(direct_subclusters) + 1
+            direct_subclusters.append(
+                {
+                    "subcluster_id": subcluster_id,
+                    "label": str(key),
+                    "polygon": polygon,
+                }
+            )
+        if direct_subclusters and "subclusters" not in payload:
+            payload["subclusters"] = direct_subclusters
+        if "subcluster_count" not in payload and "subclusters" in payload and isinstance(payload["subclusters"], list):
+            payload["subcluster_count"] = max(1, len(payload["subclusters"]))
+        return payload
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def coerce_rationale(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("rationale")
+    @classmethod
+    def clean_rationale_list(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+    @model_validator(mode="after")
+    def validate_subcluster_count(self) -> Self:
+        if self.subcluster_count == 1 and self.subclusters:
+            raise ValueError("subclusters must be empty when subcluster_count is 1")
+        if self.subcluster_count > 1 and not self.subclusters:
+            raise ValueError("subclusters are required when subcluster_count is greater than 1")
+        if self.subclusters and len(self.subclusters) > self.subcluster_count:
+            raise ValueError("subclusters cannot contain more entries than subcluster_count")
+        seen: set[int] = set()
+        for item in self.subclusters:
+            if item.subcluster_id in seen:
+                raise ValueError(f"duplicate subcluster_id={item.subcluster_id}")
+            seen.add(item.subcluster_id)
+        return self
+
+
 class ClusterMedoid(BaseModel):
     cluster_id: int
     medoid_track_id: str
@@ -176,7 +284,6 @@ class WindowProposal(BaseModel):
 
 class WindowReview(BaseModel):
     cluster_id: int
-    pattern_count: int | None = Field(default=None, ge=0)
     windows: list[WindowProposal] = Field(default_factory=list)
     outlier_notes: list[str] = Field(default_factory=list)
     all_patterns_identified: bool = False
@@ -195,32 +302,24 @@ class WindowReview(BaseModel):
         return [item.strip() for item in value if item.strip()]
 
 
-class WindowClusterSkip(BaseModel):
+class WindowPatternCountReview(BaseModel):
     cluster_id: int
-    reason: str = ""
-
-    @field_validator("reason")
-    @classmethod
-    def clean_reason(cls, value: str) -> str:
-        return value.strip()
-
-
-class WindowClusterSelection(BaseModel):
-    selected_cluster_ids: list[int] = Field(default_factory=list)
+    pattern_count: int = Field(ge=0)
+    confidence: float = Field(ge=0.0, le=1.0)
     rationale: list[str] = Field(default_factory=list)
-    skipped_clusters: list[WindowClusterSkip] = Field(default_factory=list)
+    outlier_notes: list[str] = Field(default_factory=list)
     suggested_action: Literal["accept", "human_review"] = "accept"
 
-    @field_validator("rationale", mode="before")
+    @field_validator("rationale", "outlier_notes", mode="before")
     @classmethod
-    def coerce_rationale(cls, value: object) -> object:
+    def coerce_text_list(cls, value: object) -> object:
         if isinstance(value, str):
             return [value]
         return value
 
-    @field_validator("rationale")
+    @field_validator("rationale", "outlier_notes")
     @classmethod
-    def clean_rationale(cls, value: list[str]) -> list[str]:
+    def clean_text_list(cls, value: list[str]) -> list[str]:
         return [item.strip() for item in value if item.strip()]
 
 
@@ -258,9 +357,8 @@ class PPEState(BaseModel):
     intervention_windows_path: str | None = None
     intervention_windows: list[dict] = Field(default_factory=list)
     window_evidence_images: list[dict] = Field(default_factory=list)
-    window_cluster_selection: dict | None = None
-    window_cluster_selection_path: str | None = None
-    selected_window_cluster_ids: list[int] = Field(default_factory=list)
+    window_pattern_count_reviews: list[dict] = Field(default_factory=list)
+    window_pattern_count_review_paths: list[str] = Field(default_factory=list)
     window_reviews: list[dict] = Field(default_factory=list)
     window_review_paths: list[str] = Field(default_factory=list)
     status: str = "initialized"

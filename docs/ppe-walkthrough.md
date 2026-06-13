@@ -228,8 +228,9 @@ Meaning:
 - `subcluster_review_enabled`: whether accepted global clusters are reviewed for
   one local subcluster split before medoid extraction.
 - `subcluster_min_tracks`: minimum track count required before a leaf cluster is
-  eligible for a VLM-guided local KMeans review.
-- `subcluster_k_max`: maximum local K considered for each subcluster review.
+  eligible for a VLM-guided polygon-capture review.
+- `subcluster_max_polygons`: maximum local polygon-defined subclusters accepted
+  from each subcluster review.
 - `subcluster_max_reviews`: maximum number of subcluster VLM reviews in one run.
 - `vlm_model`: OpenRouter model slug.
 - `vlm_reasoning_effort`: OpenRouter reasoning effort for reasoning-capable
@@ -342,9 +343,8 @@ Key state fields include:
 - `intervention_windows_path`
 - `intervention_windows`
 - `window_evidence_images`
-- `window_cluster_selection`
-- `window_cluster_selection_path`
-- `selected_window_cluster_ids`
+- `window_pattern_count_reviews`
+- `window_pattern_count_review_paths`
 - `window_reviews`
 - `window_review_paths`
 - `audit_log_path`
@@ -565,29 +565,32 @@ Implemented by:
 
 - `refine_subclusters_tool()` in `agents/tools.py`
 - `subcluster_review_prompt()` in `agents/prompts.py`
-- `run_candidate_kmeans()` in `clustering/kmeans_runner.py`
+- `assign_tracks_to_subcluster_polygons()` in `clustering/polygon_capture.py`
 
 After the global K is accepted, each accepted cluster with at least
-`subcluster_min_tracks` tracks is reviewed independently. The workflow runs
-local KMeans candidates from K=1 through `subcluster_k_max`, renders local
-evidence panels, and asks the VLM to choose the local K. K=1 accepts the node as
-a leaf; K>1 performs one local split. Split children are accepted as final
-depth-1 leaves, so the workflow does not continue looping until the VLM
-green-lights deeper descendants.
+`subcluster_min_tracks` tracks is reviewed independently. The workflow renders
+one local trajectory overlay with x/y NM axes and asks the VLM to choose N
+manual subclusters. For N=1, the node is accepted as a leaf. For N>1, the VLM
+returns ordered convex capture polygons. Any flight path crossing, touching, or
+running inside a polygon is assigned to that subcluster; overlapping captures
+are resolved by subcluster order. Split children are accepted as final depth-1
+leaves, so the workflow does not continue looping into deeper descendants.
 
 The subcluster prompt requires clean trajectory separation: operational
 subclusters should be visibly distinct trajectory families, not spacing,
-density, or minor noisy variations. It may choose a higher K when extra clusters
-isolate noise or outliers and the remaining trajectory subclusters separate
-cleanly. Final leaves are flattened back to integer cluster IDs so the
-downstream medoid, residual, and window logic remains unchanged.
+density, or minor noisy variations. Uncaptured tracks are retained as a residual
+leaf so no trajectory is dropped. Final leaves are flattened back to integer
+cluster IDs so the downstream medoid, residual, and window logic remains
+unchanged.
 
 Outputs:
 
 - `clustering/refined_cluster_assignments.csv`
 - `clustering/subcluster_tree.json`
-- `clustering/subclusters/node_XXXX/k_YY_labels.csv`
-- `evidence/subclustering/node_XXXX/k_YY/cluster_panel.png`
+- `clustering/subclusters/node_XXXX/capture_polygons.json`
+- `clustering/subclusters/node_XXXX/polygon_assignments.csv`
+- `evidence/subclustering/node_XXXX/node_XXXX_capture_prompt.png`
+- `evidence/subclustering/node_XXXX/node_XXXX_capture_result.png`
 - `vlm_reviews/subclusters/node_XXXX*.json`
 
 ### Stage 8: Medoid Extraction
@@ -674,19 +677,25 @@ Implemented by:
 - `render_window_diagnostics_tool()` in `agents/tools.py`
 - `render_residual_window_diagnostics()` in `diagnostics/plots_residuals.py`
 - `vlm_classify_windows` node in `agents/graph.py`
-- `window_cluster_selection_prompt()` in `agents/prompts.py`
+- `window_pattern_count_prompt()` in `agents/prompts.py`
 - `window_review_prompt()` in `agents/prompts.py`
 
-The VLM first receives all residual diagnostic plots plus cluster summaries and
-selects which clusters should proceed to detailed intervention-window analysis.
-This required triage step skips outlier quarantines, one-off/tiny scattered
-groups, and visually incoherent clusters where window classification would mostly
-describe noise.
+Every final refined cluster receives residual-window prompts. If subclustering
+split a global cluster into polygon-captured leaves, each leaf proceeds to
+window and pattern recognition; the VLM no longer triages or skips subclusters
+before this stage.
 
-Only selected clusters receive residual-window prompts. The x-axis ticks are
-dense enough to expose station choices without labeling every resampled point on
-long templates. For selected clusters, the VLM proposes `start_station_index`,
-`end_station_index`, and a class label for each window:
+For each cluster, the VLM first receives a count-only request. It returns
+`pattern_count`, `confidence`, and rationale, but no station boundaries or class
+labels. If `pattern_count` is zero, that cluster is recorded as having no
+intervention windows and no boundary requests are sent.
+
+When `pattern_count` is positive, the graph sends separate boundary/classification
+requests for the current unconfirmed pattern. The fixed count is passed into
+those prompts as context and is not revised there. The x-axis ticks are dense
+enough to expose station choices without labeling every resampled point on long
+templates. For each current pattern, the VLM proposes `start_station_index`,
+`end_station_index`, and a class label:
 
 ```text
 no_stretch, dogleg, trombone, PMS, other
@@ -696,8 +705,10 @@ For each non-empty first proposal, deterministic tooling renders the same
 cluster diagnostics again with the proposed station span highlighted on the map,
 residual-energy curve, and heading-dispersion curve. The next VLM attempt sees
 both the unhighlighted and highlighted diagnostics and must either accept the
-range or return a complete revised window list. This loop is bounded by
-`window_review_max_attempts`; the default is three attempts per cluster.
+range or return a complete revised window for that same current pattern. This
+inner tuning loop is bounded by `window_review_max_attempts`; the default is
+three attempts per pattern. After a pattern is accepted, the graph proceeds to
+the next unconfirmed pattern until the fixed count is reached.
 
 `validate_window_reviews` checks that proposed station bounds exist for that
 cluster, derives nautical-mile spans and peak metrics from the residual profile,
@@ -705,9 +716,9 @@ and writes `residuals/intervention_windows.parquet`.
 
 Additional outputs:
 
-- `vlm_reviews/windows/cluster_selection.json`
-- `vlm_reviews/windows/cluster_selection_request.json`
-- `vlm_reviews/windows/cluster_selection_prompt.txt`
+- `vlm_reviews/windows/cluster_XX_pattern_count.json`
+- `vlm_reviews/windows/cluster_XX_pattern_count_request.json`
+- `vlm_reviews/windows/cluster_XX_pattern_count_prompt.txt`
 
 ## Audit And Logging
 

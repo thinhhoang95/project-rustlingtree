@@ -6,8 +6,15 @@ import os
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from vlm_ppe.agents.prompts import cluster_review_prompt, window_cluster_selection_prompt, window_review_prompt
-from vlm_ppe.schemas import ClusterMedoid, ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
+from vlm_ppe.agents.prompts import cluster_review_prompt, subcluster_review_prompt, window_pattern_count_prompt, window_review_prompt
+from vlm_ppe.schemas import (
+    ClusterReview,
+    EvidenceImage,
+    KMetric,
+    SubclusterReview,
+    WindowPatternCountReview,
+    WindowReview,
+)
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -30,6 +37,8 @@ class ClusterReviewClient(Protocol):
         *,
         cluster_id: int,
         evidence_images: list[EvidenceImage],
+        pattern_count: int,
+        pattern_index: int,
         attempt: int = 0,
         max_attempts: int = 3,
         previous_review_json: str | None = None,
@@ -37,13 +46,26 @@ class ClusterReviewClient(Protocol):
     ) -> WindowReview:
         ...
 
-    def review_window_clusters(
+    def review_subclusters(
         self,
         *,
+        root_cluster_id: int,
         evidence_images: list[EvidenceImage],
-        medoids: list[ClusterMedoid],
+        n_tracks: int,
+        max_subclusters: int,
+        coordinate_bounds: dict[str, float],
         prompt: str | None = None,
-    ) -> WindowClusterSelection:
+    ) -> SubclusterReview:
+        ...
+
+    def review_window_pattern_count(
+        self,
+        *,
+        cluster_id: int,
+        evidence_images: list[EvidenceImage],
+        max_patterns: int,
+        prompt: str | None = None,
+    ) -> WindowPatternCountReview:
         ...
 
 
@@ -86,6 +108,8 @@ class OpenRouterVLMClient:
         *,
         cluster_id: int,
         evidence_images: list[EvidenceImage],
+        pattern_count: int,
+        pattern_index: int,
         attempt: int = 0,
         max_attempts: int = 3,
         previous_review_json: str | None = None,
@@ -95,21 +119,46 @@ class OpenRouterVLMClient:
             cluster_id,
             attempt=attempt,
             max_attempts=max_attempts,
+            pattern_count=pattern_count,
             previous_review_json=previous_review_json,
+            pattern_index=pattern_index,
         )
         text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
         return WindowReview.model_validate(json.loads(text))
 
-    def review_window_clusters(
+    def review_subclusters(
         self,
         *,
+        root_cluster_id: int,
         evidence_images: list[EvidenceImage],
-        medoids: list[ClusterMedoid],
+        n_tracks: int,
+        max_subclusters: int,
+        coordinate_bounds: dict[str, float],
         prompt: str | None = None,
-    ) -> WindowClusterSelection:
-        resolved_prompt = prompt or window_cluster_selection_prompt(medoids)
+    ) -> SubclusterReview:
+        resolved_prompt = prompt or subcluster_review_prompt(
+            root_cluster_id=root_cluster_id,
+            lineage=[root_cluster_id],
+            depth=0,
+            n_tracks=n_tracks,
+            min_tracks=2,
+            max_subclusters=max_subclusters,
+            coordinate_bounds=coordinate_bounds,
+        )
         text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
-        return WindowClusterSelection.model_validate(json.loads(text))
+        return SubclusterReview.model_validate(json.loads(text))
+
+    def review_window_pattern_count(
+        self,
+        *,
+        cluster_id: int,
+        evidence_images: list[EvidenceImage],
+        max_patterns: int,
+        prompt: str | None = None,
+    ) -> WindowPatternCountReview:
+        resolved_prompt = prompt or window_pattern_count_prompt(cluster_id, max_patterns=max_patterns)
+        text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
+        return WindowPatternCountReview.model_validate(json.loads(text))
 
     def _request_json_text(self, *, prompt: str, evidence_images: list[EvidenceImage]) -> str:
         try:

@@ -7,15 +7,21 @@ import pandas as pd
 
 from vlm_ppe.agents.prompts import subcluster_review_prompt
 from vlm_ppe.agents.vlm_client import ClusterReviewClient, OpenRouterVLMClient
-from vlm_ppe.clustering.features import build_shape_features, load_features, subset_features, write_features
+from vlm_ppe.clustering.features import build_shape_features, load_features, write_features
 from vlm_ppe.clustering.kmeans_runner import load_labels, run_candidate_kmeans, write_clustering_runs
 from vlm_ppe.clustering.medoid import compute_cluster_medoids, write_medoids
+from vlm_ppe.clustering.polygon_capture import PolygonCaptureResult, assign_tracks_to_subcluster_polygons
 from vlm_ppe.clustering.residual_windows import (
     compute_cluster_residual_profiles,
     write_intervention_windows,
     write_residual_profiles,
 )
-from vlm_ppe.diagnostics.plots_clustering import render_cluster_panels, render_metrics_chart
+from vlm_ppe.diagnostics.plots_clustering import (
+    render_cluster_panels,
+    render_metrics_chart,
+    render_subcluster_capture_prompt_panel,
+    render_subcluster_capture_result_panel,
+)
 from vlm_ppe.diagnostics.plots_medoids import render_medoid_plot
 from vlm_ppe.diagnostics.plots_residuals import render_residual_window_diagnostics
 from vlm_ppe.diagnostics.report import write_medoid_report
@@ -31,6 +37,7 @@ from vlm_ppe.schemas import (
     KMetric,
     PPEConfig,
     PPEState,
+    SubclusterReview,
     WindowReview,
 )
 
@@ -192,8 +199,25 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
             )
         return resolved_client
 
-    def lineage_label(lineage: list[int]) -> str:
-        return ".".join(str(item) for item in lineage)
+    def new_node(
+        track_ids: list[str],
+        *,
+        root_cluster_id: int,
+        lineage: list[int],
+        depth: int,
+    ) -> dict[str, object]:
+        node_id = f"node_{len(tree_nodes):04d}"
+        node: dict[str, object] = {
+            "node_id": node_id,
+            "root_cluster_id": int(root_cluster_id),
+            "lineage": [int(item) for item in lineage],
+            "depth": int(depth),
+            "n_tracks": len(track_ids),
+            "track_ids": list(track_ids),
+            "children": [],
+        }
+        tree_nodes.append(node)
+        return node
 
     def accept_leaf(node: dict[str, object], track_ids: list[str], reason: str) -> dict[str, object]:
         nonlocal final_cluster_id
@@ -208,17 +232,8 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
 
     def inspect_node(track_ids: list[str], *, root_cluster_id: int, lineage: list[int], depth: int) -> dict[str, object]:
         nonlocal review_count
-        node_id = f"node_{len(tree_nodes):04d}"
-        node: dict[str, object] = {
-            "node_id": node_id,
-            "root_cluster_id": int(root_cluster_id),
-            "lineage": [int(item) for item in lineage],
-            "depth": int(depth),
-            "n_tracks": len(track_ids),
-            "track_ids": list(track_ids),
-            "children": [],
-        }
-        tree_nodes.append(node)
+        node = new_node(track_ids, root_cluster_id=root_cluster_id, lineage=lineage, depth=depth)
+        node_id = str(node["node_id"])
 
         if not config.subcluster_review_enabled:
             return accept_leaf(node, track_ids, "subcluster review disabled")
@@ -231,50 +246,29 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         if review_count >= config.subcluster_max_reviews:
             return accept_leaf(node, track_ids, "subcluster review budget exhausted")
 
-        local_k_max = min(int(config.subcluster_k_max), len(track_ids))
-        available_k = list(range(1, local_k_max + 1))
-        if len(available_k) <= 1:
-            return accept_leaf(node, track_ids, "only K=1 is available")
+        max_subclusters = min(int(config.subcluster_max_polygons), len(track_ids))
+        if max_subclusters <= 1:
+            return accept_leaf(node, track_ids, "only one polygon subcluster is available")
 
-        local_features = subset_features(features, track_ids)
-        runs = run_candidate_kmeans(
-            local_features,
-            k_min=1,
-            k_max=local_k_max,
-            n_init=config.kmeans_n_init,
-            random_state=config.kmeans_random_state + review_count,
-        )
-        clustering_dir = Path(current.run_dir) / "clustering" / "subclusters" / node_id
-        metrics_path, clustering_dir_path = write_clustering_runs(runs, local_features.track_ids, clustering_dir)
         evidence_dir = Path(current.run_dir) / "evidence" / "subclustering" / node_id
-        evidence = render_cluster_panels(resampled, runs, local_features.track_ids, evidence_dir)
         evidence = [
-            image.model_copy(
-                update={
-                    "kind": "subcluster_panel",
-                    "caption": (
-                        f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: {image.caption}"
-                    ),
-                }
+            render_subcluster_capture_prompt_panel(
+                resampled,
+                track_ids,
+                evidence_dir,
+                root_cluster_id=root_cluster_id,
+                node_id=node_id,
             )
-            for image in evidence
         ]
-        metrics_image = render_metrics_chart(runs, evidence_dir).model_copy(
-            update={
-                "kind": "subcluster_metrics_chart",
-                "caption": f"Subcluster candidate {node_id} lineage {lineage_label(lineage)}: inertia and silhouette by K",
-            }
-        )
-        evidence.append(metrics_image)
-        metrics = [run.metric for run in runs]
+        coordinate_bounds = _coordinate_bounds(resampled, track_ids)
         prompt = subcluster_review_prompt(
-            metrics,
-            available_k,
             root_cluster_id=root_cluster_id,
             lineage=lineage,
             depth=depth,
             n_tracks=len(track_ids),
             min_tracks=config.subcluster_min_tracks,
+            max_subclusters=max_subclusters,
+            coordinate_bounds=coordinate_bounds,
         )
         log_subcluster_vlm_request(
             run_dir=current.run_dir,
@@ -285,22 +279,19 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
             model=config.vlm_model,
             prompt=prompt,
             evidence_images=evidence,
-            metrics=metrics,
-            available_k=available_k,
+            max_subclusters=max_subclusters,
+            coordinate_bounds=coordinate_bounds,
         )
         review_count += 1
-        review = client().review_clusters(
+        review = client().review_subclusters(
+            root_cluster_id=root_cluster_id,
             evidence_images=evidence,
-            metrics=metrics,
-            available_k=available_k,
-            attempt=0,
-            max_retries=0,
+            n_tracks=len(track_ids),
+            max_subclusters=max_subclusters,
+            coordinate_bounds=coordinate_bounds,
             prompt=prompt,
         )
-        if int(review.chosen_k) not in set(available_k):
-            raise ValueError(
-                f"subcluster review for {node_id} chose unavailable K={review.chosen_k}; available={available_k}"
-            )
+        review = _validate_subcluster_review(review, max_subclusters=max_subclusters, node_id=node_id)
         review_dir = Path(current.run_dir) / "vlm_reviews" / "subclusters"
         review_dir.mkdir(parents=True, exist_ok=True)
         review_path = review_dir / f"{node_id}.json"
@@ -327,36 +318,88 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         node.update(
             {
                 "status": "reviewed",
-                "k_metrics_path": metrics_path,
-                "clustering_dir": clustering_dir_path,
                 "evidence_images": [image.model_dump() for image in evidence],
-                "chosen_k": int(review.chosen_k),
+                "subcluster_count": int(review.subcluster_count),
                 "review_path": review_path.as_posix(),
             }
         )
 
         if review.suggested_action == "human_review":
             return accept_leaf(node, track_ids, "subcluster review requested human review")
-        if int(review.chosen_k) <= 1:
-            return accept_leaf(node, track_ids, "VLM chose K=1")
+        if int(review.subcluster_count) <= 1 or not review.subclusters:
+            return accept_leaf(node, track_ids, "VLM proposed no polygon subcluster split")
 
-        chosen_labels = load_labels(clustering_dir_path, int(review.chosen_k))
-        chosen_labels["flight_id"] = chosen_labels["flight_id"].astype(str)
-        chosen_labels["cluster_id"] = chosen_labels["cluster_id"].astype(int)
+        capture_result = assign_tracks_to_subcluster_polygons(resampled, track_ids, review.subclusters)
+        result_image = render_subcluster_capture_result_panel(
+            resampled,
+            track_ids,
+            capture_result,
+            evidence_dir,
+            root_cluster_id=root_cluster_id,
+            node_id=node_id,
+        )
+        evidence.append(result_image)
+        node["evidence_images"] = [image.model_dump() for image in evidence]
+        capture_artifact_paths = _write_polygon_capture_artifacts(
+            current.run_dir,
+            node_id=node_id,
+            review=review,
+            capture_result=capture_result,
+        )
+        node.update(
+            {
+                "capture_polygons": [
+                    {
+                        "subcluster_id": capture.subcluster_id,
+                        "label": capture.label,
+                        "polygon": capture.polygon,
+                        "n_tracks": len(capture.track_ids),
+                        "track_ids": capture.track_ids,
+                    }
+                    for capture in capture_result.captures
+                ],
+                "uncaptured_track_ids": capture_result.uncaptured_track_ids,
+                "overlapping_track_ids": capture_result.overlapping_track_ids,
+                **capture_artifact_paths,
+            }
+        )
+
+        nonempty_captures = [capture for capture in capture_result.captures if capture.track_ids]
+        if not nonempty_captures:
+            return accept_leaf(node, track_ids, "VLM polygons captured no tracks")
+
         child_node_ids: list[str] = []
-        for child_cluster_id in sorted(chosen_labels["cluster_id"].unique()):
-            child_track_ids = (
-                chosen_labels.loc[chosen_labels["cluster_id"] == int(child_cluster_id), "flight_id"]
-                .astype(str)
-                .tolist()
-            )
-            child_node = inspect_node(
-                child_track_ids,
+        for capture in nonempty_captures:
+            child_node = new_node(
+                capture.track_ids,
                 root_cluster_id=root_cluster_id,
-                lineage=[*lineage, int(child_cluster_id)],
+                lineage=[*lineage, int(capture.subcluster_id)],
                 depth=depth + 1,
             )
+            child_node.update(
+                {
+                    "source_subcluster_id": int(capture.subcluster_id),
+                    "source_label": capture.label,
+                    "capture_polygon": capture.polygon,
+                }
+            )
+            accept_leaf(child_node, capture.track_ids, "accepted VLM polygon capture")
             child_node_ids.append(str(child_node["node_id"]))
+
+        if capture_result.uncaptured_track_ids:
+            residual_node = new_node(
+                capture_result.uncaptured_track_ids,
+                root_cluster_id=root_cluster_id,
+                lineage=[*lineage, -1],
+                depth=depth + 1,
+            )
+            residual_node["source_label"] = "Uncaptured residual"
+            if review.uncaptured_tracks_policy == "human_review":
+                accept_leaf(residual_node, capture_result.uncaptured_track_ids, "uncaptured tracks require human review")
+            else:
+                accept_leaf(residual_node, capture_result.uncaptured_track_ids, "uncaptured by VLM polygons")
+            child_node_ids.append(str(residual_node["node_id"]))
+
         node["children"] = child_node_ids
         node["status"] = "split"
         return node
@@ -394,6 +437,97 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
         "subcluster_review_paths": review_paths,
         "final_cluster_count": final_cluster_id,
         "status": "subclusters_refined",
+    }
+
+
+def _coordinate_bounds(resampled: pd.DataFrame, track_ids: list[str]) -> dict[str, float]:
+    ids = set(str(track_id) for track_id in track_ids)
+    frame = resampled.loc[resampled["flight_id"].astype(str).isin(ids)]
+    if frame.empty:
+        raise ValueError("cannot compute coordinate bounds for an empty track set")
+    return {
+        "x_min_nm": float(frame["x_nm"].min()),
+        "x_max_nm": float(frame["x_nm"].max()),
+        "y_min_nm": float(frame["y_nm"].min()),
+        "y_max_nm": float(frame["y_nm"].max()),
+    }
+
+
+def _validate_subcluster_review(
+    review: SubclusterReview,
+    *,
+    max_subclusters: int,
+    node_id: str,
+) -> SubclusterReview:
+    if int(review.subcluster_count) > int(max_subclusters):
+        raise ValueError(
+            f"subcluster review for {node_id} proposed {review.subcluster_count} subclusters; "
+            f"maximum is {max_subclusters}"
+        )
+    for subcluster in review.subclusters:
+        if int(subcluster.subcluster_id) > int(review.subcluster_count):
+            raise ValueError(
+                f"subcluster review for {node_id} returned subcluster_id={subcluster.subcluster_id} "
+                f"outside subcluster_count={review.subcluster_count}"
+            )
+    return review
+
+
+def _write_polygon_capture_artifacts(
+    run_dir: str,
+    *,
+    node_id: str,
+    review: SubclusterReview,
+    capture_result: PolygonCaptureResult,
+) -> dict[str, str]:
+    output_dir = Path(run_dir) / "clustering" / "subclusters" / node_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    polygons_path = output_dir / "capture_polygons.json"
+    payload = {
+        "review": review.model_dump(),
+        "captures": [
+            {
+                "subcluster_id": capture.subcluster_id,
+                "label": capture.label,
+                "polygon": capture.polygon,
+                "track_ids": capture.track_ids,
+            }
+            for capture in capture_result.captures
+        ],
+        "uncaptured_track_ids": capture_result.uncaptured_track_ids,
+        "overlapping_track_ids": capture_result.overlapping_track_ids,
+    }
+    with polygons_path.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2)
+
+    rows: list[dict[str, object]] = []
+    overlaps = capture_result.overlapping_track_ids
+    for capture in capture_result.captures:
+        for track_id in capture.track_ids:
+            rows.append(
+                {
+                    "flight_id": track_id,
+                    "subcluster_id": capture.subcluster_id,
+                    "label": capture.label,
+                    "assignment": "captured",
+                    "overlapping_subcluster_ids": json.dumps(overlaps.get(track_id, []), separators=(",", ":")),
+                }
+            )
+    for track_id in capture_result.uncaptured_track_ids:
+        rows.append(
+            {
+                "flight_id": track_id,
+                "subcluster_id": None,
+                "label": "Uncaptured residual",
+                "assignment": "uncaptured",
+                "overlapping_subcluster_ids": "[]",
+            }
+        )
+    assignments_path = output_dir / "polygon_assignments.csv"
+    pd.DataFrame(rows).to_csv(assignments_path, index=False)
+    return {
+        "capture_polygons_path": polygons_path.as_posix(),
+        "polygon_assignments_path": assignments_path.as_posix(),
     }
 
 

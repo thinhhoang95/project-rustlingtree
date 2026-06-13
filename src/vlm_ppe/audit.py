@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowClusterSelection, WindowReview
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, SubclusterReview, WindowPatternCountReview, WindowReview
 
 LOGGER_NAME = "vlm_ppe.audit"
 
@@ -229,8 +229,8 @@ def log_subcluster_vlm_request(
     model: str,
     prompt: str,
     evidence_images: list[EvidenceImage],
-    metrics: list[KMetric],
-    available_k: list[int],
+    max_subclusters: int,
+    coordinate_bounds: dict[str, float],
 ) -> str:
     root = Path(run_dir)
     review_dir = root / "vlm_reviews" / "subclusters"
@@ -247,10 +247,10 @@ def log_subcluster_vlm_request(
         "lineage": [int(item) for item in lineage],
         "depth": int(depth),
         "model": model,
-        "available_k": available_k,
+        "max_subclusters": int(max_subclusters),
+        "coordinate_bounds": coordinate_bounds,
         "prompt_path": prompt_path.as_posix(),
         "images": image_records,
-        "metrics": [metric.model_dump() for metric in metrics],
     }
     prompt_path.write_text(prompt, encoding="utf-8")
     with request_path.open("w", encoding="utf-8") as stream:
@@ -259,11 +259,11 @@ def log_subcluster_vlm_request(
 
     logger = get_audit_logger(root)
     logger.info(
-        "VLM subcluster review prepared: node=%s root_cluster=%s depth=%s available_k=%s images=%d",
+        "VLM subcluster polygon review prepared: node=%s root_cluster=%s depth=%s max_subclusters=%s images=%d",
         stem,
         root_cluster_id,
         depth,
-        available_k,
+        max_subclusters,
         len(image_records),
     )
     for index, image in enumerate(image_records, start=1):
@@ -288,7 +288,7 @@ def log_subcluster_vlm_response(
     root_cluster_id: int,
     lineage: list[int],
     depth: int,
-    review: ClusterReview,
+    review: SubclusterReview,
     response_path: str,
 ) -> None:
     root = Path(run_dir)
@@ -305,11 +305,12 @@ def log_subcluster_vlm_response(
     _append_jsonl(root / "vlm_interactions.jsonl", payload)
     logger = get_audit_logger(root)
     logger.info(
-        "VLM subcluster response: node=%s root_cluster=%s depth=%s chosen_k=%s confidence=%.3f action=%s response=%s",
+        "VLM subcluster polygon response: node=%s root_cluster=%s depth=%s subcluster_count=%s polygons=%s confidence=%.3f action=%s response=%s",
         node_id,
         root_cluster_id,
         depth,
-        review.chosen_k,
+        review.subcluster_count,
+        len(review.subclusters),
         review.confidence,
         review.suggested_action,
         response_path,
@@ -363,9 +364,10 @@ def log_window_vlm_request(
     return request_path.as_posix()
 
 
-def log_window_cluster_selection_request(
+def log_window_pattern_count_vlm_request(
     *,
     run_dir: str | Path,
+    cluster_id: int,
     model: str,
     prompt: str,
     evidence_images: list[EvidenceImage],
@@ -373,12 +375,14 @@ def log_window_cluster_selection_request(
     root = Path(run_dir)
     review_dir = root / "vlm_reviews" / "windows"
     review_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"cluster_{int(cluster_id):02d}_pattern_count"
     image_records = [_image_record(image) for image in evidence_images]
-    prompt_path = review_dir / "cluster_selection_prompt.txt"
-    request_path = review_dir / "cluster_selection_request.json"
+    prompt_path = review_dir / f"{stem}_prompt.txt"
+    request_path = review_dir / f"{stem}_request.json"
     request_payload = {
         "timestamp_utc": utc_now_iso(),
-        "event": "vlm_window_cluster_selection_request",
+        "event": "vlm_window_pattern_count_request",
+        "cluster_id": int(cluster_id),
         "model": model,
         "prompt_path": prompt_path.as_posix(),
         "images": image_records,
@@ -390,37 +394,40 @@ def log_window_cluster_selection_request(
 
     logger = get_audit_logger(root)
     logger.info(
-        "VLM window cluster selection prepared: model=%s images=%d",
+        "VLM window pattern count prepared: cluster=%s model=%s images=%d",
+        cluster_id,
         model,
         len(image_records),
     )
     return request_path.as_posix()
 
 
-def log_window_cluster_selection_response(
+def log_window_pattern_count_vlm_response(
     *,
     run_dir: str | Path,
-    selection: WindowClusterSelection,
+    review: WindowPatternCountReview,
     response_path: str,
 ) -> None:
     root = Path(run_dir)
     payload = {
         "timestamp_utc": utc_now_iso(),
-        "event": "vlm_window_cluster_selection_response",
+        "event": "vlm_window_pattern_count_response",
+        "cluster_id": review.cluster_id,
         "response_path": response_path,
-        "selection": selection.model_dump(),
+        "review": review.model_dump(),
     }
     _append_jsonl(root / "vlm_interactions.jsonl", payload)
     logger = get_audit_logger(root)
     logger.info(
-        "VLM window cluster selection response: selected=%s skipped=%d action=%s response=%s",
-        selection.selected_cluster_ids,
-        len(selection.skipped_clusters),
-        selection.suggested_action,
+        "VLM window pattern count response: cluster=%s pattern_count=%s confidence=%.3f action=%s response=%s",
+        review.cluster_id,
+        review.pattern_count,
+        review.confidence,
+        review.suggested_action,
         response_path,
     )
-    for skipped in selection.skipped_clusters:
-        logger.info("VLM window cluster skipped: cluster=%s reason=%s", skipped.cluster_id, skipped.reason)
+    for index, rationale in enumerate(review.rationale, start=1):
+        logger.info("VLM window pattern count rationale cluster=%s %02d: %s", review.cluster_id, index, rationale)
 
 
 def log_window_vlm_response(

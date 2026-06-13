@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from vlm_ppe.schemas import ClusterMedoid, KMetric
+from vlm_ppe.schemas import KMetric
 
 
 def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attempt: int, max_retries: int) -> str:
@@ -33,83 +33,95 @@ def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attemp
 
 
 def subcluster_review_prompt(
-    metrics: list[KMetric],
-    available_k: list[int],
     *,
     root_cluster_id: int,
     lineage: list[int],
     depth: int,
     n_tracks: int,
     min_tracks: int,
+    max_subclusters: int,
+    coordinate_bounds: dict[str, float],
 ) -> str:
-    metrics_payload = [metric.model_dump() for metric in metrics]
     lineage_text = " -> ".join(str(item) for item in lineage)
     return (
-        "You are inspecting one accepted VLM-PPE trajectory cluster for possible subclusters.\n"
-        "Use only the provided ADS-B trajectory plots and numeric metrics. Do not infer from AIP charts.\n"
-        "Choose the local K for this cluster: K=1 means the cluster is already one practical path pattern; "
-        "K>1 means there are visually distinct, repeated subcluster patterns worth splitting.\n"
-        "Require clean separation: every trajectory subcluster you keep as an operational pattern must have visibly "
-        "distinct geometry from the others. Do not split one trajectory family on spacing, density, or minor noisy variation.\n"
-        "Outliers can hide real repeated geometry. When comparing K values, first identify tiny, scattered, or one-off "
-        "clusters as outlier/noise quarantine candidates, then judge whether the remaining non-outlier clusters expose "
-        "cleanly distinct repeated trajectory families. A higher K is appropriate when it both quarantines outliers/noise "
-        "and separates repeated geometries that lower K leaves merged. Do not choose a higher K only because it improves "
-        "a metric, and do not reject a higher K only because it contains tiny outlier/noise clusters.\n"
-        "This is a single local split pass. If you choose K>1, the resulting child clusters become final leaves; "
-        "the workflow will not keep looping until another VLM review green-lights them.\n\n"
+        "You are inspecting one accepted VLM-PPE trajectory cluster for hidden practical path subclusters.\n"
+        "Use only the provided ADS-B trajectory plot. Do not infer from AIP charts, route names, airport procedures, "
+        "or density metrics. Your task is manual visual separation: find repeated path geometry that density-based "
+        "methods could merge.\n\n"
+        "First decide N, the number of practical subclusters in this local cluster. N=1 means the cluster is already "
+        "one practical path pattern and you must return no polygons. N>1 means there are visually distinct, repeated "
+        "path families worth splitting.\n\n"
+        "For N>1, return one capture polygon for each proposed subcluster. Use the x (NM) and y (NM) axes shown in "
+        "the plot. Each polygon is a sequence of [x_nm, y_nm] vertices; the pipeline will compute the convex hull of "
+        "those points. A flight path is assigned to a subcluster when any segment of that path crosses, touches, or "
+        "runs inside the convex polygon. Assignment follows subcluster_id order; if a path is captured by more than "
+        "one polygon, the first matching subcluster wins.\n\n"
+        "Draw polygons as discriminating gates around geometry that only that family crosses, not as broad envelopes "
+        "around entire routes. Do not split one trajectory family on spacing, sample density, or minor noisy variation. "
+        "Small one-off or scattered tracks may remain uncaptured; the pipeline will keep uncaptured tracks as a residual "
+        "leaf unless you set suggested_action to human_review.\n\n"
         f"Root/global cluster ID: {root_cluster_id}.\n"
         f"Current lineage: {lineage_text}.\n"
         f"Current subcluster depth: {depth}. Maximum reviewed depth: 0; split children stop at depth 1.\n"
         f"Track count in this cluster: {n_tracks}. Minimum tracks for local review: {min_tracks}.\n"
-        f"Available local K values: {available_k}.\n"
-        f"Local K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
+        f"Maximum allowed local subclusters: {max_subclusters}.\n"
+        f"Coordinate bounds JSON: {json.dumps(coordinate_bounds, separators=(',', ':'))}\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
-        "even when there is only one item. `chosen_k` is the local K for this cluster. Set `clusters_to_recheck` to [] "
-        "because this pass does not recursively review child clusters. "
-        '`suggested_action` must be exactly one of "accept", "retry", or "human_review"; do not return "split". '
-        "Choosing K>1 is how you request a split, while suggested_action remains \"accept\" when the local K choice is usable:\n"
+        "even when there is only one item. If N=1, set subcluster_count to 1 and subclusters to []. "
+        '`suggested_action` must be exactly one of "accept" or "human_review":\n'
         "{\n"
-        '  "chosen_k": 2,\n'
+        '  "subcluster_count": 3,\n'
         '  "confidence": 0.78,\n'
-        '  "rationale": ["K=2 cleanly separates two repeated trajectory families."],\n'
-        '  "rejected_alternatives": ["K=3 only improves the metric by isolating minor spacing noise."],\n'
-        '  "clusters_to_recheck": [],\n'
-        '  "retry_requested": false,\n'
-        '  "requested_k_max": null,\n'
+        '  "rationale": ["Three repeated path families cross different downwind gates."],\n'
+        '  "subclusters": [\n'
+        "    {\n"
+        '      "subcluster_id": 1,\n'
+        '      "label": "Subcluster 1",\n'
+        '      "polygon": [[-8.0, 2.5], [-6.8, 2.4], [-6.8, 3.3], [-8.0, 3.4]],\n'
+        '      "rationale": "Captures the northern repeated path family."\n'
+        "    },\n"
+        "    {\n"
+        '      "subcluster_id": 2,\n'
+        '      "label": "Subcluster 2",\n'
+        '      "polygon": [[-8.0, -1.8], [-6.8, -1.9], [-6.8, -0.9], [-8.0, -0.8]],\n'
+        '      "rationale": "Captures the southern repeated path family."\n'
+        "    },\n"
+        "    {\n"
+        '      "subcluster_id": 3,\n'
+        '      "label": "Subcluster 3",\n'
+        '      "polygon": [[-5.5, 0.2], [-4.5, 0.2], [-4.5, 1.1], [-5.5, 1.1]],\n'
+        '      "rationale": "Captures the central repeated path family."\n'
+        "    }\n"
+        "  ],\n"
+        '  "uncaptured_tracks_policy": "keep_as_residual",\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )
 
 
-def window_cluster_selection_prompt(medoids: list[ClusterMedoid]) -> str:
-    medoid_payload = [
-        {
-            "cluster_id": medoid.cluster_id,
-            "n_tracks": medoid.n_tracks,
-            "mean_distance_nm": medoid.mean_distance_nm,
-            "max_distance_nm": medoid.max_distance_nm,
-        }
-        for medoid in sorted(medoids, key=lambda item: item.cluster_id)
-    ]
+def window_pattern_count_prompt(cluster_id: int, *, max_patterns: int) -> str:
     return (
-        "You are triaging VLM-PPE trajectory clusters before residual-window classification.\n"
-        "Use only the provided medoid/residual diagnostic images and cluster summary JSON. Do not infer from AIP charts.\n"
-        "Select only clusters that should proceed to detailed intervention-window analysis.\n\n"
-        "Select a cluster when it represents a coherent repeated trajectory family with enough supporting tracks to make "
-        "a meaningful intervention-window judgment. Skip clusters that appear to be outlier quarantines, one-off tracks, "
-        "tiny scattered groups, or visually incoherent mixtures where window classification would mostly describe noise. "
-        "Small clusters may still be selected if the evidence shows a repeated, coherent operational pattern; large clusters "
-        "may be skipped if they are visibly noncoherent.\n\n"
-        f"Cluster summaries JSON: {json.dumps(medoid_payload, separators=(',', ':'))}\n\n"
+        "You are reviewing one VLM-PPE trajectory cluster before detailed window boundary selection.\n"
+        "Use only the provided ADS-B trajectory plots, medoid overlay, residual-energy curve, heading-dispersion curve, "
+        "and station-index labels. Do not infer from AIP charts.\n"
+        "Your task in this request is only to count how many distinct intervention patterns/windows are present in this "
+        "cluster and explain why. Do not propose station boundaries, window IDs, or class labels in this response.\n\n"
+        f"Cluster ID: {cluster_id}.\n"
+        f"Maximum count allowed by configuration: {max_patterns}.\n\n"
+        "Count rules:\n"
+        "- pattern_count is the total number of distinct intervention windows in this cluster.\n"
+        "- Use 0 when the cluster has no meaningful intervention window.\n"
+        "- Count repeated, visually separable intervention programs, not minor noisy variation inside one program.\n"
+        "- Count only patterns supported by the provided cluster diagnostics.\n"
+        "- If the evidence is too ambiguous for a defensible count, set suggested_action to human_review.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
-        "even when there is only one item. `selected_cluster_ids` controls which clusters receive window-review prompts:\n"
+        "even when there is only one item:\n"
         "{\n"
-        '  "selected_cluster_ids": [0, 2, 4],\n'
-        '  "rationale": ["Selected clusters have coherent repeated geometry and enough tracks for window analysis."],\n'
-        '  "skipped_clusters": [\n'
-        '    {"cluster_id": 1, "reason": "Tiny scattered outlier/noise group, not a stable trajectory family."}\n'
-        "  ],\n"
+        f'  "cluster_id": {cluster_id},\n'
+        '  "pattern_count": 2,\n'
+        '  "confidence": 0.81,\n'
+        '  "rationale": ["Two separated residual-energy peaks align with two visually distinct maneuver regions."],\n'
+        '  "outlier_notes": ["One track has a weak late deviation but does not form a repeated pattern."],\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )
@@ -120,16 +132,19 @@ def window_review_prompt(
     *,
     attempt: int = 0,
     max_attempts: int = 3,
+    pattern_count: int,
     previous_review_json: str | None = None,
     accepted_windows_json: str | None = None,
     pattern_index: int = 1,
-    pattern_count: int | None = None,
 ) -> str:
+    first_attempt_task = (
+        f"The prior count-only review fixed pattern_count at {pattern_count}. Return the next unconfirmed pattern only. "
+        "If you return a window, the graph will render your proposed range highlighted and send it back for confirmation "
+        "or revision.\n"
+    )
     attempt_block = (
         f"Attempt {attempt + 1} of {max_attempts} for the current unconfirmed pattern. "
-        "This first attempt uses unhighlighted residual diagnostics. First estimate how many distinct intervention "
-        "patterns/windows exist in this cluster, then return the next unconfirmed pattern only. If you return a "
-        "window, the graph will render your proposed range highlighted and send it back for confirmation or revision.\n"
+        f"This first attempt uses unhighlighted residual diagnostics. {first_attempt_task}"
         if attempt == 0
         else (
             f"Attempt {attempt + 1} of {max_attempts} for the current unconfirmed pattern. "
@@ -141,17 +156,13 @@ def window_review_prompt(
     )
     previous_block = f"Previous window proposal JSON: {previous_review_json}\n\n" if previous_review_json else ""
     accepted_block = f"Already accepted windows JSON: {accepted_windows_json}\n\n" if accepted_windows_json else ""
-    count_block = (
-        f"Previously estimated pattern_count: {pattern_count}. Return the same count unless the evidence clearly shows it was wrong.\n"
-        if pattern_count is not None
-        else "Estimate pattern_count before choosing boundaries. pattern_count is the total number of distinct intervention windows in this cluster.\n"
-    )
+    count_block = f"Fixed pattern_count from prior count-only review: {pattern_count}. Do not revise pattern_count in this request.\n"
     return (
         "You are reviewing one VLM-PPE trajectory cluster.\n"
         "Use only the provided ADS-B trajectory plots, medoid overlay, residual-energy curve, heading-dispersion curve, "
         "and station-index labels. Do not infer from AIP charts.\n"
-        "Your task is to count distinct intervention patterns, then propose and classify tight intervention window boundaries.\n"
-        "Use station indices shown on the diagnostic plot. Return no windows if the cluster has no meaningful intervention.\n\n"
+        "Your task is to propose and classify tight intervention window boundaries for the current unconfirmed pattern.\n"
+        "Use station indices shown on the diagnostic plot.\n\n"
         f"{attempt_block}"
         f"{previous_block}"
         f"{accepted_block}"
@@ -173,12 +184,12 @@ def window_review_prompt(
         "- If the highlighted range is not tight enough, use this attempt to adjust the station range.\n"
         "- Do not duplicate already accepted windows.\n"
         "- Return only the current unconfirmed pattern in windows; accepted windows are provided only as context.\n"
+        "- Do not use this request to change the pattern count; focus on the current pattern's boundaries and class.\n"
         "- If all patterns have already been identified, return windows as [] and all_patterns_identified as true.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item:\n"
         "{\n"
         f'  "cluster_id": {cluster_id},\n'
-        '  "pattern_count": 2,\n'
         '  "windows": [\n'
         "    {\n"
         '      "window_id": "C2_W1",\n'
