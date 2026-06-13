@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests.test_ppe_graph import _write_fixture
 from vlm_ppe.cli import main
 
 
-def test_cli_smoke_runs_offline_chosen_k(tmp_path: Path, capsys) -> None:
+def test_cli_chosen_k_still_requires_vlm_for_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config_path = _write_fixture(tmp_path)
 
-    exit_code = main(["run-through-medoid", "--config", str(config_path), "--chosen-k", "2", "--run-id", "cli-run"])
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert '"status": "complete"' in captured.out
-    assert '"intervention_windows_path":' in captured.out
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        main(["run-through-medoid", "--config", str(config_path), "--chosen-k", "2", "--run-id", "cli-run"])

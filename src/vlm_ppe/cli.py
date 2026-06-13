@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run-through-medoid",
-        help="Run PPE through medoid extraction, residual-window detection, and window classification",
+        help="Run PPE through medoid extraction, residual diagnostics, and VLM window proposal",
     )
     run_parser.add_argument("--config", required=True, type=Path)
     run_parser.add_argument("--chosen-k", type=int, default=None, help="Offline/manual cluster-count override")

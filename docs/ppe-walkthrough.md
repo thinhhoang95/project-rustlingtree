@@ -16,11 +16,12 @@ The current implementation covers PPE ingestion through PPE plan Sections 7 and
 7. ask the VLM to choose or retry the cluster count,
 8. validate the VLM decision,
 9. compute one medoid trajectory per accepted cluster,
-10. compute residual-energy and heading-dispersion windows,
-11. render residual-window evidence,
-12. ask the VLM to classify windows into the v1 intervention classes,
-13. validate the structured classifications,
-14. write audit artifacts and a final state index.
+10. compute residual-energy and heading-dispersion profiles,
+11. render residual evidence with station guides,
+12. ask the VLM to propose windows and classify them into the v1 intervention classes,
+13. render each non-empty proposal highlighted and let the VLM confirm or revise it,
+14. validate and enrich the structured proposals,
+15. write audit artifacts and a final state index.
 
 Intervention fitting and procedure-program export are not implemented yet. Those
 correspond to Section 9 and beyond in the PPE plan.
@@ -35,7 +36,7 @@ The VLM is the visible orchestrator:
 - it sees metrics and plots,
 - it chooses the practical cluster count,
 - it can request bounded retries,
-- it classifies deterministic residual windows,
+- it proposes residual-window boundaries and classifications,
 - it explains its decision through a structured rationale.
 
 The deterministic tools remain authoritative for all numeric and geometric
@@ -48,14 +49,15 @@ outputs:
 - metric computation,
 - artifact writing,
 - medoid trajectory selection,
-- residual-window detection.
+- residual-profile computation.
 
 The important contract is:
 
 ```text
 VLM reviews and chooses.
 Tools compute and validate.
-The final medoid/window geometry is never authored directly by the VLM.
+The VLM proposes window boundaries, and deterministic tools validate and enrich
+those proposals before they become artifacts.
 ```
 
 The implementation logs the model-visible prompt, the images prepared for model
@@ -89,11 +91,11 @@ Primary files:
 - `src/vlm_ppe/clustering/kmeans_runner.py`: candidate KMeans runs.
 - `src/vlm_ppe/clustering/medoid.py`: cluster medoid extraction.
 - `src/vlm_ppe/clustering/residual_windows.py`: residual-energy and
-  heading-dispersion window detection.
+  heading-dispersion profile computation.
 - `src/vlm_ppe/diagnostics/plots_clustering.py`: cluster evidence plots.
 - `src/vlm_ppe/diagnostics/plots_medoids.py`: medoid summary plot.
-- `src/vlm_ppe/diagnostics/plots_residuals.py`: residual-window evidence
-  plots.
+- `src/vlm_ppe/diagnostics/plots_residuals.py`: residual evidence plots for
+  VLM window proposal.
 - `src/vlm_ppe/diagnostics/report.py`: Markdown medoid report.
 
 Default config:
@@ -128,15 +130,14 @@ Install the project in editable mode:
 python -m pip install -e .
 ```
 
-For normal VLM-led runs, export a Gemini API key:
+For VLM-led runs, export an OpenRouter API key:
 
 ```sh
-export GEMINI_API_KEY="..."
+export OPENROUTER_API_KEY="..."
 ```
 
-For offline smoke tests or deterministic debugging, use `--chosen-k`. This
-bypasses the Gemini call but still runs the same LangGraph pipeline and writes
-the same audit surfaces.
+`--chosen-k` only bypasses the cluster-count review. Window proposal still
+requires the configured VLM unless tests inject a fake review client.
 
 ## Running The Pipeline
 
@@ -202,6 +203,7 @@ kmeans_random_state: 17
 max_retries: 2
 max_k_expansion: 12
 vlm_model: "gemini-3.5-flash"
+window_review_max_attempts: 3
 track_filter_center_lat: 32.897102378968
 track_filter_center_lon: -97.036547781746
 track_filter_radius_nm: 60.0
@@ -224,6 +226,8 @@ Meaning:
 - `max_retries`: maximum VLM-requested reclustering attempts.
 - `max_k_expansion`: upper bound if the VLM requests a larger `Kmax`.
 - `vlm_model`: Gemini model name.
+- `window_review_max_attempts`: maximum VLM attempts per cluster for proposing,
+  viewing the highlighted proposal, and revising residual-window bounds.
 - `track_filter_center_lat`, `track_filter_center_lon`: optional center of the
   circular trajectory window. The default KDFW config uses the airport center.
 - `track_filter_radius_nm`: optional circular trajectory window radius in
@@ -293,7 +297,7 @@ START
        -> run_candidate_clustering, if retry requested and allowed
        -> compute_cluster_medoids, otherwise
   -> render_medoid_report
-  -> compute_residual_windows
+  -> compute_residual_profiles
   -> render_window_diagnostics
   -> vlm_classify_windows
   -> validate_window_reviews
@@ -595,26 +599,26 @@ The report includes:
 - mean and maximum distance to the cluster medoid,
 - medoid plot path.
 
-### Stage 9: Residual-Window Detection
+### Stage 9: Residual-Profile Computation
 
 This corresponds to Section 7 of the PPE plan.
 
 Implemented by:
 
-- `compute_residual_windows_tool()` in `agents/tools.py`
-- `compute_cluster_residual_windows()` in `clustering/residual_windows.py`
+- `compute_residual_profiles_tool()` in `agents/tools.py`
+- `compute_cluster_residual_profiles()` in `clustering/residual_windows.py`
 
 For each accepted cluster, the tool computes:
 
 - median squared residual energy against the cluster medoid,
-- circular heading dispersion,
-- contiguous windows triggered by either metric,
-- merged/filtered windows using the configured length and gap thresholds.
+- circular heading dispersion.
+
+These profiles are evidence for the VLM; they are not thresholded into windows
+by deterministic code.
 
 Outputs:
 
 - `residuals/residual_profiles.parquet`
-- `residuals/intervention_windows.parquet`
 
 ### Stage 10: Window Diagnostics And Classification
 
@@ -627,15 +631,25 @@ Implemented by:
 - `vlm_classify_windows` node in `agents/graph.py`
 - `window_review_prompt()` in `agents/prompts.py`
 
-The VLM receives residual-window plots and structured window records. It may
-classify windows as:
+The VLM receives residual plots with station-index guides. The x-axis ticks are
+dense enough to expose station choices without labeling every resampled point on
+long templates. The VLM proposes `start_station_index`, `end_station_index`, and
+a class label for each window:
 
 ```text
 no_stretch, dogleg, trombone, PMS, other
 ```
 
-The VLM does not create or modify window geometry. `validate_window_reviews`
-checks that every detected window receives exactly one known class label.
+For each non-empty first proposal, deterministic tooling renders the same
+cluster diagnostics again with the proposed station span highlighted on the map,
+residual-energy curve, and heading-dispersion curve. The next VLM attempt sees
+both the unhighlighted and highlighted diagnostics and must either accept the
+range or return a complete revised window list. This loop is bounded by
+`window_review_max_attempts`; the default is three attempts per cluster.
+
+`validate_window_reviews` checks that proposed station bounds exist for that
+cluster, derives nautical-mile spans and peak metrics from the residual profile,
+and writes `residuals/intervention_windows.parquet`.
 
 ## Audit And Logging
 
@@ -812,18 +826,18 @@ cat <run_dir>/reports/medoid_report.md
 
 ## Debugging Common Problems
 
-### Missing `GEMINI_API_KEY`
+### Missing `OPENROUTER_API_KEY`
 
 Symptom:
 
 ```text
-GEMINI_API_KEY is required for VLM-led runs; use --chosen-k for offline/test runs
+OPENROUTER_API_KEY is required for VLM-led runs
 ```
 
 Fix:
 
 ```sh
-export GEMINI_API_KEY="..."
+export OPENROUTER_API_KEY="..."
 ```
 
 Or run in offline mode:

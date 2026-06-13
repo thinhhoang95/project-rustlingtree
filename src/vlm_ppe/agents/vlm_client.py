@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vlm_ppe.agents.prompts import cluster_review_prompt, window_review_prompt
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -29,8 +29,10 @@ class ClusterReviewClient(Protocol):
         self,
         *,
         cluster_id: int,
-        windows: list[InterventionWindow],
         evidence_images: list[EvidenceImage],
+        attempt: int = 0,
+        max_attempts: int = 3,
+        previous_review_json: str | None = None,
         prompt: str | None = None,
     ) -> WindowReview:
         ...
@@ -49,7 +51,7 @@ class OpenRouterVLMClient:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not self.api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is required unless --chosen-k is supplied")
+            raise RuntimeError("OPENROUTER_API_KEY is required for VLM-led runs")
         self.base_url = base_url or os.environ.get("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
         self.app_referer = app_referer or os.environ.get("OPENROUTER_HTTP_REFERER")
         self.app_title = app_title or os.environ.get("OPENROUTER_X_TITLE") or "project-rustlingtree/vlm-ppe"
@@ -72,11 +74,18 @@ class OpenRouterVLMClient:
         self,
         *,
         cluster_id: int,
-        windows: list[InterventionWindow],
         evidence_images: list[EvidenceImage],
+        attempt: int = 0,
+        max_attempts: int = 3,
+        previous_review_json: str | None = None,
         prompt: str | None = None,
     ) -> WindowReview:
-        resolved_prompt = prompt or window_review_prompt(cluster_id, windows)
+        resolved_prompt = prompt or window_review_prompt(
+            cluster_id,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            previous_review_json=previous_review_json,
+        )
         text = self._request_json_text(prompt=resolved_prompt, evidence_images=evidence_images)
         return WindowReview.model_validate(json.loads(text))
 

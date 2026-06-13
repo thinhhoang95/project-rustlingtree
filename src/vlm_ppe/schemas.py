@@ -22,14 +22,11 @@ class PPEConfig(BaseModel):
     max_retries: int = Field(default=2, ge=0)
     max_k_expansion: int = Field(default=12, ge=1)
     vlm_model: str = "google/gemini-2.5-flash"
+    window_review_max_attempts: int = Field(default=3, ge=1, le=10)
     min_track_points: int = Field(default=2, ge=2)
     track_filter_center_lat: float | None = Field(default=None, ge=-90.0, le=90.0)
     track_filter_center_lon: float | None = Field(default=None, ge=-180.0, le=180.0)
     track_filter_radius_nm: float | None = Field(default=None, gt=0.0)
-    residual_energy_lambda: float = Field(default=3.0, gt=0.0)
-    min_window_length_nm: float = Field(default=2.0, ge=0.0)
-    merge_windows_gap_nm: float = Field(default=1.0, ge=0.0)
-    heading_dispersion_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_to_console: bool = True
 
@@ -121,6 +118,9 @@ InterventionClass = Literal["no_stretch", "dogleg", "trombone", "PMS", "other"]
 class InterventionWindow(BaseModel):
     cluster_id: int
     window_id: str
+    class_name: InterventionClass
+    confidence: float = Field(ge=0.0, le=1.0)
+    visual_reason: str = ""
     start_station_index: int = Field(ge=0)
     end_station_index: int = Field(ge=0)
     start_s_fraction: float = Field(ge=0.0, le=1.0)
@@ -130,8 +130,12 @@ class InterventionWindow(BaseModel):
     length_nm: float = Field(ge=0.0)
     peak_residual_energy_nm2: float = Field(ge=0.0)
     peak_heading_dispersion: float = Field(ge=0.0, le=1.0)
-    trigger_reasons: list[Literal["residual_energy", "heading_dispersion"]] = Field(default_factory=list)
     track_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("visual_reason")
+    @classmethod
+    def clean_visual_reason(cls, value: str) -> str:
+        return value.strip()
 
     @model_validator(mode="after")
     def validate_window_bounds(self) -> Self:
@@ -144,8 +148,10 @@ class InterventionWindow(BaseModel):
         return self
 
 
-class WindowClassification(BaseModel):
+class WindowProposal(BaseModel):
     window_id: str
+    start_station_index: int = Field(ge=0)
+    end_station_index: int = Field(ge=0)
     class_name: InterventionClass
     confidence: float = Field(ge=0.0, le=1.0)
     visual_reason: str = ""
@@ -155,12 +161,18 @@ class WindowClassification(BaseModel):
     def clean_visual_reason(cls, value: str) -> str:
         return value.strip()
 
+    @model_validator(mode="after")
+    def validate_proposal_bounds(self) -> Self:
+        if self.end_station_index < self.start_station_index:
+            raise ValueError("end_station_index must be greater than or equal to start_station_index")
+        return self
+
 
 class WindowReview(BaseModel):
     cluster_id: int
-    windows: list[WindowClassification] = Field(default_factory=list)
+    windows: list[WindowProposal] = Field(default_factory=list)
     outlier_notes: list[str] = Field(default_factory=list)
-    suggested_action: Literal["accept", "human_review"] = "accept"
+    suggested_action: Literal["accept", "revise", "human_review"] = "accept"
 
     @field_validator("outlier_notes", mode="before")
     @classmethod

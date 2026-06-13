@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from vlm_ppe.agents.vlm_client import OpenRouterVLMClient
-from vlm_ppe.schemas import EvidenceImage, InterventionWindow, KMetric
+from vlm_ppe.schemas import EvidenceImage, KMetric
 
 
 def test_openrouter_client_sends_multimodal_json_request(tmp_path: Path, monkeypatch) -> None:
@@ -132,6 +132,8 @@ def test_openrouter_client_reviews_windows(tmp_path: Path, monkeypatch) -> None:
                     "windows": [
                         {
                             "window_id": "C2_W1",
+                            "start_station_index": 3,
+                            "end_station_index": 6,
                             "class_name": "dogleg",
                             "confidence": 0.82,
                             "visual_reason": "One outward excursion is visible.",
@@ -154,23 +156,6 @@ def test_openrouter_client_reviews_windows(tmp_path: Path, monkeypatch) -> None:
     client = OpenRouterVLMClient(model="google/gemini-2.5-flash")
     review = client.review_windows(
         cluster_id=2,
-        windows=[
-            InterventionWindow(
-                cluster_id=2,
-                window_id="C2_W1",
-                start_station_index=3,
-                end_station_index=6,
-                start_s_fraction=0.3,
-                end_s_fraction=0.6,
-                start_s_nm=3.0,
-                end_s_nm=6.0,
-                length_nm=3.0,
-                peak_residual_energy_nm2=9.0,
-                peak_heading_dispersion=0.1,
-                trigger_reasons=["residual_energy"],
-                track_ids=["T1"],
-            )
-        ],
         evidence_images=[EvidenceImage(kind="residual_windows", path=image_path.as_posix(), caption="Cluster 2 windows")],
         prompt="Classify windows.",
     )

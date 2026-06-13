@@ -10,12 +10,13 @@ from vlm_ppe.agents.graph import run_graph
 from vlm_ppe.agents.vlm_client import ClusterReviewClient
 from vlm_ppe.config import load_config
 from vlm_ppe.geo.projection import LocalProjection
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
 
 
 class FakeReviewClient(ClusterReviewClient):
-    def __init__(self, *, retry_once: bool = False) -> None:
+    def __init__(self, *, retry_once: bool = False, propose_window: bool = False) -> None:
         self.retry_once = retry_once
+        self.propose_window = propose_window
         self.calls = 0
         self.window_calls = 0
 
@@ -56,24 +57,47 @@ class FakeReviewClient(ClusterReviewClient):
         self,
         *,
         cluster_id: int,
-        windows: list[InterventionWindow],
         evidence_images: list[EvidenceImage],
+        attempt: int = 0,
+        max_attempts: int = 3,
+        previous_review_json: str | None = None,
         prompt: str | None = None,
     ) -> WindowReview:
         self.window_calls += 1
         assert prompt
         assert evidence_images
-        assert windows
+        assert attempt < max_attempts
+        if not self.propose_window:
+            return WindowReview(cluster_id=cluster_id, windows=[], outlier_notes=[], suggested_action="accept")
+        if attempt == 0:
+            return WindowReview(
+                cluster_id=cluster_id,
+                windows=[
+                    {
+                        "window_id": f"C{cluster_id}_W1",
+                        "start_station_index": 2,
+                        "end_station_index": 7,
+                        "class_name": "dogleg",
+                        "confidence": 0.72,
+                        "visual_reason": "A maneuver is visible but the first pass includes quiet margins.",
+                    }
+                ],
+                outlier_notes=[],
+                suggested_action="accept",
+            )
+        assert previous_review_json is not None
+        assert any("highlighted" in image.caption for image in evidence_images)
         return WindowReview(
             cluster_id=cluster_id,
             windows=[
                 {
-                    "window_id": window.window_id,
+                    "window_id": f"C{cluster_id}_W1",
+                    "start_station_index": 3,
+                    "end_station_index": 6,
                     "class_name": "dogleg",
                     "confidence": 0.82,
                     "visual_reason": "One outward excursion and one closure back to the template.",
                 }
-                for window in windows
             ],
             outlier_notes=[],
             suggested_action="accept",
@@ -229,10 +253,6 @@ def _write_window_fixture(tmp_path: Path) -> Path:
                 "kmeans_random_state: 5",
                 "max_retries: 0",
                 'vlm_model: "google/gemini-2.5-flash"',
-                "residual_energy_lambda: 3.0",
-                "min_window_length_nm: 2.0",
-                "merge_windows_gap_nm: 1.0",
-                "heading_dispersion_threshold: 0.25",
             ]
         ),
         encoding="utf-8",
@@ -275,25 +295,30 @@ def test_graph_honors_single_retry_requested_by_vlm(tmp_path: Path) -> None:
     assert len(result["vlm_reviews"]) == 2
 
 
-def test_graph_classifies_detected_windows_with_fake_vlm(tmp_path: Path) -> None:
+def test_graph_enriches_vlm_proposed_windows(tmp_path: Path) -> None:
     config = load_config(_write_window_fixture(tmp_path))
-    client = FakeReviewClient()
+    client = FakeReviewClient(propose_window=True)
 
     result = run_graph(config, run_id="window-run", vlm_client=client)
 
     assert result["status"] == "complete"
-    assert client.window_calls == 1
+    assert client.window_calls == 2
     assert len(result["intervention_windows"]) == 1
+    assert result["intervention_windows"][0]["start_station_index"] == 3
+    assert result["intervention_windows"][0]["end_station_index"] == 6
     assert result["window_reviews"][0]["windows"][0]["class_name"] == "dogleg"
-    assert Path(result["window_review_paths"][0]).exists()
+    assert len(result["window_review_paths"]) == 2
+    assert all(Path(path).exists() for path in result["window_review_paths"])
     assert result["window_evidence_images"]
+    assert any("highlighted" in image["caption"] for image in result["window_evidence_images"])
 
 
-def test_offline_chosen_k_bypasses_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chosen_k_override_still_uses_fake_vlm_for_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     config = load_config(_write_fixture(tmp_path))
+    client = FakeReviewClient()
 
-    result = run_graph(config, chosen_k=2, run_id="offline-run")
+    result = run_graph(config, chosen_k=2, run_id="offline-run", vlm_client=client)
 
     assert result["status"] == "complete"
     assert result["vlm_reviews"][-1]["confidence"] == 1.0

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from vlm_ppe.schemas import InterventionWindow, KMetric
+from vlm_ppe.schemas import KMetric
 
 
 def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attempt: int, max_retries: int) -> str:
@@ -31,13 +31,34 @@ def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attemp
     )
 
 
-def window_review_prompt(cluster_id: int, windows: list[InterventionWindow]) -> str:
-    windows_payload = [window.model_dump() for window in windows]
+def window_review_prompt(
+    cluster_id: int,
+    *,
+    attempt: int = 0,
+    max_attempts: int = 3,
+    previous_review_json: str | None = None,
+) -> str:
+    attempt_block = (
+        f"Attempt {attempt + 1} of {max_attempts}. This first attempt uses unhighlighted residual diagnostics. "
+        "If you return one or more windows, the graph will render your proposed range highlighted and send it back "
+        "for confirmation or revision.\n"
+        if attempt == 0
+        else (
+            f"Attempt {attempt + 1} of {max_attempts}. You are now seeing both the original residual diagnostics "
+            "and a highlighted diagnostic image based on your previous proposal. If the highlighted window range is "
+            'correct, return suggested_action set to "accept". If it is wrong, return a revised complete window list '
+            'with suggested_action set to "revise".\n'
+        )
+    )
+    previous_block = f"Previous window proposal JSON: {previous_review_json}\n\n" if previous_review_json else ""
     return (
         "You are reviewing one VLM-PPE trajectory cluster.\n"
-        "Use only the provided ADS-B trajectory plots and numeric residual-window records. Do not infer from AIP charts.\n"
-        "Classify each detected candidate intervention window. The deterministic tool created the windows; you may only "
-        "assign class labels and note ambiguity.\n\n"
+        "Use only the provided ADS-B trajectory plots, medoid overlay, residual-energy curve, heading-dispersion curve, "
+        "and station-index labels. Do not infer from AIP charts.\n"
+        "Your task is to propose the intervention window boundaries and classify the pattern at the same time.\n"
+        "Use station indices shown on the diagnostic plot. Return no windows if the cluster has no meaningful intervention.\n\n"
+        f"{attempt_block}"
+        f"{previous_block}"
         "Class definitions:\n"
         "- no_stretch: no meaningful deviation program; max cross-track deviation and added path length appear small.\n"
         "- dogleg: one outward vector-like leg followed by one closure/rejoin leg.\n"
@@ -45,7 +66,12 @@ def window_review_prompt(cluster_id: int, windows: list[InterventionWindow]) -> 
         "- PMS: point-merge-like sequencing leg followed by direct-to common merge point.\n"
         "- other: holding, looping, direct shortcut, unclear, too rare, or too complex for v1.\n\n"
         f"Cluster ID: {cluster_id}.\n"
-        f"Detected windows JSON: {json.dumps(windows_payload, separators=(',', ':'))}\n\n"
+        "Window boundary rules:\n"
+        "- start_station_index and end_station_index must be integers from the plotted station axis.\n"
+        "- end_station_index must be greater than or equal to start_station_index.\n"
+        "- Pick the smallest station interval that covers the visually meaningful maneuver.\n"
+        "- Do not pad the window to include quiet common-flow sections unless they are needed for the pattern.\n"
+        "- Always return the full current best window list, not only edits from a previous attempt.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item:\n"
         "{\n"
@@ -53,6 +79,8 @@ def window_review_prompt(cluster_id: int, windows: list[InterventionWindow]) -> 
         '  "windows": [\n'
         "    {\n"
         '      "window_id": "C2_W1",\n'
+        '      "start_station_index": 32,\n'
+        '      "end_station_index": 61,\n'
         '      "class_name": "dogleg",\n'
         '      "confidence": 0.82,\n'
         '      "visual_reason": "One clear outward vector and one closure leg back to common flow."\n'

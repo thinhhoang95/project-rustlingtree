@@ -8,7 +8,11 @@ import pandas as pd
 from vlm_ppe.clustering.features import build_shape_features, load_features, write_features
 from vlm_ppe.clustering.kmeans_runner import load_labels, run_candidate_kmeans, write_clustering_runs
 from vlm_ppe.clustering.medoid import compute_cluster_medoids, write_medoids
-from vlm_ppe.clustering.residual_windows import compute_cluster_residual_windows, write_residual_windows
+from vlm_ppe.clustering.residual_windows import (
+    compute_cluster_residual_profiles,
+    write_intervention_windows,
+    write_residual_profiles,
+)
 from vlm_ppe.diagnostics.plots_clustering import render_cluster_panels, render_metrics_chart
 from vlm_ppe.diagnostics.plots_medoids import render_medoid_plot
 from vlm_ppe.diagnostics.plots_residuals import render_residual_window_diagnostics
@@ -20,6 +24,7 @@ from vlm_ppe.audit import log_graph_event
 from vlm_ppe.schemas import (
     ClusterMedoid,
     ClusterReview,
+    EvidenceImage,
     InterventionWindow,
     KMetric,
     PPEConfig,
@@ -194,35 +199,27 @@ def render_medoid_report_tool(state: dict) -> dict:
     return {"medoid_report_path": report_path, "medoid_plot_path": plot_path, "status": "medoid_report_rendered"}
 
 
-def compute_residual_windows_tool(state: dict) -> dict:
+def compute_residual_profiles_tool(state: dict) -> dict:
     current = state_model(state)
-    config = config_model(state)
     if current.resampled_tracks_path is None or current.cluster_assignments_path is None or not state.get("medoids"):
         raise ValueError(
-            "resampled tracks, cluster assignments, and medoids are required before residual-window detection"
+            "resampled tracks, cluster assignments, and medoids are required before residual-profile computation"
         )
     resampled = read_parquet(current.resampled_tracks_path)
     labels = pd.read_csv(current.cluster_assignments_path)
     medoids = [ClusterMedoid.model_validate(item) for item in state["medoids"]]
-    residual_profiles, windows = compute_cluster_residual_windows(
+    residual_profiles = compute_cluster_residual_profiles(
         resampled,
         labels,
         medoids,
-        residual_energy_lambda=config.residual_energy_lambda,
-        min_window_length_nm=config.min_window_length_nm,
-        merge_windows_gap_nm=config.merge_windows_gap_nm,
-        heading_dispersion_threshold=config.heading_dispersion_threshold,
     )
-    profiles_path, windows_path = write_residual_windows(
+    profiles_path = write_residual_profiles(
         residual_profiles,
-        windows,
         Path(current.run_dir) / "residuals",
     )
     return {
         "residual_profiles_path": profiles_path,
-        "intervention_windows_path": windows_path,
-        "intervention_windows": [window.model_dump() for window in windows],
-        "status": "residual_windows_computed",
+        "status": "residual_profiles_computed",
     }
 
 
@@ -241,13 +238,11 @@ def render_window_diagnostics_tool(state: dict) -> dict:
     labels = pd.read_csv(current.cluster_assignments_path)
     medoids = [ClusterMedoid.model_validate(item) for item in state["medoids"]]
     residual_profiles = read_parquet(current.residual_profiles_path)
-    windows = [InterventionWindow.model_validate(item) for item in current.intervention_windows]
     evidence = render_residual_window_diagnostics(
         resampled,
         labels,
         medoids,
         residual_profiles,
-        windows,
         Path(current.run_dir) / "evidence" / "residual_windows",
     )
     return {
@@ -256,29 +251,101 @@ def render_window_diagnostics_tool(state: dict) -> dict:
     }
 
 
+def render_window_review_diagnostics(state: dict, review: WindowReview, *, proposal_attempt: int) -> list[EvidenceImage]:
+    current = state_model(state)
+    if (
+        current.resampled_tracks_path is None
+        or current.cluster_assignments_path is None
+        or current.residual_profiles_path is None
+        or not state.get("medoids")
+    ):
+        raise ValueError(
+            "resampled tracks, cluster assignments, medoids, and residual profiles are required before review diagnostics"
+        )
+
+    cluster_id = int(review.cluster_id)
+    medoids = [ClusterMedoid.model_validate(item) for item in state["medoids"]]
+    selected_medoids = [medoid for medoid in medoids if int(medoid.cluster_id) == cluster_id]
+    if not selected_medoids:
+        raise ValueError(f"window review references unknown cluster_id={cluster_id}")
+
+    resampled = read_parquet(current.resampled_tracks_path)
+    labels = pd.read_csv(current.cluster_assignments_path)
+    residual_profiles = read_parquet(current.residual_profiles_path)
+    output_dir = (
+        Path(current.run_dir)
+        / "evidence"
+        / "residual_windows"
+        / f"cluster_{cluster_id:02d}_attempt_{proposal_attempt:02d}_highlighted"
+    )
+    return render_residual_window_diagnostics(
+        resampled,
+        labels,
+        selected_medoids,
+        residual_profiles,
+        output_dir,
+        windows_by_cluster={cluster_id: list(review.windows)},
+        caption_suffix=f"with VLM-proposed windows highlighted from attempt {proposal_attempt + 1}",
+    )
+
+
 def validate_window_reviews_tool(state: dict) -> dict:
     current = state_model(state)
-    windows = [InterventionWindow.model_validate(item) for item in current.intervention_windows]
+    if current.residual_profiles_path is None or current.cluster_assignments_path is None:
+        raise ValueError("residual profiles and cluster assignments are required before window-review validation")
+    residual_profiles = read_parquet(current.residual_profiles_path)
+    labels = pd.read_csv(current.cluster_assignments_path)
     reviews = [WindowReview.model_validate(item) for item in current.window_reviews]
-    expected_by_cluster: dict[int, set[str]] = {}
-    for window in windows:
-        expected_by_cluster.setdefault(int(window.cluster_id), set()).add(window.window_id)
-
-    seen: set[str] = set()
+    windows: list[InterventionWindow] = []
+    seen_ids: set[str] = set()
     for review in reviews:
-        expected = expected_by_cluster.get(int(review.cluster_id), set())
-        for classification in review.windows:
-            if classification.window_id not in expected:
-                raise ValueError(f"window review classified unknown window_id={classification.window_id}")
-            if classification.window_id in seen:
-                raise ValueError(f"window_id={classification.window_id} was classified more than once")
-            seen.add(classification.window_id)
+        cluster_id = int(review.cluster_id)
+        cluster_profile = residual_profiles.loc[residual_profiles["cluster_id"].astype(int) == cluster_id]
+        if cluster_profile.empty:
+            raise ValueError(f"window review references unknown cluster_id={cluster_id}")
+        cluster_profile = cluster_profile.sort_values("station_index", kind="stable")
+        station_ids = set(cluster_profile["station_index"].astype(int))
+        track_ids = labels.loc[labels["cluster_id"].astype(int) == cluster_id, "flight_id"].astype(str).tolist()
+        for proposal in review.windows:
+            if proposal.window_id in seen_ids:
+                raise ValueError(f"window_id={proposal.window_id} was proposed more than once")
+            seen_ids.add(proposal.window_id)
+            if proposal.start_station_index not in station_ids or proposal.end_station_index not in station_ids:
+                raise ValueError(
+                    f"window_id={proposal.window_id} station bounds are outside cluster {cluster_id} profile"
+                )
+            rows = cluster_profile.loc[
+                (cluster_profile["station_index"].astype(int) >= proposal.start_station_index)
+                & (cluster_profile["station_index"].astype(int) <= proposal.end_station_index)
+            ]
+            start_row = rows.iloc[0]
+            end_row = rows.iloc[-1]
+            windows.append(
+                InterventionWindow(
+                    cluster_id=cluster_id,
+                    window_id=proposal.window_id,
+                    class_name=proposal.class_name,
+                    confidence=proposal.confidence,
+                    visual_reason=proposal.visual_reason,
+                    start_station_index=proposal.start_station_index,
+                    end_station_index=proposal.end_station_index,
+                    start_s_fraction=float(start_row["s_fraction"]),
+                    end_s_fraction=float(end_row["s_fraction"]),
+                    start_s_nm=float(start_row["s_nm"]),
+                    end_s_nm=float(end_row["s_nm"]),
+                    length_nm=float(end_row["s_nm"] - start_row["s_nm"]),
+                    peak_residual_energy_nm2=float(rows["residual_energy_nm2"].max()),
+                    peak_heading_dispersion=float(rows["heading_dispersion"].max()),
+                    track_ids=track_ids,
+                )
+            )
 
-    expected_all = set().union(*expected_by_cluster.values()) if expected_by_cluster else set()
-    missing = sorted(expected_all - seen)
-    if missing:
-        raise ValueError(f"window reviews are missing classifications for {missing}")
-    return {"status": "window_reviews_validated"}
+    windows_path = write_intervention_windows(windows, Path(current.run_dir) / "residuals")
+    return {
+        "intervention_windows_path": windows_path,
+        "intervention_windows": [window.model_dump() for window in windows],
+        "status": "window_reviews_validated",
+    }
 
 
 def export_state_tool(state: dict) -> dict:

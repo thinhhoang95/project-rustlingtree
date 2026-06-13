@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from vlm_ppe.schemas import ClusterReview, EvidenceImage, InterventionWindow, KMetric, WindowReview
+from vlm_ppe.schemas import ClusterReview, EvidenceImage, KMetric, WindowReview
 
 LOGGER_NAME = "vlm_ppe.audit"
 
@@ -223,16 +223,16 @@ def log_window_vlm_request(
     *,
     run_dir: str | Path,
     cluster_id: int,
+    attempt: int,
     model: str,
     prompt: str,
     evidence_images: list[EvidenceImage],
-    windows: list[InterventionWindow],
     offline_override: bool,
 ) -> str:
     root = Path(run_dir)
     review_dir = root / "vlm_reviews" / "windows"
     review_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"cluster_{int(cluster_id):02d}"
+    stem = f"cluster_{int(cluster_id):02d}_attempt_{int(attempt):02d}"
     image_records = [_image_record(image) for image in evidence_images]
     prompt_path = review_dir / f"{stem}_prompt.txt"
     request_path = review_dir / f"{stem}_request.json"
@@ -240,11 +240,11 @@ def log_window_vlm_request(
         "timestamp_utc": utc_now_iso(),
         "event": "vlm_window_request",
         "cluster_id": int(cluster_id),
+        "attempt": int(attempt),
         "model": model,
         "offline_override": offline_override,
         "prompt_path": prompt_path.as_posix(),
         "images": image_records,
-        "windows": [window.model_dump() for window in windows],
     }
     prompt_path.write_text(prompt, encoding="utf-8")
     with request_path.open("w", encoding="utf-8") as stream:
@@ -254,11 +254,11 @@ def log_window_vlm_request(
     logger = get_audit_logger(root)
     mode = "offline override" if offline_override else "OpenRouter request"
     logger.info(
-        "VLM window review prepared: cluster=%s %s model=%s windows=%d images=%d",
+        "VLM window review prepared: cluster=%s attempt=%02d %s model=%s images=%d",
         cluster_id,
+        attempt,
         mode,
         model,
-        len(windows),
         len(image_records),
     )
     return request_path.as_posix()
@@ -267,6 +267,7 @@ def log_window_vlm_request(
 def log_window_vlm_response(
     *,
     run_dir: str | Path,
+    attempt: int,
     review: WindowReview,
     response_path: str,
 ) -> None:
@@ -275,14 +276,16 @@ def log_window_vlm_response(
         "timestamp_utc": utc_now_iso(),
         "event": "vlm_window_response",
         "cluster_id": review.cluster_id,
+        "attempt": int(attempt),
         "response_path": response_path,
         "review": review.model_dump(),
     }
     _append_jsonl(root / "vlm_interactions.jsonl", payload)
     logger = get_audit_logger(root)
     logger.info(
-        "VLM window response: cluster=%s windows=%d action=%s response=%s",
+        "VLM window response: cluster=%s attempt=%02d windows=%d action=%s response=%s",
         review.cluster_id,
+        attempt,
         len(review.windows),
         review.suggested_action,
         response_path,
