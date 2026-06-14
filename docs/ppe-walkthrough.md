@@ -15,13 +15,15 @@ The current implementation covers PPE ingestion through PPE plan Sections 7 and
 6. render VLM evidence packs,
 7. ask the VLM to choose or retry the cluster count,
 8. validate the VLM decision,
-9. compute one medoid trajectory per accepted cluster,
-10. compute residual-energy and heading-dispersion profiles,
-11. render residual evidence with station guides,
-12. ask the VLM to propose windows and classify them into the v1 intervention classes,
-13. render each non-empty proposal highlighted and let the VLM confirm or revise it,
-14. validate and enrich the structured proposals,
-15. write audit artifacts and a final state index.
+9. optionally review accepted clusters for polygon-captured subclusters,
+10. compute one medoid trajectory per final refined cluster,
+11. compute residual-energy and heading-dispersion profiles,
+12. render residual evidence with station guides,
+13. ask the VLM to count intervention patterns, then propose and classify one
+    window at a time,
+14. render each non-empty proposal highlighted and let the VLM confirm or revise it,
+15. validate and enrich the structured proposals,
+16. write audit artifacts and a final state index.
 
 Intervention fitting and procedure-program export are not implemented yet. Those
 correspond to Section 9 and beyond in the PPE plan.
@@ -35,7 +37,8 @@ The VLM is the visible orchestrator:
 - it receives rendered trajectory evidence,
 - it sees metrics and plots,
 - it chooses the practical cluster count,
-- it can request bounded retries,
+- it can request bounded reclustering retries during cluster-count review,
+- it can split accepted global clusters with polygon-capture subcluster reviews,
 - it proposes residual-window boundaries and classifications,
 - it explains its decision through a structured rationale.
 
@@ -77,7 +80,7 @@ Primary files:
 - `src/vlm_ppe/agents/graph.py`: LangGraph state machine.
 - `src/vlm_ppe/agents/tools.py`: deterministic tool wrappers used by graph
   nodes.
-- `src/vlm_ppe/agents/vlm_client.py`: Gemini-backed VLM client.
+- `src/vlm_ppe/agents/vlm_client.py`: OpenRouter-backed VLM client.
 - `src/vlm_ppe/agents/prompts.py`: cluster-review and window-review prompt
   builders.
 - `src/vlm_ppe/io/adsb_loader.py`: manifest, catalog, and compressed ADS-B
@@ -106,8 +109,12 @@ Tests:
 
 - `tests/test_ppe_geo.py`
 - `tests/test_ppe_clustering.py`
+- `tests/test_ppe_residual_windows.py`
+- `tests/test_ppe_prompts.py`
+- `tests/test_ppe_adsb_loader.py`
 - `tests/test_ppe_graph.py`
 - `tests/test_ppe_cli.py`
+- `tests/test_vlm_client.py`
 
 ## Dependency And Runtime Setup
 
@@ -116,7 +123,7 @@ The package is installed through the repository's `pyproject.toml`.
 Important dependencies:
 
 - `langgraph`: agent graph runtime.
-- `google-genai`: Gemini API client.
+- `openai`: OpenAI-compatible client used against OpenRouter.
 - `pyarrow`: Parquet support for pandas.
 - `pyproj`: local projected coordinate frame.
 - `pydantic>=2`: schema validation.
@@ -136,8 +143,9 @@ For VLM-led runs, export an OpenRouter API key:
 export OPENROUTER_API_KEY="..."
 ```
 
-`--chosen-k` only bypasses the cluster-count review. Window proposal still
-requires the configured VLM unless tests inject a fake review client.
+`--chosen-k` only bypasses the cluster-count review. Subcluster review and
+window proposal still require the configured VLM unless tests inject a fake
+review client.
 
 ## Running The Pipeline
 
@@ -148,13 +156,13 @@ vlm-ppe run-through-medoid \
   --config configs/ppe_kdfw_arrivals.yaml
 ```
 
-Offline/manual cluster-count run:
+Manual cluster-count run:
 
 ```sh
 vlm-ppe run-through-medoid \
   --config configs/ppe_kdfw_arrivals.yaml \
   --chosen-k 2 \
-  --run-id smoke-offline
+  --run-id smoke-manual-k
 ```
 
 Increase console/file logging verbosity:
@@ -179,7 +187,8 @@ The command prints a small JSON object at the end:
 {
   "status": "complete",
   "run_dir": ".../data/artifacts/ppe/2026-04-01/runs/<run_id>",
-  "state_path": ".../state.json"
+  "state_path": ".../state.json",
+  "intervention_windows_path": ".../residuals/intervention_windows.parquet"
 }
 ```
 
@@ -202,8 +211,14 @@ kmeans_n_init: 50
 kmeans_random_state: 17
 max_retries: 2
 max_k_expansion: 12
-vlm_model: "gemini-3.5-flash"
+subcluster_review_enabled: true
+subcluster_min_tracks: 4
+subcluster_max_polygons: 4
+subcluster_max_reviews: 64
+vlm_model: "google/gemini-3.5-flash"
+vlm_reasoning_effort: "high"
 window_review_max_attempts: 3
+window_review_max_patterns: 8
 track_filter_center_lat: 32.897102378968
 track_filter_center_lon: -97.036547781746
 track_filter_radius_nm: 60.0
@@ -235,8 +250,10 @@ Meaning:
 - `vlm_model`: OpenRouter model slug.
 - `vlm_reasoning_effort`: OpenRouter reasoning effort for reasoning-capable
   models.
-- `window_review_max_attempts`: maximum VLM attempts per cluster for proposing,
-  viewing the highlighted proposal, and revising residual-window bounds.
+- `window_review_max_attempts`: maximum VLM attempts per current window pattern
+  for proposing, viewing the highlighted proposal, and revising bounds.
+- `window_review_max_patterns`: maximum count accepted from the count-only
+  window-pattern review for one cluster.
 - `track_filter_center_lat`, `track_filter_center_lon`: optional center of the
   circular trajectory window. The default KDFW config uses the airport center.
 - `track_filter_radius_nm`: optional circular trajectory window radius in
@@ -503,7 +520,7 @@ These are the images prepared for model review.
 Implemented by:
 
 - `vlm_review_clusters` node in `agents/graph.py`
-- `GeminiVLMClient` in `agents/vlm_client.py`
+- `OpenRouterVLMClient` in `agents/vlm_client.py`
 - `cluster_review_prompt()` in `agents/prompts.py`
 
 The VLM receives:
@@ -536,10 +553,12 @@ The prompt asks the model to return strict JSON:
 
 The response is validated by `ClusterReview`.
 
-Offline mode:
+Manual cluster-count override:
 
-If `--chosen-k` is supplied, no Gemini call is made. The graph still creates a
-synthetic `ClusterReview` and writes the same audit files.
+If `--chosen-k` is supplied, no live cluster-count review call is made. The
+graph still creates a synthetic `ClusterReview` and writes the same audit files.
+Subcluster review and window review still use the configured VLM unless tests
+inject a fake review client.
 
 ### Stage 6: Review Validation And Retry
 
@@ -557,7 +576,10 @@ Retry behavior:
 - expand `k_max_current` up to `max_k_expansion`,
 - return to `run_candidate_clustering`.
 
-The retry loop is deliberately bounded. There is no open-ended agent loop.
+The retry loop is deliberately bounded. There is no open-ended agent loop, and
+this is the only graph-level retry path. Subcluster review does not loop back
+after a proposed split; window review has its own local confirmation/revision
+attempts inside `vlm_classify_windows`.
 
 ### Stage 7: Subcluster Refinement
 
@@ -624,7 +646,7 @@ Outputs:
 - `templates/cluster_summary.json`
 - `templates/cluster_medoids.png`
 
-### Stage 8: Medoid Report
+### Stage 9: Medoid Report
 
 Implemented by:
 
@@ -647,7 +669,7 @@ The report includes:
 - mean and maximum distance to the cluster medoid,
 - medoid plot path.
 
-### Stage 9: Residual-Profile Computation
+### Stage 10: Residual-Profile Computation
 
 This corresponds to Section 7 of the PPE plan.
 
@@ -668,7 +690,7 @@ Outputs:
 
 - `residuals/residual_profiles.parquet`
 
-### Stage 10: Window Diagnostics And Classification
+### Stage 11: Window Diagnostics And Classification
 
 This corresponds to Section 8 of the PPE plan.
 
@@ -709,6 +731,10 @@ range or return a complete revised window for that same current pattern. This
 inner tuning loop is bounded by `window_review_max_attempts`; the default is
 three attempts per pattern. After a pattern is accepted, the graph proceeds to
 the next unconfirmed pattern until the fixed count is reached.
+
+There is no deterministic candidate-window detector in the current code path:
+residual energy and heading dispersion are rendered as model-visible evidence,
+then the VLM supplies the count, station bounds, and class labels.
 
 `validate_window_reviews` checks that proposed station bounds exist for that
 cluster, derives nautical-mile spans and peak metrics from the residual profile,
@@ -909,11 +935,9 @@ Fix:
 export OPENROUTER_API_KEY="..."
 ```
 
-Or run in offline mode:
-
-```sh
-vlm-ppe run-through-medoid --config configs/ppe_kdfw_arrivals.yaml --chosen-k 2
-```
+`--chosen-k` bypasses only the cluster-count review; it does not make the CLI
+fully offline because subcluster and window reviews still use the configured
+VLM. Unit tests use injected fake review clients for fully offline graph runs.
 
 ### No Tracks Selected
 
@@ -936,7 +960,7 @@ head data/adsb/catalogs/2026-04-01_landings_and_departures.csv
 
 The graph validates that `chosen_k` is in `candidate_k_values`.
 
-If Gemini returns a value outside the available K range, the run fails at:
+If the VLM returns a value outside the available K range, the run fails at:
 
 ```text
 validate_review
@@ -1017,8 +1041,12 @@ Focused PPE tests:
 ```sh
 pytest tests/test_ppe_geo.py \
        tests/test_ppe_clustering.py \
+       tests/test_ppe_residual_windows.py \
+       tests/test_ppe_prompts.py \
+       tests/test_ppe_adsb_loader.py \
        tests/test_ppe_graph.py \
-       tests/test_ppe_cli.py -q
+       tests/test_ppe_cli.py \
+       tests/test_vlm_client.py -q
 ```
 
 Static check:
@@ -1027,8 +1055,12 @@ Static check:
 python -m ruff check src/vlm_ppe \
   tests/test_ppe_geo.py \
   tests/test_ppe_clustering.py \
+  tests/test_ppe_residual_windows.py \
+  tests/test_ppe_prompts.py \
+  tests/test_ppe_adsb_loader.py \
   tests/test_ppe_graph.py \
-  tests/test_ppe_cli.py
+  tests/test_ppe_cli.py \
+  tests/test_vlm_client.py
 ```
 
 Compile check:
@@ -1038,7 +1070,7 @@ find src/vlm_ppe tests -name '*.py' ! -name '._*' ! -name '.__*' -print0 \
   | xargs -0 python -m py_compile
 ```
 
-Real-data offline smoke:
+Real-data manual cluster-count smoke:
 
 ```sh
 vlm-ppe run-through-medoid \
@@ -1051,7 +1083,8 @@ vlm-ppe run-through-medoid \
 
 - Only stages through residual-window classification are implemented.
 - The VLM review is currently used for cluster-count choice, bounded retry
-  orchestration, and residual-window classification.
+  orchestration, subcluster polygon capture, window-pattern counting, and
+  residual-window classification.
 - The final exported geometry is a medoid trajectory, not yet a procedure
   program with intervention tokens.
 - No dogleg, trombone, or PMS fitting is implemented yet.
