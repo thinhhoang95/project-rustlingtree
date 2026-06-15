@@ -36,7 +36,9 @@ def test_subcluster_review_prompt_requests_manual_polygon_capture() -> None:
     assert "convex hull" in prompt
     assert "crosses, touches, or runs inside the convex polygon" in prompt
     assert "Do not split one trajectory family on spacing, sample density, smooth variation" in prompt
-    assert "split children stop at depth 1" in prompt
+    assert "This pipeline reviews depth 0 only" in prompt
+    assert "becomes a terminal leaf and is not reviewed again" in prompt
+    assert "uncaptured_tracks_policy governs only the leftover tracks when you do split" in prompt
     assert '"subcluster_count": 3' in prompt
     assert '"polygon": [[-8.0, 2.5], [-6.8, 2.4], [-6.8, 3.3], [-8.0, 3.4]]' in prompt
     assert '"x_min_nm":-8.0' in prompt
