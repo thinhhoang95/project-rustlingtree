@@ -31,9 +31,11 @@ def test_subcluster_review_prompt_requests_manual_polygon_capture() -> None:
 
     assert "manual visual separation" in prompt
     assert "N=1 means the cluster is already one practical path pattern" in prompt
+    assert "Choose N>1 only when the plot shows discrete, visually distinct, repeated path families" in prompt
+    assert "If paths smoothly vary from one trajectory to the next" in prompt
     assert "convex hull" in prompt
     assert "crosses, touches, or runs inside the convex polygon" in prompt
-    assert "Do not split one trajectory family on spacing, sample density, or minor noisy variation" in prompt
+    assert "Do not split one trajectory family on spacing, sample density, smooth variation" in prompt
     assert "split children stop at depth 1" in prompt
     assert '"subcluster_count": 3' in prompt
     assert '"polygon": [[-8.0, 2.5], [-6.8, 2.4], [-6.8, 3.3], [-8.0, 3.4]]' in prompt
@@ -43,11 +45,18 @@ def test_subcluster_review_prompt_requests_manual_polygon_capture() -> None:
 def test_window_pattern_count_prompt_requests_count_only_with_rationale() -> None:
     prompt = window_pattern_count_prompt(2, max_patterns=8)
 
-    assert "only to count how many distinct intervention patterns/windows are present" in prompt
+    assert "only to count how many distinct trajectory-variation windows are present" in prompt
     assert "Do not propose station boundaries, window IDs, or class labels" in prompt
+    assert "Count only meaningful local variation regions in the diagnostic region of interest" in prompt
+    assert "Count a trombone when the local geometry is paperclip-like" in prompt
+    assert "Do not dismiss a localized paperclip-like or foldback variation as routine turn-radius variation" in prompt
+    assert "Do not count routine procedure-following variation" not in prompt
+    assert "Do not count fanning, spreading, converging, or merging patterns at the far-upstream or far-downstream" in prompt
+    assert "especially far from the airport/terminal region" in prompt
+    assert "whether it looks tactical, procedural, or standard" not in prompt
     assert '"pattern_count": 2' in prompt
     assert '"confidence": 0.81' in prompt
-    assert '"rationale": ["Two separated residual-energy peaks align with two visually distinct maneuver regions."]' in prompt
+    assert '"rationale": ["Two separated residual-energy peaks align with two visually meaningful variation regions."]' in prompt
     assert "Maximum count allowed by configuration: 8" in prompt
 
 
@@ -59,10 +68,17 @@ def test_window_review_prompt_uses_literal_classification_example() -> None:
     assert '"end_station_index": 61' in prompt
     assert '"pattern_count": 2' not in prompt
     assert '"all_patterns_identified": false' in prompt
-    assert '"outlier_notes": ["Two tracks appear visually different from the main window pattern."]' in prompt
+    assert '"outlier_notes": ["Two tracks show weak variation but do not form another repeated window."]' in prompt
     assert "Fixed pattern_count from prior count-only review: 2" in prompt
     assert "Do not revise pattern_count in this request" in prompt
-    assert "Your task is to propose and classify tight intervention window boundaries" in prompt
+    assert "Your task is to propose and classify tight trajectory-variation window boundaries" in prompt
+    assert "Do not propose windows for routine procedure-following variation" not in prompt
+    assert "Do not propose windows for fanning, spreading, converging, or merging patterns at the far-upstream or" in prompt
+    assert "dogleg: a simple angled detour with one offset/outbound leg and one closure/rejoin leg" in prompt
+    assert "trombone: a paperclip-like sequencing extension" in prompt
+    assert "visibly folds back on itself like a U-turn, racetrack, or elongated paperclip" in prompt
+    assert "do not use PMS for ordinary far-upstream" in prompt
+    assert "Do not place a window on far-upstream/far-downstream fan-in/fan-out" in prompt
     assert "The window must be tight" in prompt
     assert "unhighlighted residual diagnostics" in prompt
 

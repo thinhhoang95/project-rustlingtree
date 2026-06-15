@@ -599,10 +599,11 @@ are resolved by subcluster order. Split children are accepted as final depth-1
 leaves, so the workflow does not continue looping into deeper descendants.
 
 The subcluster prompt requires clean trajectory separation: operational
-subclusters should be visibly distinct trajectory families, not spacing,
-density, or minor noisy variations. Uncaptured tracks are retained as a residual
-leaf so no trajectory is dropped. Final leaves are flattened back to integer
-cluster IDs so the downstream medoid, residual, and window logic remains
+subclusters should be discrete, visibly distinct trajectory families with a
+clear gap or materially different maneuver geometry, not a smooth continuum,
+spacing, density, or minor noisy variations. Uncaptured tracks are retained as a
+residual leaf so no trajectory is dropped. Final leaves are flattened back to
+integer cluster IDs so the downstream medoid, residual, and window logic remains
 unchanged.
 
 Outputs:
@@ -710,18 +711,36 @@ before this stage.
 For each cluster, the VLM first receives a count-only request. It returns
 `pattern_count`, `confidence`, and rationale, but no station boundaries or class
 labels. If `pattern_count` is zero, that cluster is recorded as having no
-intervention windows and no boundary requests are sent.
+trajectory-variation windows and no boundary requests are sent. The prompt
+counts meaningful repeated local variation inside the diagnostic region of
+interest. It should count a local trombone when the geometry is paperclip-like:
+an outbound leg, rounded/base turn, and inbound return leg roughly parallel or
+anti-parallel to the outbound leg. It should not dismiss that local foldback as
+routine turn-radius variation when multiple tracks repeat it and residual or
+heading-dispersion diagnostics support it. It should not count isolated noisy
+tracks or minor jitter inside otherwise common flow. Fanning, spreading,
+converging, or merging patterns at the far-upstream or far-downstream trajectory
+extremities, especially far from the airport/terminal region, are outside the
+region of interest and should not become windows.
 
 When `pattern_count` is positive, the graph sends separate boundary/classification
 requests for the current unconfirmed pattern. The fixed count is passed into
 those prompts as context and is not revised there. The x-axis ticks are dense
 enough to expose station choices without labeling every resampled point on long
-templates. For each current pattern, the VLM proposes `start_station_index`,
-`end_station_index`, and a class label:
+templates. For each current pattern, the VLM proposes tight variation-window
+boundaries with `start_station_index`, `end_station_index`, and a class label:
 
 ```text
 no_stretch, dogleg, trombone, PMS, other
 ```
+
+The prompt distinguishes `dogleg` from `trombone` by geometry: a dogleg is a
+simple angled offset-and-rejoin detour, while a trombone should look
+paperclip-like, with outbound and inbound legs connected by a foldback/U-turn.
+`PMS` is reserved for point-merge-like sequencing inside the region of interest;
+ordinary far-upstream or far-downstream merging at trajectory extremities should
+not be classified as a window. The `intervention_windows` artifact name is
+retained for compatibility.
 
 For each non-empty first proposal, deterministic tooling renders the same
 cluster diagnostics again with the proposed station span highlighted on the map,
