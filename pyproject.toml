@@ -47,6 +47,7 @@ hllrd-transform = "hllrd.cli:transform_main"
 scenario-manager-api = "mcp_tools.scenario_manager.server:main"
 scenario-manager-precompute-artifact = "mcp_tools.scenario_manager.precompute_artifact:main"
 vlm-ppe = "vlm_ppe.cli:main"
+ppe-eval = "ppe_evaluation.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
