@@ -10,7 +10,9 @@ python src/paper-june/clustering/ablation.py \
 By default the script infers the source PPE run from the ground-truth manifest,
 loads its resampled tracks and feature matrix, sweeps KMeans over the configured
 K range, evaluates silhouette, Calinski-Harabasz, Davies-Bouldin, and an inertia
-elbow, then matches discovered medoids to ground-truth subcluster medoids.
+elbow, then matches discovered medoids to ground-truth subcluster medoids. It
+also sweeps DBSCAN, HDBSCAN, and Leiden community detection, ranking the top two
+parameter sets for each by pruned medoid-matching F1.
 
 Default output:
 
@@ -23,5 +25,8 @@ Important files:
 - `findings.md`: human-readable summary and interpretation.
 - `validity_metrics.csv`: cluster validity metrics by K.
 - `match_scores.csv`: all-cluster and pruned-cluster medoid scores by K.
+- `density_sweep_metrics.csv`: intrinsic metrics for every DBSCAN/HDBSCAN/Leiden parameter set.
+- `density_match_scores.csv`: medoid scores for every DBSCAN/HDBSCAN/Leiden parameter set.
+- `selected_density_scores.csv`: top two selected parameter sets per density/community algorithm.
 - `figures/validity_metrics.png`: metric curves.
 - `figures/contact_sheets/*.png`: cluster contact sheets with medoid overlays.
