@@ -12,7 +12,7 @@ from ppe_evaluation.artifacts import GroundTruth, MedoidTrajectory, load_ground_
 from ppe_evaluation.cli import main as eval_main
 from ppe_evaluation.frechet import discrete_frechet_distance
 from ppe_evaluation.gui import create_app
-from ppe_evaluation.matching import match_medoids
+from ppe_evaluation.matching import detection_confusion_summary, match_medoids
 from ppe_evaluation.metrics import evaluate_run, interval_iou
 
 
@@ -159,8 +159,22 @@ def test_medoid_matching_uses_strict_threshold() -> None:
     )
 
     assert result.matches == []
+    assert len(result.assignments) == 1
+    assert result.assignments[0].matched is False
     assert result.unmatched_gt_ids == ["GT000"]
     assert result.unmatched_pred_cluster_ids == [0]
+
+
+def test_detection_confusion_summary_uses_object_detection_denominator() -> None:
+    summary = detection_confusion_summary(n_gt=2, n_pred=3, n_tp=1)
+
+    assert summary["tp"] == 1
+    assert summary["fp"] == 2
+    assert summary["tn"] == 0
+    assert summary["fn"] == 1
+    assert summary["precision"] == pytest.approx(1 / 3)
+    assert summary["recall"] == pytest.approx(1 / 2)
+    assert summary["accuracy"] == pytest.approx(1 / 4)
 
 
 def test_interval_iou_uses_fractional_window_overlap() -> None:
@@ -176,12 +190,15 @@ def test_evaluate_run_writes_summary_and_class_aware_window_metrics(tmp_path: Pa
 
     assert report.medoid_summary["tp"] == 1
     assert report.medoid_summary["fp"] == 1
+    assert report.medoid_summary["tn"] == 0
     assert report.medoid_summary["precision"] == pytest.approx(0.5)
     assert report.window_summary["tp"] == 1
     assert report.window_summary["fp"] == 1
+    assert report.window_summary["tn"] == 0
     assert report.window_summary["map_at_0_5"] == pytest.approx(0.5)
     assert report.window_classification_summary["tp"] == 1
     assert report.window_classification_summary["fp"] == 1
+    assert report.window_classification_summary["tn"] == 0
     assert report.window_classification_summary["fn"] == 0
     assert report.window_classification_summary["accuracy"] == pytest.approx(1.0)
     assert (run_dir / "evaluation" / "summary.json").exists()

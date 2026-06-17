@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from ppe_evaluation.gui import run_gui
+from ppe_evaluation.matching import DEFAULT_FRECHET_THRESHOLD_NM
 from ppe_evaluation.metrics import evaluate_run
 
 
@@ -13,6 +14,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         args.run_dir,
         args.ground_truth,
         args.output_dir,
+        frechet_threshold_nm=args.frechet_threshold_nm,
         class_aware=not args.class_agnostic,
     )
     print(json.dumps(report.to_json_dict(), indent=2))
@@ -33,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--run-dir", required=True, type=Path)
     evaluate.add_argument("--ground-truth", type=Path, default=None)
     evaluate.add_argument("--output-dir", type=Path, default=None)
+    evaluate.add_argument(
+        "--frechet-threshold-nm",
+        type=float,
+        default=DEFAULT_FRECHET_THRESHOLD_NM,
+        help=f"Medoid Frechet match threshold in NM. Defaults to {DEFAULT_FRECHET_THRESHOLD_NM:.1f}.",
+    )
     evaluate.add_argument(
         "--class-agnostic",
         action="store_true",

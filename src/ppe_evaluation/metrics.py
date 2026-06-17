@@ -17,7 +17,12 @@ from ppe_evaluation.artifacts import (
     load_ground_truth,
     load_run_artifacts,
 )
-from ppe_evaluation.matching import DEFAULT_FRECHET_THRESHOLD_NM, MedoidMatch, match_medoids
+from ppe_evaluation.matching import (
+    DEFAULT_FRECHET_THRESHOLD_NM,
+    MedoidMatch,
+    detection_confusion_summary,
+    match_medoids,
+)
 
 
 DEFAULT_WINDOW_IOU_THRESHOLD = 0.1
@@ -287,6 +292,7 @@ def _classification_at_threshold(
         "missed_ground_truth": missed_ground_truth,
         "tp": tp,
         "fp": fp,
+        "tn": 0,
         "fn": fn,
         "precision": precision,
         "recall": recall,
@@ -308,6 +314,7 @@ def _classification_class_summary(counts: dict[str, Any]) -> dict[str, Any]:
         "class_name": str(counts["class_name"]),
         "tp": tp,
         "fp": fp,
+        "tn": 0,
         "fn": fn,
         "precision": precision,
         "recall": recall,
@@ -355,6 +362,7 @@ def _evaluate_windows_at_threshold(
         "pred_windows": len(pred_objects),
         "tp": tp_total,
         "fp": fp_total,
+        "tn": 0,
         "fn": fn_total,
         "precision": precision,
         "recall": recall,
@@ -378,6 +386,7 @@ def _empty_window_summary(iou_threshold: float, class_aware: bool) -> dict[str, 
         "pred_windows": 0,
         "tp": 0,
         "fp": 0,
+        "tn": 0,
         "fn": 0,
         "precision": 0.0,
         "recall": 0.0,
@@ -398,6 +407,7 @@ def _empty_classification_summary(iou_threshold: float) -> dict[str, Any]:
         "missed_ground_truth": 0,
         "tp": 0,
         "fp": 0,
+        "tn": 0,
         "fn": 0,
         "precision": 0.0,
         "recall": 0.0,
@@ -587,21 +597,12 @@ def _source_cluster_id_from_window_id(window_id: str) -> int | None:
 
 
 def _medoid_summary(*, n_gt: int, n_pred: int, n_tp: int, threshold_nm: float) -> dict[str, Any]:
-    fp = n_pred - n_tp
-    fn = n_gt - n_tp
-    precision = _safe_div(n_tp, n_tp + fp)
-    recall = _safe_div(n_tp, n_tp + fn)
+    metrics = detection_confusion_summary(n_gt=n_gt, n_pred=n_pred, n_tp=n_tp)
     return {
         "frechet_threshold_nm": threshold_nm,
         "gt_medoids": n_gt,
         "pred_medoids": n_pred,
-        "tp": n_tp,
-        "fp": fp,
-        "fn": fn,
-        "precision": precision,
-        "recall": recall,
-        "f1": _f1(precision, recall),
-        "accuracy": _safe_div(n_tp, n_tp + fp + fn),
+        **metrics,
     }
 
 
@@ -823,8 +824,8 @@ def _summary_markdown(report: EvaluationReport) -> str:
     window = report.window_summary
     classification = report.window_classification_summary
     threshold_lines = [
-        "| IoU | TP | FP | FN | Precision | Recall | F1 | mAP |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| IoU | TP | FP | TN | FN | Precision | Recall | F1 | mAP |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for suite in window.get("by_iou_threshold", []):
         threshold_lines.append(
@@ -832,6 +833,7 @@ def _summary_markdown(report: EvaluationReport) -> str:
             f"{suite['iou_threshold']:.2f} | "
             f"{suite['tp']} | "
             f"{suite['fp']} | "
+            f"{suite.get('tn', 0)} | "
             f"{suite['fn']} | "
             f"{suite['precision']:.3f} | "
             f"{suite['recall']:.3f} | "
@@ -843,21 +845,21 @@ def _summary_markdown(report: EvaluationReport) -> str:
             f"# PPE Evaluation: {report.run_id}",
             "",
             "## Medoids",
-            f"- TP/FP/FN: {medoid['tp']}/{medoid['fp']}/{medoid['fn']}",
+            f"- TP/FP/TN/FN: {medoid['tp']}/{medoid['fp']}/{medoid.get('tn', 0)}/{medoid['fn']}",
             f"- Precision: {medoid['precision']:.3f}",
             f"- Recall: {medoid['recall']:.3f}",
             f"- F1: {medoid['f1']:.3f}",
             f"- Accuracy: {medoid['accuracy']:.3f}",
             "",
             "## Windows",
-            f"- TP/FP/FN: {window['tp']}/{window['fp']}/{window['fn']}",
+            f"- TP/FP/TN/FN: {window['tp']}/{window['fp']}/{window.get('tn', 0)}/{window['fn']}",
             f"- Precision: {window['precision']:.3f}",
             f"- Recall: {window['recall']:.3f}",
             f"- F1: {window['f1']:.3f}",
             f"- mAP@0.5: {window['map_at_0_5']:.3f}",
             "",
             "## Window Classification",
-            f"- TP/FP/FN: {classification['tp']}/{classification['fp']}/{classification['fn']}",
+            f"- TP/FP/TN/FN: {classification['tp']}/{classification['fp']}/{classification.get('tn', 0)}/{classification['fn']}",
             f"- Precision: {classification['precision']:.3f}",
             f"- Recall: {classification['recall']:.3f}",
             f"- F1: {classification['f1']:.3f}",

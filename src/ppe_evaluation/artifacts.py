@@ -140,7 +140,7 @@ def save_ground_truth(ground_truth: GroundTruth, path: str | Path) -> None:
         "schema_version": GROUND_TRUTH_SCHEMA_VERSION,
         "dataset_id": ground_truth.dataset_id,
         "created_at_utc": datetime.now(UTC).isoformat(),
-        "frechet_threshold_nm": 0.75,
+        "frechet_threshold_nm": 3.0,
         "window_iou_threshold": 0.1,
         **ground_truth.manifest,
     }
