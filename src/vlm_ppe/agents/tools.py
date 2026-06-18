@@ -230,6 +230,13 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
             final_assignments.append({"flight_id": track_id, "cluster_id": leaf_cluster_id})
         return node
 
+    def discard_node(node: dict[str, object], track_ids: list[str], reason: str) -> dict[str, object]:
+        node["status"] = "discarded"
+        node["stop_reason"] = reason
+        node["discarded"] = True
+        node["n_discarded_tracks"] = len(track_ids)
+        return node
+
     def inspect_node(track_ids: list[str], *, root_cluster_id: int, lineage: list[int], depth: int) -> dict[str, object]:
         nonlocal review_count
         node = new_node(track_ids, root_cluster_id=root_cluster_id, lineage=lineage, depth=depth)
@@ -324,8 +331,8 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
             }
         )
 
-        if review.suggested_action == "human_review":
-            return accept_leaf(node, track_ids, "subcluster review requested human review")
+        if review.suggested_action == "discard":
+            return discard_node(node, track_ids, "VLM marked whole cluster as noise")
         if int(review.subcluster_count) <= 1 or not review.subclusters:
             return accept_leaf(node, track_ids, "VLM proposed no polygon subcluster split")
 
@@ -394,10 +401,10 @@ def refine_subclusters_tool(state: dict, *, vlm_client: ClusterReviewClient | No
                 depth=depth + 1,
             )
             residual_node["source_label"] = "Uncaptured residual"
-            if review.uncaptured_tracks_policy == "human_review":
-                accept_leaf(residual_node, capture_result.uncaptured_track_ids, "uncaptured tracks require human review")
-            else:
+            if review.uncaptured_tracks_policy == "keep_as_residual":
                 accept_leaf(residual_node, capture_result.uncaptured_track_ids, "uncaptured by VLM polygons")
+            else:
+                discard_node(residual_node, capture_result.uncaptured_track_ids, "uncaptured noise discarded")
             child_node_ids.append(str(residual_node["node_id"]))
 
         node["children"] = child_node_ids

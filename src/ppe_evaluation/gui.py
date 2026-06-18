@@ -169,11 +169,22 @@ def _predicted_windows(windows) -> list[dict[str, Any]]:
 
 def _ground_truth_payload(gt_dir: Path) -> dict[str, Any]:
     truth = load_ground_truth(gt_dir)
-    medoid_cluster_by_id = {medoid.medoid_id: medoid.cluster_id for medoid in truth.medoids}
+    medoid_cluster_by_key = {
+        (str(medoid.medoid_id), int(medoid.cluster_id) if medoid.cluster_id is not None else None): medoid.cluster_id
+        for medoid in truth.medoids
+    }
+    clusters_by_id: dict[str, list[int]] = {}
+    for medoid in truth.medoids:
+        if medoid.cluster_id is not None:
+            clusters_by_id.setdefault(str(medoid.medoid_id), []).append(int(medoid.cluster_id))
     windows = []
     for row in truth.windows.to_dict("records"):
         payload = dict(row)
-        payload["cluster_id"] = medoid_cluster_by_id.get(str(row["gt_medoid_id"]))
+        gt_medoid_id = str(row["gt_medoid_id"])
+        source_cluster_id = _source_cluster_id_from_window_id(str(row.get("window_id", "")))
+        payload["cluster_id"] = medoid_cluster_by_key.get((gt_medoid_id, source_cluster_id))
+        if payload["cluster_id"] is None and len(clusters_by_id.get(gt_medoid_id, [])) == 1:
+            payload["cluster_id"] = clusters_by_id[gt_medoid_id][0]
         windows.append(payload)
     return {
         "exists": True,
@@ -235,7 +246,7 @@ def _save_from_payload(payload: dict[str, Any], predictions, gt_dir: Path) -> Pa
         window_rows.append(
             {
                 "gt_medoid_id": gt_id_by_cluster[cluster_id],
-                "window_id": str(item.get("window_id") or f"{gt_id_by_cluster[cluster_id]}_W{counters[cluster_id]}"),
+                "window_id": str(item.get("window_id") or f"C{cluster_id}_GTW{counters[cluster_id]}"),
                 "class_name": _valid_class(str(item.get("class_name") or "other")),
                 "start_station_index": start,
                 "end_station_index": end,
@@ -264,6 +275,17 @@ def _save_from_payload(payload: dict[str, Any], predictions, gt_dir: Path) -> Pa
         gt_dir,
     )
     return gt_dir
+
+
+def _source_cluster_id_from_window_id(window_id: str) -> int | None:
+    if not window_id.startswith("C"):
+        return None
+    digits = []
+    for char in window_id[1:]:
+        if not char.isdigit():
+            break
+        digits.append(char)
+    return int("".join(digits)) if digits else None
 
 
 def _valid_class(value: str) -> str:

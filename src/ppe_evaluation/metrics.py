@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -12,6 +13,7 @@ import pandas as pd
 
 from ppe_evaluation.artifacts import (
     GroundTruth,
+    MedoidTrajectory,
     PredictionArtifacts,
     default_ground_truth_dir,
     load_ground_truth,
@@ -69,14 +71,19 @@ def evaluate_run(
     predictions = load_run_artifacts(run_dir)
     truth_path = Path(ground_truth_dir) if ground_truth_dir is not None else default_ground_truth_dir(predictions.run_dir)
     truth = load_ground_truth(truth_path)
-    medoid_result = match_medoids(truth.medoids, predictions.medoids, threshold_nm=frechet_threshold_nm)
+    truth_instances = _ground_truth_instance_context(truth)
+    medoid_result = match_medoids(truth_instances["medoids"], predictions.medoids, threshold_nm=frechet_threshold_nm)
     medoid_summary = _medoid_summary(
         n_gt=len(truth.medoids),
         n_pred=len(predictions.medoids),
         n_tp=len(medoid_result.matches),
         threshold_nm=frechet_threshold_nm,
     )
-    medoid_matches = _medoid_match_frame(medoid_result.matches)
+    medoid_matches = _medoid_match_frame(medoid_result.matches, original_by_instance=truth_instances["original_by_instance"])
+    pairwise_medoid_distances = _pairwise_medoid_distance_frame(
+        medoid_result.pairwise_distances,
+        original_by_instance=truth_instances["original_by_instance"],
+    )
     window_summary, window_matches = evaluate_windows(
         truth,
         predictions,
@@ -101,7 +108,7 @@ def evaluate_run(
         medoid_matches=medoid_matches,
         window_matches=window_matches,
         window_classification_matches=window_classification_matches,
-        pairwise_medoid_distances=medoid_result.pairwise_distances,
+        pairwise_medoid_distances=pairwise_medoid_distances,
         truth=truth,
         predictions=predictions,
         output_dir=Path(output_dir) if output_dir is not None else predictions.run_dir / "evaluation",
@@ -120,9 +127,15 @@ def evaluate_windows(
     iou_thresholds: Sequence[float] = DEFAULT_WINDOW_IOU_THRESHOLDS,
     class_aware: bool = True,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
+    truth_instances = _ground_truth_instance_context(truth)
     pred_to_gt = {int(match.pred_cluster_id): match.gt_medoid_id for match in medoid_matches}
-    gt_objects = _window_objects(truth.windows, id_column="gt_medoid_id")
-    pred_objects = _prediction_window_objects(predictions.windows, pred_to_gt)
+    pred_to_gt_original = {
+        cluster_id: truth_instances["original_by_instance"].get(instance_id, instance_id)
+        for cluster_id, instance_id in pred_to_gt.items()
+    }
+    gt_windows = _ground_truth_windows_with_instances(truth, truth_instances)
+    gt_objects = _window_objects(gt_windows, id_column="gt_instance_id")
+    pred_objects = _prediction_window_objects(predictions.windows, pred_to_gt, pred_to_gt_original)
     labels = (
         sorted({item["class_name"] for item in gt_objects} | {item["class_name"] for item in pred_objects})
         if class_aware
@@ -170,9 +183,15 @@ def evaluate_window_classification(
     iou_threshold: float = DEFAULT_WINDOW_IOU_THRESHOLD,
     iou_thresholds: Sequence[float] = DEFAULT_WINDOW_IOU_THRESHOLDS,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
+    truth_instances = _ground_truth_instance_context(truth)
     pred_to_gt = {int(match.pred_cluster_id): match.gt_medoid_id for match in medoid_matches}
-    gt_objects = _window_objects(truth.windows, id_column="gt_medoid_id")
-    pred_objects = _prediction_window_objects(predictions.windows, pred_to_gt)
+    pred_to_gt_original = {
+        cluster_id: truth_instances["original_by_instance"].get(instance_id, instance_id)
+        for cluster_id, instance_id in pred_to_gt.items()
+    }
+    gt_windows = _ground_truth_windows_with_instances(truth, truth_instances)
+    gt_objects = _window_objects(gt_windows, id_column="gt_instance_id")
+    pred_objects = _prediction_window_objects(predictions.windows, pred_to_gt, pred_to_gt_original)
     thresholds = _normalized_thresholds(iou_thresholds, primary=iou_threshold)
     threshold_summaries: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
@@ -606,19 +625,92 @@ def _medoid_summary(*, n_gt: int, n_pred: int, n_tp: int, threshold_nm: float) -
     }
 
 
-def _medoid_match_frame(matches: list[MedoidMatch]) -> pd.DataFrame:
+def _medoid_match_frame(matches: list[MedoidMatch], *, original_by_instance: dict[str, str] | None = None) -> pd.DataFrame:
+    original_by_instance = original_by_instance or {}
     return pd.DataFrame(
         [
             {
-                "gt_medoid_id": match.gt_medoid_id,
+                "gt_instance_id": match.gt_medoid_id,
+                "gt_medoid_id": original_by_instance.get(match.gt_medoid_id, match.gt_medoid_id),
                 "pred_cluster_id": match.pred_cluster_id,
                 "pred_medoid_id": match.pred_medoid_id,
                 "frechet_distance_nm": match.distance_nm,
             }
             for match in matches
         ],
-        columns=["gt_medoid_id", "pred_cluster_id", "pred_medoid_id", "frechet_distance_nm"],
+        columns=["gt_instance_id", "gt_medoid_id", "pred_cluster_id", "pred_medoid_id", "frechet_distance_nm"],
     )
+
+
+def _pairwise_medoid_distance_frame(pairwise: pd.DataFrame, *, original_by_instance: dict[str, str]) -> pd.DataFrame:
+    if pairwise.empty:
+        return pd.DataFrame(
+            columns=["gt_instance_id", "gt_medoid_id", "pred_cluster_id", "pred_medoid_id", "distance_nm"]
+        )
+    frame = pairwise.copy()
+    frame.insert(0, "gt_instance_id", frame["gt_medoid_id"].astype(str))
+    frame["gt_medoid_id"] = frame["gt_instance_id"].map(original_by_instance).fillna(frame["gt_instance_id"])
+    return frame
+
+
+def _ground_truth_instance_context(truth: GroundTruth) -> dict[str, Any]:
+    totals = Counter(str(medoid.medoid_id) for medoid in truth.medoids)
+    seen: defaultdict[str, int] = defaultdict(int)
+    instance_medoids: list[MedoidTrajectory] = []
+    original_by_instance: dict[str, str] = {}
+    instance_by_original_cluster: dict[tuple[str, int | None], str] = {}
+    instances_by_original: defaultdict[str, list[str]] = defaultdict(list)
+    for medoid in truth.medoids:
+        original_id = str(medoid.medoid_id)
+        seen[original_id] += 1
+        cluster_id = int(medoid.cluster_id) if medoid.cluster_id is not None else None
+        instance_id = original_id
+        if totals[original_id] > 1:
+            instance_id = f"{original_id}#C{cluster_id}" if cluster_id is not None else f"{original_id}#{seen[original_id]}"
+        instance_medoids.append(
+            MedoidTrajectory(
+                medoid_id=instance_id,
+                points=medoid.points,
+                cluster_id=medoid.cluster_id,
+                medoid_track_id=medoid.medoid_track_id,
+                source_run_id=medoid.source_run_id,
+            )
+        )
+        original_by_instance[instance_id] = original_id
+        instance_by_original_cluster[(original_id, cluster_id)] = instance_id
+        instances_by_original[original_id].append(instance_id)
+    return {
+        "medoids": instance_medoids,
+        "original_by_instance": original_by_instance,
+        "instance_by_original_cluster": instance_by_original_cluster,
+        "instances_by_original": instances_by_original,
+    }
+
+
+def _ground_truth_windows_with_instances(truth: GroundTruth, context: dict[str, Any]) -> pd.DataFrame:
+    if truth.windows.empty:
+        frame = truth.windows.copy()
+        frame["gt_instance_id"] = pd.Series(dtype=str)
+        return frame
+    frame = truth.windows.copy()
+    frame["gt_instance_id"] = [
+        _instance_id_for_ground_truth_window(row, context) for row in frame.to_dict("records")
+    ]
+    return frame
+
+
+def _instance_id_for_ground_truth_window(row: dict[str, Any], context: dict[str, Any]) -> str:
+    original_id = str(row.get("gt_medoid_id", ""))
+    source_cluster_id = _source_cluster_id_from_window_id(str(row.get("window_id", "")))
+    by_cluster: dict[tuple[str, int | None], str] = context["instance_by_original_cluster"]
+    if (original_id, source_cluster_id) in by_cluster:
+        return by_cluster[(original_id, source_cluster_id)]
+    instances = list(context["instances_by_original"].get(original_id, []))
+    if len(instances) == 1:
+        return instances[0]
+    if source_cluster_id is not None:
+        return f"{original_id}#C{source_cluster_id}"
+    return original_id
 
 
 def _window_objects(frame: pd.DataFrame, *, id_column: str) -> list[dict[str, Any]]:
@@ -630,6 +722,8 @@ def _window_objects(frame: pd.DataFrame, *, id_column: str) -> list[dict[str, An
         objects.append(
             {
                 "medoid_id": medoid_id,
+                "gt_instance_id": medoid_id if id_column == "gt_instance_id" else str(row.get("gt_instance_id", medoid_id)),
+                "gt_medoid_id": str(row.get("gt_medoid_id", medoid_id)),
                 "window_id": str(row["window_id"]),
                 "class_name": str(row["class_name"]),
                 "start": _interval_start(row),
@@ -642,9 +736,14 @@ def _window_objects(frame: pd.DataFrame, *, id_column: str) -> list[dict[str, An
     return objects
 
 
-def _prediction_window_objects(frame: pd.DataFrame, pred_to_gt: dict[int, str]) -> list[dict[str, Any]]:
+def _prediction_window_objects(
+    frame: pd.DataFrame,
+    pred_to_gt: dict[int, str],
+    pred_to_gt_original: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
     if frame.empty:
         return []
+    pred_to_gt_original = pred_to_gt_original or {}
     objects: list[dict[str, Any]] = []
     for row in frame.to_dict("records"):
         cluster_id = int(row["cluster_id"])
@@ -653,6 +752,8 @@ def _prediction_window_objects(frame: pd.DataFrame, pred_to_gt: dict[int, str]) 
             {
                 "cluster_id": cluster_id,
                 "medoid_id": medoid_id,
+                "gt_instance_id": medoid_id,
+                "gt_medoid_id": pred_to_gt_original.get(cluster_id, medoid_id),
                 "window_id": str(row["window_id"]),
                 "class_name": str(row["class_name"]),
                 "start": _interval_start(row),
@@ -697,7 +798,8 @@ def _evaluate_class_windows(
             rows.append(
                 {
                     "class_name": class_name,
-                    "gt_medoid_id": gt["medoid_id"],
+                    "gt_instance_id": gt["gt_instance_id"],
+                    "gt_medoid_id": gt["gt_medoid_id"],
                     "pred_cluster_id": pred.get("cluster_id"),
                     "gt_window_id": gt["window_id"],
                     "pred_window_id": pred["window_id"],
@@ -724,7 +826,8 @@ def _evaluate_class_windows(
             rows.append(
                 {
                     "class_name": class_name,
-                    "gt_medoid_id": gt["medoid_id"] if gt is not None else pred["medoid_id"],
+                    "gt_instance_id": gt["gt_instance_id"] if gt is not None else pred["gt_instance_id"],
+                    "gt_medoid_id": gt["gt_medoid_id"] if gt is not None else pred["gt_medoid_id"],
                     "pred_cluster_id": pred.get("cluster_id"),
                     "gt_window_id": gt["window_id"] if gt is not None else "",
                     "pred_window_id": pred["window_id"],
@@ -749,7 +852,8 @@ def _evaluate_class_windows(
         rows.append(
             {
                 "class_name": class_name,
-                "gt_medoid_id": gt["medoid_id"],
+                "gt_instance_id": gt["gt_instance_id"],
+                "gt_medoid_id": gt["gt_medoid_id"],
                 "pred_cluster_id": None,
                 "gt_window_id": gt["window_id"],
                 "pred_window_id": "",
@@ -900,24 +1004,26 @@ def _cluster_log_lines(report: EvaluationReport) -> list[str]:
     ]
     matches = report.medoid_matches.copy()
     pairwise = report.pairwise_medoid_distances.copy()
-    matched_gt = set(matches["gt_medoid_id"].astype(str).tolist()) if not matches.empty else set()
+    match_gt_column = "gt_instance_id" if "gt_instance_id" in matches.columns else "gt_medoid_id"
+    pairwise_gt_column = "gt_instance_id" if "gt_instance_id" in pairwise.columns else "gt_medoid_id"
+    matched_gt = set(matches[match_gt_column].astype(str).tolist()) if not matches.empty else set()
     matched_pred = set(matches["pred_cluster_id"].astype(int).tolist()) if not matches.empty else set()
-    for row in matches.sort_values(["gt_medoid_id", "pred_cluster_id"]).to_dict("records"):
+    for row in matches.sort_values([match_gt_column, "pred_cluster_id"]).to_dict("records"):
         distance = float(row["frechet_distance_nm"])
         lines.append(
             "| "
-            f"{row['gt_medoid_id']} | "
+            f"{_gt_display_label(row)} | "
             f"C{int(row['pred_cluster_id'])} | "
             "Correct | "
             f"{distance:.3f} NM | "
             f"Frechet distance is below {report.medoid_summary['frechet_threshold_nm']:.2f} NM |"
         )
     if not pairwise.empty:
-        for gt_id in sorted(set(pairwise["gt_medoid_id"].astype(str)) - matched_gt):
-            best = pairwise.loc[pairwise["gt_medoid_id"].astype(str) == gt_id].sort_values("distance_nm").iloc[0]
+        for gt_id in sorted(set(pairwise[pairwise_gt_column].astype(str)) - matched_gt):
+            best = pairwise.loc[pairwise[pairwise_gt_column].astype(str) == gt_id].sort_values("distance_nm").iloc[0]
             lines.append(
                 "| "
-                f"{gt_id} | "
+                f"{_gt_display_label(best)} | "
                 f"C{int(best['pred_cluster_id'])} | "
                 "Incorrect | "
                 f"{float(best['distance_nm']):.3f} NM | "
@@ -934,6 +1040,14 @@ def _cluster_log_lines(report: EvaluationReport) -> list[str]:
                 "Extra model cluster with no accepted ground-truth match |"
             )
     return lines
+
+
+def _gt_display_label(row: dict[str, Any] | pd.Series) -> str:
+    gt_id = str(row.get("gt_medoid_id", ""))
+    instance_id = str(row.get("gt_instance_id", ""))
+    if instance_id and instance_id != gt_id:
+        return f"{gt_id} ({instance_id})"
+    return gt_id or instance_id
 
 
 def _window_log_lines(report: EvaluationReport, primary_iou: float) -> list[str]:

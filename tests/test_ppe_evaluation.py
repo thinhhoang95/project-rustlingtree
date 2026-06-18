@@ -279,6 +279,122 @@ def test_class_agnostic_window_metrics_ignore_class_name(tmp_path: Path) -> None
     assert classification_match["pred_class_name"] == "trombone"
 
 
+def test_evaluate_run_disambiguates_duplicate_ground_truth_medoid_ids(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    gt_dir = run_dir.parent.parent / "ground_truth"
+    save_ground_truth(
+        GroundTruth(
+            dataset_id="fixture",
+            medoids=[
+                MedoidTrajectory("GT005", _line(0.0), cluster_id=7, medoid_track_id="T7", source_run_id="agent-run"),
+                MedoidTrajectory("GT005", _line(5.0), cluster_id=8, medoid_track_id="T8", source_run_id="agent-run"),
+            ],
+            windows=pd.DataFrame(
+                [
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C7_GTW1",
+                        "class_name": "dogleg",
+                        "start_station_index": 1,
+                        "end_station_index": 3,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.75,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 3.0,
+                        "notes": "",
+                    },
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C8_GTW1",
+                        "class_name": "trombone",
+                        "start_station_index": 1,
+                        "end_station_index": 2,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.5,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 2.0,
+                        "notes": "",
+                    },
+                ]
+            ),
+            manifest={"seed_run_id": "agent-run"},
+        ),
+        gt_dir,
+    )
+
+    report = evaluate_run(run_dir, gt_dir)
+
+    assert report.window_summary["tp"] == 2
+    matched = report.window_matches.loc[
+        (report.window_matches["iou_threshold"] == 0.1) & report.window_matches["matched"]
+    ]
+    assert set(matched["gt_instance_id"]) == {"GT005#C7", "GT005#C8"}
+    assert set(matched["gt_window_id"]) == {"C7_GTW1", "C8_GTW1"}
+
+
+def test_duplicate_ground_truth_medoid_ids_do_not_cross_match_windows(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    windows_path = run_dir / "residuals" / "intervention_windows.parquet"
+    windows = pd.read_parquet(windows_path)
+    windows = windows.loc[windows["cluster_id"] == 1].copy()
+    windows.loc[:, "window_id"] = "C1_W_wrong_side"
+    windows.loc[:, "class_name"] = "dogleg"
+    windows.loc[:, "start_station_index"] = 1
+    windows.loc[:, "end_station_index"] = 3
+    windows.loc[:, "start_s_fraction"] = 0.25
+    windows.loc[:, "end_s_fraction"] = 0.75
+    windows.to_parquet(windows_path, index=False)
+    gt_dir = run_dir.parent.parent / "ground_truth"
+    save_ground_truth(
+        GroundTruth(
+            dataset_id="fixture",
+            medoids=[
+                MedoidTrajectory("GT005", _line(0.0), cluster_id=7, medoid_track_id="T7", source_run_id="agent-run"),
+                MedoidTrajectory("GT005", _line(5.0), cluster_id=8, medoid_track_id="T8", source_run_id="agent-run"),
+            ],
+            windows=pd.DataFrame(
+                [
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C7_GTW1",
+                        "class_name": "dogleg",
+                        "start_station_index": 1,
+                        "end_station_index": 3,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.75,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 3.0,
+                        "notes": "",
+                    },
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C8_GTW1",
+                        "class_name": "trombone",
+                        "start_station_index": 1,
+                        "end_station_index": 2,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.5,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 2.0,
+                        "notes": "",
+                    },
+                ]
+            ),
+            manifest={"seed_run_id": "agent-run"},
+        ),
+        gt_dir,
+    )
+
+    report = evaluate_run(run_dir, gt_dir)
+
+    primary = report.window_matches.loc[report.window_matches["iou_threshold"] == 0.1]
+    assert report.window_summary["tp"] == 0
+    assert report.window_summary["fp"] == 1
+    assert report.window_summary["fn"] == 2
+    assert primary.loc[primary["reason"] == "unmatched_prediction", "gt_instance_id"].iloc[0] == "GT005#C8"
+    assert set(primary.loc[primary["reason"] == "missed_ground_truth", "gt_instance_id"]) == {"GT005#C7", "GT005#C8"}
+
+
 def test_cli_evaluate_uses_default_dataset_ground_truth(tmp_path: Path) -> None:
     run_dir = _write_run(tmp_path)
     _write_ground_truth(run_dir)
@@ -336,6 +452,57 @@ def test_gui_save_endpoint_writes_ground_truth_artifacts(tmp_path: Path) -> None
     assert (gt_dir / "medoids.npz").exists()
     assert (gt_dir / "windows.parquet").exists()
     assert (gt_dir / "manifest.json").exists()
+
+
+def test_gui_ground_truth_payload_disambiguates_duplicate_medoid_ids(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    gt_dir = run_dir.parent.parent / "ground_truth"
+    save_ground_truth(
+        GroundTruth(
+            dataset_id="fixture",
+            medoids=[
+                MedoidTrajectory("GT005", _line(0.0), cluster_id=7, medoid_track_id="T7", source_run_id="agent-run"),
+                MedoidTrajectory("GT005", _line(5.0), cluster_id=8, medoid_track_id="T8", source_run_id="agent-run"),
+            ],
+            windows=pd.DataFrame(
+                [
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C7_GTW1",
+                        "class_name": "dogleg",
+                        "start_station_index": 1,
+                        "end_station_index": 3,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.75,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 3.0,
+                        "notes": "",
+                    },
+                    {
+                        "gt_medoid_id": "GT005",
+                        "window_id": "C8_GTW1",
+                        "class_name": "trombone",
+                        "start_station_index": 1,
+                        "end_station_index": 2,
+                        "start_s_fraction": 0.25,
+                        "end_s_fraction": 0.5,
+                        "start_s_nm": 1.0,
+                        "end_s_nm": 2.0,
+                        "notes": "",
+                    },
+                ]
+            ),
+            manifest={"seed_run_id": "agent-run"},
+        ),
+        gt_dir,
+    )
+    client = TestClient(create_app(run_dir, gt_dir))
+
+    response = client.get("/api/ground-truth")
+
+    assert response.status_code == 200
+    windows = {item["window_id"]: item["cluster_id"] for item in response.json()["windows"]}
+    assert windows == {"C7_GTW1": 7, "C8_GTW1": 8}
 
 
 def test_gui_run_payload_includes_adsb_traces_by_cluster(tmp_path: Path) -> None:

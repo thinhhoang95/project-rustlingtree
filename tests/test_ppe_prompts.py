@@ -30,17 +30,22 @@ def test_subcluster_review_prompt_requests_manual_polygon_capture() -> None:
     )
 
     assert "manual visual separation" in prompt
-    assert "N=1 means the cluster is already one practical path pattern" in prompt
-    assert "Choose N>1 only when the plot shows discrete, visually distinct, repeated path families" in prompt
-    assert "If paths smoothly vary from one trajectory to the next" in prompt
+    assert "capture every key/main arrival pattern that the cluster actually contains" in prompt
+    assert "Arrivals that approach or sequence through different sides of the airport are different main" in prompt
+    assert "right-hand pattern" in prompt and "left-hand pattern" in prompt
+    assert "are SEPARATE subclusters even when both could be described" in prompt
+    assert "Do not merge mirror-image or opposite-side families into one 'specialized' pattern" in prompt
     assert "convex hull" in prompt
     assert "crosses, touches, or runs inside the convex polygon" in prompt
-    assert "Do not split one trajectory family on spacing, sample density, smooth variation" in prompt
+    assert "no prominent repeated structure" in prompt
+    assert 'suggested_action to "discard"' in prompt
     assert "This pipeline reviews depth 0 only" in prompt
     assert "becomes a terminal leaf and is not reviewed again" in prompt
-    assert "uncaptured_tracks_policy governs only the leftover tracks when you do split" in prompt
+    assert "uncaptured_tracks_policy governs only the leftover tracks not captured by any polygon when you split" in prompt
+    assert '"discard" (the default and preferred choice) drops those leftover noise tracks' in prompt
     assert '"subcluster_count": 3' in prompt
     assert '"polygon": [[-8.0, 2.5], [-6.8, 2.4], [-6.8, 3.3], [-8.0, 3.4]]' in prompt
+    assert '"uncaptured_tracks_policy": "discard"' in prompt
     assert '"x_min_nm":-8.0' in prompt
 
 

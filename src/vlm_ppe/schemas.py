@@ -152,8 +152,8 @@ class SubclusterReview(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: list[str] = Field(default_factory=list)
     subclusters: list[SubclusterPolygon] = Field(default_factory=list)
-    uncaptured_tracks_policy: Literal["keep_as_residual", "human_review"] = "keep_as_residual"
-    suggested_action: Literal["accept", "human_review"] = "accept"
+    uncaptured_tracks_policy: Literal["keep_as_residual", "discard"] = "discard"
+    suggested_action: Literal["accept", "discard"] = "accept"
 
     @model_validator(mode="before")
     @classmethod

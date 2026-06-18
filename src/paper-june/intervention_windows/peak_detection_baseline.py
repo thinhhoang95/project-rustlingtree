@@ -437,10 +437,14 @@ def write_comparison_notebook(path: str | Path) -> Path:
         ),
         _markdown_cell(
             "Localization rows use the shared PPE evaluator with class-agnostic IoU matching "
-            "at threshold `0.1`. Classification metrics are reported separately."
+            "at the primary threshold `0.1`. These primary localization scores can be perfect "
+            "even when stricter IoU thresholds produce false negatives, or when the localized "
+            "window has the wrong intervention class. Classification metrics and IoU-threshold "
+            "sweeps are reported separately below."
         ),
         _code_cell(
             "from pathlib import Path\n\n"
+            "import json\n"
             "import matplotlib.pyplot as plt\n"
             "import pandas as pd\n\n"
             "ARTIFACT_DIR = Path.cwd()\n"
@@ -453,6 +457,47 @@ def write_comparison_notebook(path: str | Path) -> Path:
             "comparison = pd.read_csv(ARTIFACT_DIR / 'intervention_window_comparison.csv')\n"
             "comparison"
         ),
+        _markdown_cell(
+            "## Metric Scope\n\n"
+            "`window_precision`, `window_recall`, and `window_f1` are primary localization "
+            "metrics at each row's `iou_threshold`. For this comparison that threshold is "
+            "`0.1`, so a predicted window is counted as localized when it overlaps the "
+            "matched ground-truth medoid window by at least 10% IoU, regardless of intervention "
+            "class. The `window_map_at_0_5` and threshold-sweep table show the stricter "
+            "`0.5` IoU behavior where false negatives can appear."
+        ),
+        _code_cell(
+            "primary_metric_scope = comparison[[\n"
+            "    'method', 'iou_threshold', 'class_aware', 'window_tp', 'window_fp', 'window_fn',\n"
+            "    'window_precision', 'window_recall', 'window_f1', 'window_map_at_0_5',\n"
+            "    'classification_tp', 'classification_fp', 'classification_fn',\n"
+            "    'classification_precision', 'classification_recall',\n"
+            "]].copy()\n"
+            "primary_metric_scope"
+        ),
+        _code_cell(
+            "threshold_rows = []\n"
+            "for row in comparison.to_dict('records'):\n"
+            "    summary_path = Path(str(row['source_summary']))\n"
+            "    if not summary_path.is_absolute():\n"
+            "        summary_path = ARTIFACT_DIR / summary_path\n"
+            "    window_summary = json.loads(summary_path.read_text())['window_summary']\n"
+            "    for item in window_summary.get('by_iou_threshold', []):\n"
+            "        threshold_rows.append({\n"
+            "            'method': row['method'],\n"
+            "            'iou_threshold': item['iou_threshold'],\n"
+            "            'class_aware': item['class_aware'],\n"
+            "            'tp': item['tp'],\n"
+            "            'fp': item['fp'],\n"
+            "            'fn': item['fn'],\n"
+            "            'precision': item['precision'],\n"
+            "            'recall': item['recall'],\n"
+            "            'f1': item['f1'],\n"
+            "            'map': item['map'],\n"
+            "        })\n"
+            "threshold_sweep = pd.DataFrame(threshold_rows)\n"
+            "threshold_sweep"
+        ),
         _code_cell(
             "plot = comparison.copy()\n"
             "plot['display_method'] = plot['method']\n"
@@ -460,7 +505,7 @@ def write_comparison_notebook(path: str | Path) -> Path:
             "ax.set_xlabel('Score')\n"
             "ax.set_xlim(0, 1.05)\n"
             "ax.grid(axis='x', alpha=0.25)\n"
-            "ax.set_title('Class-Agnostic Window Localization')\n"
+            "ax.set_title('Primary Class-Agnostic Window Localization at IoU 0.1')\n"
             "plt.tight_layout()"
         ),
         _code_cell(
@@ -468,7 +513,7 @@ def write_comparison_notebook(path: str | Path) -> Path:
             "ax = counts.plot.barh(stacked=True, figsize=(7, 0.45 * len(counts) + 2), color=['#16a34a', '#dc2626', '#f59e0b'])\n"
             "ax.set_xlabel('Count')\n"
             "ax.grid(axis='x', alpha=0.25)\n"
-            "ax.set_title('Window Localization Counts')\n"
+            "ax.set_title('Primary Window Localization Counts at IoU 0.1')\n"
             "plt.tight_layout()"
         ),
         _markdown_cell(
@@ -478,7 +523,10 @@ def write_comparison_notebook(path: str | Path) -> Path:
             "`TP` for a matched model/ground-truth pair, `FP` for an unmatched model "
             "window, and `FN` for a ground-truth window that was missed. Solid gray "
             "paths are ground-truth medoids, dashed gray paths are model medoids, blue "
-            "segments are ground-truth windows, and red segments are model windows."
+            "segments are ground-truth windows, and red segments are model windows. "
+            "For `PPE openai-gpt-5-5`, the primary class-agnostic IoU `0.1` rows have "
+            "no localization FN; the FNs for this run appear in stricter IoU-threshold "
+            "rows and in the separate classification accounting."
         ),
         _code_cell(
             "import math\n"

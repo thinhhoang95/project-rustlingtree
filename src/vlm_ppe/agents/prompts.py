@@ -52,22 +52,33 @@ def subcluster_review_prompt(
 ) -> str:
     lineage_text = " -> ".join(str(item) for item in lineage)
     return (
-        "You are inspecting one accepted VLM-PPE trajectory cluster for hidden practical path subclusters.\n"
+        "You are inspecting one accepted VLM-PPE trajectory cluster to extract its key/main arrival path patterns.\n"
         "Use only the provided ADS-B trajectory plot. Do not infer from AIP charts, route names, airport procedures, "
         "or density metrics. Your task is manual visual separation of the trajectory shapes in this plot.\n\n"
-        "First decide N, the number of practical subclusters in this local cluster. N=1 means the cluster is already "
-        "one practical path pattern and you must return no polygons. Choose N>1 only when the plot shows discrete, "
-        "visually distinct, repeated path families with a clear gap or materially different maneuver geometry. "
-        "If paths smoothly vary from one trajectory to the next, form a continuous fan, or differ only by gradual "
-        "offsets, choose N=1. But ensure all visually distinct visual patterns are captured: for example: arrivals going through different sides of the airport should be separated. \n\n"
+        "Your goal is to capture every key/main arrival pattern that the cluster actually contains. Decide N, the "
+        "number of distinct main path families in this local cluster, and draw one capture polygon for each. Be "
+        "thorough: if the plot shows several clearly repeated path families, separate all of them, up to the maximum "
+        "allowed below. N=1 only when the cluster is genuinely a single coherent path pattern.\n\n"
+        "Treat the geometric side of the airport and the turn direction as primary discriminators, not cosmetic "
+        "detail. Arrivals that approach or sequence through different sides of the airport are different main "
+        "patterns and must be separated. A right-hand pattern and a left-hand pattern are SEPARATE subclusters "
+        "even when both could be described as the same general maneuver family. Do not merge mirror-image or "
+        "opposite-side families into one 'specialized' pattern; split them.\n\n"
+        "Separate a family only when it is a real, repeated structure carried by multiple tracks. Do NOT carve out a "
+        "subcluster for a handful of scattered one-off tracks, jitter, spacing/sample-density differences, or smooth "
+        "continuous fanning where one track grades into the next. Those carry no prominent structure and are noise; "
+        "leave them uncaptured so they are discarded (see uncaptured_tracks_policy below).\n\n"
+        "If the entire cluster is just a few scattered flights with no prominent repeated structure of its own, do not "
+        "force a split: report it as noise by setting suggested_action to \"discard\", and the whole cluster is "
+        "dropped from the final results.\n\n"
         "For N>1, return one capture polygon for each proposed subcluster. Use the x (NM) and y (NM) axes shown in "
         "the plot. Each polygon is a sequence of [x_nm, y_nm] vertices; the pipeline will compute the convex hull of "
         "those points. A flight path is assigned to a subcluster when any segment of that path crosses, touches, or "
         "runs inside the convex polygon. Assignment follows subcluster_id order; if a path is captured by more than "
         "one polygon, the first matching subcluster wins.\n\n"
         "Draw polygons as discriminating gates around geometry that only that family crosses, not as broad envelopes "
-        "around entire routes. Do not split one trajectory family on spacing, sample density, smooth variation, "
-        "or minor noisy variation. Small one-off or scattered tracks may remain uncaptured by your polygons.\n\n"
+        "around entire routes. Place each gate where the families diverge most (for example the differing turn or the "
+        "side of the airport they use), so each gate selects exactly one main family.\n\n"
         f"Root/global cluster ID: {root_cluster_id}.\n"
         f"Current lineage: {lineage_text}.\n"
         f"Subcluster depth of this cluster: {depth}. This pipeline reviews depth 0 only; any subcluster you propose "
@@ -76,10 +87,13 @@ def subcluster_review_prompt(
         f"Maximum allowed local subclusters: {max_subclusters}.\n"
         f"Coordinate bounds JSON: {json.dumps(coordinate_bounds, separators=(',', ':'))}\n\n"
         "Decision fields:\n"
-        '- suggested_action must be exactly "accept".\n'
-        "- uncaptured_tracks_policy governs only the leftover tracks when you do split (N>1). "
-        '"keep_as_residual" keeps the uncaptured tracks as a residual leaf; "human_review" sends just those leftover '
-        "tracks to a human while still accepting your polygon subclusters. It is ignored when N=1.\n\n"
+        '- suggested_action must be exactly one of "accept" or "discard". Use "discard" only when the whole cluster '
+        "is noise (a few scattered tracks, no prominent structure); the entire cluster is then dropped and not "
+        "reported. Otherwise use \"accept\".\n"
+        "- uncaptured_tracks_policy governs only the leftover tracks not captured by any polygon when you split "
+        '(N>1). "discard" (the default and preferred choice) drops those leftover noise tracks from the final '
+        'results. Use "keep_as_residual" only when the uncaptured tracks themselves form a coherent leftover pattern '
+        "worth keeping. It is ignored when N=1.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item. If N=1, set subcluster_count to 1 and subclusters to []:\n"
         "{\n"
@@ -106,7 +120,7 @@ def subcluster_review_prompt(
         '      "rationale": "Captures a visually separated central path family."\n'
         "    }\n"
         "  ],\n"
-        '  "uncaptured_tracks_policy": "keep_as_residual",\n'
+        '  "uncaptured_tracks_policy": "discard",\n'
         '  "suggested_action": "accept"\n'
         "}\n"
     )
