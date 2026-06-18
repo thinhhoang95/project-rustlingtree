@@ -18,7 +18,7 @@ def cluster_review_prompt(metrics: list[KMetric], available_k: list[int], attemp
         f"K metrics JSON: {json.dumps(metrics_payload, separators=(',', ':'))}\n\n"
         "Decision fields:\n"
         "- chosen_k must be one of the Available K values above.\n"
-        "- suggested_action is your decision and must be exactly one of \"accept\", \"retry\", or \"human_review\".\n"
+        "- suggested_action is your decision and must be exactly one of \"accept\" or \"retry\".\n"
         "- Choose \"retry\" only when the evidence is insufficient or K should be expanded beyond the available values. "
         "When you choose \"retry\", set retry_requested to true; otherwise keep retry_requested false. The two must agree.\n"
         "- requested_k_max is the new maximum K you want explored on the retry. Set it only when retrying; leave it null "
@@ -59,7 +59,7 @@ def subcluster_review_prompt(
         "one practical path pattern and you must return no polygons. Choose N>1 only when the plot shows discrete, "
         "visually distinct, repeated path families with a clear gap or materially different maneuver geometry. "
         "If paths smoothly vary from one trajectory to the next, form a continuous fan, or differ only by gradual "
-        "offsets, choose N=1.\n\n"
+        "offsets, choose N=1. But ensure all visually distinct visual patterns are captured: for example: arrivals going through different sides of the airport should be separated. \n\n"
         "For N>1, return one capture polygon for each proposed subcluster. Use the x (NM) and y (NM) axes shown in "
         "the plot. Each polygon is a sequence of [x_nm, y_nm] vertices; the pipeline will compute the convex hull of "
         "those points. A flight path is assigned to a subcluster when any segment of that path crosses, touches, or "
@@ -76,8 +76,7 @@ def subcluster_review_prompt(
         f"Maximum allowed local subclusters: {max_subclusters}.\n"
         f"Coordinate bounds JSON: {json.dumps(coordinate_bounds, separators=(',', ':'))}\n\n"
         "Decision fields:\n"
-        '- suggested_action must be exactly one of "accept" or "human_review". Set it to "human_review" only when the '
-        "entire cluster is too ambiguous to split; that skips the split and sends the whole cluster to a human.\n"
+        '- suggested_action must be exactly "accept".\n'
         "- uncaptured_tracks_policy governs only the leftover tracks when you do split (N>1). "
         '"keep_as_residual" keeps the uncaptured tracks as a residual leaf; "human_review" sends just those leftover '
         "tracks to a human while still accepting your polygon subclusters. It is ignored when N=1.\n\n"
@@ -137,7 +136,7 @@ def window_pattern_count_prompt(cluster_id: int, *, max_patterns: int) -> str:
         "trajectory extremities, especially far from the airport/terminal region; those are outside the region of interest.\n"
         "- Do not count tiny one-off outliers, isolated noisy tracks, or minor jitter inside otherwise common flow.\n"
         "- Count only patterns supported by the provided cluster diagnostics.\n"
-        "- If the evidence is too ambiguous for a defensible count, set suggested_action to human_review.\n\n"
+        '- suggested_action must be exactly "accept".\n\n'
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "
         "even when there is only one item:\n"
         "{\n"
@@ -199,8 +198,8 @@ def window_review_prompt(
         f"Current unconfirmed pattern number: {pattern_index}.\n\n"
         "Class definitions:\n"
         "- no_stretch: rarely applies here, because the prior count-only review already confirmed at least one pattern. "
-        "If the current pattern shows no real repeated variation on close inspection, do not emit a no_stretch window; "
-        'instead set suggested_action to "human_review" (see decision fields below).\n'
+        "Even if the current pattern shows only weak repeated variation on close inspection, do not emit a no_stretch window; "
+        "return your best-fit window for the counted pattern instead.\n"
         "- dogleg: a simple angled detour with one offset/outbound leg and one closure/rejoin leg, usually a bent V or open "
         "triangle. It does not contain a sustained outbound-and-inbound pair of roughly parallel legs.\n"
         "- trombone: a paperclip-like sequencing extension: outbound leg, rounded/base turn, and inbound return leg that is "
@@ -224,9 +223,9 @@ def window_review_prompt(
         "Decision fields:\n"
         "- windows must contain exactly one entry for the current pattern. The pipeline requires a window for each "
         "counted pattern, so do not return an empty windows list to skip it.\n"
-        '- If you cannot identify a defensible window for the current pattern, set suggested_action to "human_review"; '
-        "that is the only way to return without a window.\n"
-        '- suggested_action must be exactly one of "accept", "revise", or "human_review".\n'
+        "- Even if the current pattern is hard to bound precisely, return your best-fit window for it; "
+        "there is no way to return without a window.\n"
+        '- suggested_action must be exactly one of "accept" or "revise".\n'
         "- Set all_patterns_identified to true on the window you return when it is the last real pattern; the pipeline "
         "then stops early instead of asking for the remaining counted patterns.\n\n"
         "Return strict JSON matching this example shape. Text-list fields must always be JSON arrays, "

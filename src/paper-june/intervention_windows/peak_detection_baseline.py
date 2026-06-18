@@ -32,7 +32,7 @@ from vlm_ppe.schemas import InterventionWindow
 
 
 DEFAULT_DATASET_ROOT = Path("data/artifacts/ppe/2026-04-01")
-DEFAULT_OUTPUT_SUBDIR = Path("paper-june/clustering-ablation")
+DEFAULT_OUTPUT_SUBDIR = Path("paper-june/window-ablation")
 
 
 @dataclass(frozen=True)
@@ -446,7 +446,7 @@ def write_comparison_notebook(path: str | Path) -> Path:
             "ARTIFACT_DIR = Path.cwd()\n"
             "if not (ARTIFACT_DIR / 'intervention_window_comparison.csv').exists():\n"
             "    for candidate in [Path.cwd(), *Path.cwd().parents]:\n"
-            "        path = candidate / 'data/artifacts/ppe/2026-04-01/paper-june/clustering-ablation'\n"
+            "        path = candidate / 'data/artifacts/ppe/2026-04-01/paper-june/window-ablation'\n"
             "        if (path / 'intervention_window_comparison.csv').exists():\n"
             "            ARTIFACT_DIR = path\n"
             "            break\n"
