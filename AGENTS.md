@@ -1,1 +1,1 @@
-Use this Python interpeter: `/opt/homebrew/Caskroom/miniforge/base/envs/rustlingtree/bin/python`
+Use this Python interpeter: `/op/Users/thinhhoang/miniforge3/envs/rustlingtree/bin/python`
