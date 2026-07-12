@@ -4,6 +4,9 @@ The implementation of `hailmary_scenario_simulator_design.md` lives in
 `src/hailmary`. It is independent of the mutable scenario manager and uses
 public SIMAP APIs only through `hailmary.adapters`.
 
+Maintainer-oriented architecture, end-to-end flow, and package documentation
+are indexed in [`technicals/README.md`](technicals/README.md).
+
 ## Offline pipeline
 
 The main artifact flow is:
