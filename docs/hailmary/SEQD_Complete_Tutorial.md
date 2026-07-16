@@ -10,7 +10,7 @@
 
 Terminal-area arrival sequencing is the job of taking a stream of aircraft converging on an airport from several directions and turning it into a single, safely spaced, efficiently packed line onto the runway. Human approach controllers do this with a repertoire of *heuristics* — compact, reusable rules of thumb like "if the spacing error is small, fix it with speed; if it is large, stretch the path," or "once an aircraft is established near final, stop touching the sequence." These heuristics are the accumulated operational wisdom of the profession, but they exist mostly in controllers' heads and in training folklore. They are not written down as formal, testable objects, and nobody knows which parts of each heuristic are genuinely *causal* (the world really works that way) versus merely *habitual* (it correlates with success because of how traffic usually arrives).
 
-SEQD (the Sequencing Design problem) is the problem of making an artificial agent **rediscover these heuristics from scratch**, purely by interacting with a traffic simulator — and, crucially, rediscover them in a form where every clause of every rule has *earned its place by experiment*. The deliverable is not a black-box policy that sequences traffic well. The deliverable is a **population of human-readable rules**, each of the form
+SEQD (the Sequencing Design problem) is the problem of making an artificial agent **rediscover these heuristics from scratch**, purely by interacting with a traffic simulator — and, crucially, rediscover them in a form where every clause of every rule has *earned its place by experiment*. The deliverable is not a black-box policy that sequences traffic well, nor is it the mutable training population. The deliverable is a **certified rulebook**: a frozen subset of human-readable rules, each of the form
 
 ```
 IF   <condition on the traffic situation>
@@ -21,9 +21,9 @@ where every predicate in every condition has survived an interventional test: ke
 
 The one-sentence thesis, in its revised form:
 
-> SEQD is the problem of learning an XCS-style population of `condition ⇒ (anchor, lever, band)` rules for terminal-area sequencing, in which a rule's fitness is **interventional** rather than accuracy-based: a rule earns credit for the paired-rollout **advantage of its advocated action over its strongest counterfactual contender**, so that the recovered heuristics are causally load-bearing rather than merely predictive — and the abstract concepts controllers reason with (flow, slack, commitment, pressure) emerge as the predicates that survive this test.
+> SEQD learns an XCS-style population of `condition ⇒ (anchor, lever, band)` rules for terminal-area sequencing using three-arm interventional rollouts. A rival-grounded ledger drives evolution, a no-op-grounded ledger certifies and scores deployed action rules, and a stricter rival-grounded gate certifies no-op rules as scoped vetoes. The shipped artifact is the certified rulebook `π_deploy`, not the mutable population.
 
-Two things changed in that sentence relative to the original framing, and both came out of tracing real heuristics end to end. First, the counterfactual is no longer always "withhold the lever" (`no-op`); it is the strongest rival action, with `no-op` as the fallback. This is what makes *prohibition* heuristics — arguably the most characteristic controller heuristics of all — learnable as first-class rules rather than readable only as absences. Second, "paired-rollout" is now part of the definition: the interventional estimate comes from forking the simulator, not from matching across episodes. Both changes are motivated in detail in Parts III and V.
+Three distinctions organize the revised design. First, the strongest rival is an instrument for evolution, while no-op is the permanent grounding baseline for deployment. Second, the interventional estimate comes from three same-seed simulator forks rather than matched episodes or occasional re-grounding. Third, the population that learns is not the rulebook that acts: deployment and rollout continuation both use the same slowly refreshed, certified `π_deploy`. These distinctions are developed in Parts III and IV.
 
 ### 2. Why not the obvious alternatives
 
@@ -72,7 +72,7 @@ The execution cycle at each decision point: form the **match set [M]** of all cl
 
 Rule discovery: fitness in standard XCS is **accuracy-based** — a classifier is accurate if ε is below a threshold, and fitness is its accuracy *relative to the other classifiers in its niche*. A steady-state **genetic algorithm** runs inside action sets: it selects parents proportional to fitness, crosses over and mutates their condition intervals, and inserts offspring, deleting weak classifiers population-wide. **Subsumption** lets an accurate, more general classifier absorb an accurate, more specific one, which is the pressure toward maximally general rules. The niched GA is why one population can maintain *different* rules for different regions of the input space simultaneously — exactly the "repertoire of heuristics" structure we want.
 
-Everything in this page we keep, except the meaning of fitness.
+SEQD keeps these population-learning mechanics, but splits XCS's prediction and fitness roles across interventional ledgers and separates the trained population from the certified controller (§§9.5–11).
 
 ### 5. Why accuracy is not enough, in ninety seconds
 
@@ -131,7 +131,7 @@ band:    a coarse magnitude — e.g. "absorb ~0–1.5 min", "absorb ~2–4 min",
 
 SEQP consumes the tuple plus concrete geometry, realizes a legal maneuver (or reports infeasibility), and rolls the simulator to the next epoch. The division of labor is the whole point of the interface: heuristics live at the tuple level; geometry lives below it.
 
-`no-op` is a first-class lever, and under the revised fitness (Part IV) it is not merely a control arm — rules can *advocate* it and earn positive credit for it. That is how prohibitions ("don't touch the sequence near final") become explicit, storable, reportable rules.
+`no-op` is a first-class lever during learning, but it has different deployment semantics from an action. A certified no-op rule becomes a **scoped veto**: wherever its condition matches, action at that anchor is suppressed. This makes prohibitions ("don't touch the sequence near final") explicit, storable, reportable, and enforceable (§9.6).
 
 A practical warning about bands that shapes the staging plan: every distinct `(lever, band)` pair is a separate action for credit purposes, so bands **split the effect-estimation data**. Start with two coarse bands per lever, and treat band refinement as a specialization operator applied only to rules whose effect estimate is already confidently positive (§13).
 
@@ -151,10 +151,53 @@ RULE r_17   (role: leader–follower edge, anchored on follower)
     AND required_delay / path_capacity ∈ [0.0, 0.8]             # stretch can absorb it
     AND time_to_final(F)               ∈ [8 min, ∞)             # not yet committed
   THEN  (anchor = F, lever = stretch, band = absorb 2–4 min)
-  STATS Δ̄ = +0.42, σ² = 0.11, n = 63, LCB = +0.34, numerosity = 4
+  EVOLUTION  Δ̄_rival = +0.30, σ²_rival = 0.15, n_rival = 71
+  DEPLOYMENT Δ̄_noop  = +0.42, σ²_noop  = 0.11, n_noop  = 63
+  TRAINING   numerosity = 4
 ```
 
 Everything in XCS that was defined per global state is redefined per **role context**: covering triggers when a candidate anchor's match set lacks an advocate for some action; GA niches are (role type × action) within similar contexts; subsumption compares rules of the same role type. This is a modest extension — it is how relational RL and graph-pattern classifiers already work — but it must be explicit in the implementation because it changes the unit of matching, the niche definition, and what "the state" means everywhere below.
+
+### 9.5. The deployed policy `π_deploy`
+
+The artifact SEQD produces is not the population [P]. It is a **rulebook**: the subset of [P] that has passed certification, with frozen deployment fields. The rulebook performs no exploration, covering, GA, subsumption, statistics updates, rollouts, or confidence-bound calculations. It is the controller evaluated in Part VII and, critically, the continuation policy inside every rollout (§10.5).
+
+Certification is an offline operation performed when a deployment snapshot is refreshed:
+
+```
+action rules (lever != no-op):
+    certified iff n_noop >= n_min and LCB(Delta_mean_noop) > 0     [z = 1.96]
+    ship with  w_r = Delta_mean_noop,r
+               F_r = n_noop,r / sigma_squared_noop,r
+
+prohibition rules (lever = no-op):
+    certified iff n_rival >= n_min_veto and LCB(Delta_mean_rival) > 0
+                  [z = 1.96; n_min_veto > n_min]
+    ship with a veto flag; no w and no F
+```
+
+At each deployed epoch:
+
+```
+1. enumerate anchors and compute ego-graph features
+2. build match sets from certified rules only; never cover
+3. veto every anchor matched by a certified no-op rule
+4. for each surviving anchor alpha and advocated action a:
+       Q(alpha,a) = sum_r(w_r * F_r) / sum_r(F_r)
+5. choose (alpha*,a*) = argmax Q with deterministic tie-breaking
+6. if no candidate survives, or Q(alpha*,a*) <= 0, choose no-op
+7. otherwise apply a* at alpha* and advance to the next event
+```
+
+Thus inference is two frozen numbers per action rule, one precision-weighted average, and one global argmax. Only one action may fire per epoch. The high event density makes deferral cheap; simultaneous multi-fire is reserved for Phase 2 (§20).
+
+### 9.6. Why prohibitions are vetoes, not advocates
+
+A no-op rule's advocated action is the grounding baseline, so its no-op-grounded advantage is identically zero: `Delta_mean_noop = 0`. It can never win a positive-`Q` argmax. Its evidence instead lives in the rival ledger: positive `Delta_mean_rival` means that, in this condition region, doing nothing beat the best proposed action. The executable meaning is therefore a **scoped veto** at the matching anchor, not a scored no-op advocate.
+
+Because a veto is a strong operator, it uses the stricter certification bar above and receives an over-generality audit. For every certified veto, report its firing fraction and the mean `Q` of the actions it suppressed. A rule that fires broadly while suppressing high-`Q` actions is an over-general rule the GA failed to specialize, not a heuristic.
+
+Encoding A (§15) is consequently executable as well as reportable. Comparing its veto region with Encoding B's swap-survival frontier checks whether an active and a passive prohibition mechanism agree.
 
 ---
 
@@ -170,41 +213,97 @@ At each event-driven epoch *t*:
 
 **Step 2 — Build match sets and candidate applications.** For each candidate anchor α, form [M]ₐ = all rules of that role type whose interval conditions hold on α's features. Each match produces a candidate `(rule r, anchor α, action advocated by r)`; the same rule may therefore produce several candidates at different anchors. Matching neither selects nor executes any of them. If some lever–band action has no advocate in a context where the covering policy says it should (see the exploration note below), create a covering rule: intervals centered on the current feature values, widened by a random spread, advocating the missing action, initialized with zero effect statistics and low experience.
 
-**Step 3 — Select at most one intervention for this epoch.** Aggregate candidate advocates into a fitness-weighted prediction per `(anchor, action)` pair (as in XCS, but the "prediction" is the LCB of the effect estimate, §11). Global arbitration compares those pairs across all anchors and chooses one winner `(α*, a*)` to serve as Arm A's initial action and later be applied in the real simulator — greedy on exploit steps, exploratory otherwise. Every nonwinning candidate, including another match of the same rule at a different anchor, remains unexecuted this epoch. The twin rollout evaluates the selected pair and supplies a learning sample; it does not retroactively replace the selected action with Arm B when an exploratory Arm A scores poorly. Simultaneous multi-anchor interventions are a phase-2 extension because they entangle credit.
+**Step 3 — Select at most one intervention for this epoch.** The root behavior policy is the current frozen `π_dep,t = π_deploy(certify(P_snapshot))` (§9.5), augmented by exploration and covering. On exploit steps it computes the deployed precision-pooled `Q` scores and applies the same veto and global arbitration rules as deployment; on explore steps the region scheduler may choose a different advocated action, including one from an uncertified covering rule. Every nonwinning candidate remains unexecuted. The three-arm rollout evaluates the selected pair and supplies learning samples; it does not retroactively replace the selected action when another arm scores better. Simultaneous multi-anchor interventions are a Phase 2 extension because they entangle credit.
 
 **Exploration is region-scheduled, not merely time-annealed.** Maintain visitation counts over a coarse discretization of the concept axes that matter for the target heuristics — commitment band × pressure band × error-magnitude band is enough to start. Boost exploration probability in undersampled cells, and do not anneal exploration in a cell before it has minimum coverage. The reason is concrete: the agent can only learn "don't swap near final" by *executing late swaps and getting burned*, and a naive time-annealed schedule typically stops exploring before the rare high-commitment region has been sampled. Dangerous exploration is fine — this is a simulator — but it must actually happen.
 
-**Step 4 — Choose the counterfactual contender.** This is the revised core. Let *a* be the selected action at selected anchor α*. The contender *c* is the **strongest rival**: the action ≠ *a* with the highest LCB among advocates in α*'s match set; if no rival has positive support, *c* = `no-op`. This comparison is local to the winning anchor: a candidate at a different anchor is not a contender merely because it was considered during global arbitration. Selecting the strongest rival (rather than always `no-op`) is what makes the fitness an *advantage* and what makes prohibitions learnable; the do-versus-don't test survives as the special case where the contender is `no-op`.
+This root off-policy-ness is intended. Exploration and covering change which states are sampled and therefore how a rule's effect is averaged over its condition region. For heuristic discovery that breadth is desirable: a rule should hold across its full region, not only where the current controller visits. This differs from off-policy continuation in Step 5, which would change the quantity being estimated and is therefore a bug.
 
-**Step 5 — Freeze the policy and run the twin rollout (the interventional estimate).** After covering and contender selection are complete, take a snapshot `P_t` of the rule population. The snapshot fixes the rules, their conditions, their scores, the arbitration method, and deterministic tie-breaking. Fork the current simulator state into two temporary arms that share the exogenous random seed and pending event stream. Arm A realizes the selected initial action *a* via SEQP; arm B realizes the initial contender *c*. Roll both arms forward to the outcome horizon *H* (§12), using the same frozen policy `π(P_t)` at every later decision epoch in both arms.
+**Step 4 — Choose the counterfactual contender.** Let *a* be the selected action at α*. The contender *c* is the strongest rival action `c != a` among **certified action advocates** in α*'s match set, ranked by evolution-ledger `LCB(Delta_mean_rival)`; if none exists, use `no-op`. This comparison is local to α*. The contender is an experimental instrument, not a policy: it supplies Arm B's first move and never appears in the deployed rulebook merely by being selected here.
 
-"Same policy" means the same rule-to-action mapping, not the same later action sequence. The initial interventions put the arms into different states, so different rules may subsequently match and their anchor–action candidates may win later arbitrations. Those downstream differences are descendants of the initial choice and therefore belong in the measured outcome. For example, speed in arm A may leave a clean sequence requiring no correction, while stretch in arm B may create geometry that causes the same frozen policy to select a slowdown for a trailing aircraft. The extra slowdown is legitimately charged to arm B even though another rule selected it.
+**Step 5 — Use the frozen deployed policy and run three arms (the interventional estimate).** The current **certified rulebook**, `π_dep,t`, is the read-only continuation policy in every arm. It was produced from a population snapshot at the most recent certification tick. Uncertified rules — new covering rules, partially tested GA offspring, and anything below its certification threshold — cannot act inside rollouts because they cannot act at deployment. Rolling out with the raw population would estimate the advantage of a policy that will never run.
 
-No learning or population change is allowed inside either temporary branch: no statistics updates, GA activity, covering, subsumption, or exploration draws that differ arbitrarily between arms. If stochastic exploration is retained, its random stream must be deliberately coupled; the simpler default is deterministic exploit-mode arbitration with deterministic fallbacks (such as `no-op` when no frozen rule advocates a feasible action). Thus the only systematic difference is the initial action and the state/action consequences it causes. Pairing removes scenario-level variance, which is the dominant noise source. (Cross-episode matching, the observational alternative, is demoted to a robustness check and to any future setting where simulator forking is forbidden.)
+Refresh `π_dep,t` only on a slow timescale: every *N* real epochs, with `N ≈ 500` as the starting value. Within an evaluation phase the baseline is constant, so effect samples remain comparable across rules and time. The resulting cycle is generalized policy iteration: evaluate against a frozen target, improve the population, then re-certify and re-freeze.
 
-**Step 6 — Compute the windowed outcome and the effect sample.** For each arm, compute the semi-local outcome *y* (§12), including all later interventions issued by the frozen policy. The effect sample is Δ = y_A − y_B. Distribute it only to the rules involved in the initial choice at α*: every rule in α*'s original match set that advocated *a* receives +Δ; every rule there that advocated *c* receives −Δ; rules advocating other initial actions and rules that acted only later inside a rollout receive nothing from this comparison. A rule that also matched a nonselected anchor receives at most this one update because it advocated at α*; its nonselected candidate creates neither an extra sample nor an extra physical action. Update each recipient's running statistics (mean, variance, count) once, in the real population, with the standard online (Welford) update. This assigns the initial advocates credit for choosing a state transition that led the whole fixed policy into a better or worse future; it does not claim that they personally chose every downstream action.
+Fork the current simulator state three ways on a shared exogenous seed and pending event stream:
 
-**Step 7 — Commit only the first action and continue the world.** Discard both temporary rollout branches and return to the untouched real state at epoch *t*. Apply only the selected initial action *a* in the real simulator; none of arm A's later simulated actions is automatically made real. Advance the real simulator until its next event-driven epoch, observe what actually happened, and solve a fresh twin-rollout problem there. In short: **long closed-loop rollout for evaluation, one-step commitment in reality**. This is receding-horizon or model-predictive execution: the rollout judges the first move by its downstream consequences without precommitting the real system to an entire predicted future.
+```
+Arm A: initial action = a       (selected action)
+Arm B: initial action = c       (strongest rival)
+Arm C: initial action = no-op   (deployment ground)
+all three then continue under the same pi_dep,t to horizon H
+```
 
-**Step 8 — Rule discovery (steady-state GA), as in XCS but selecting on LCB.** Periodically, within each (role type × action) niche: select parents with probability increasing in LCB(Δ̄), cross over and mutate condition intervals, insert offspring with inherited-but-discounted statistics, delete population-wide among low-LCB, high-numerosity-redundant rules, and apply subsumption — a rule may subsume a more specific same-action rule only if its own effect estimate is confidently positive and at least as large (within tolerance). Generalization pressure thus pushes toward the *widest condition over which the effect holds*, which is precisely the natural-language shape of a heuristic.
+The no-op arm is not an occasional diagnostic. Its effect statistic is the deployment score, so all three arms run every epoch. This costs 1.5 times as much simulation as two arms and supplies both main ledgers from every epoch.
+
+"Same policy" means the same certified rulebook, not the same later action sequence. The initial interventions put the arms into different states, so different certified rules may match and later actions may differ. Those downstream differences descend from the initial choice and belong in the outcome. For example, speed in Arm A may leave a clean sequence, while stretch in Arm B creates geometry that leads `π_dep,t` to slow a trailing aircraft. That extra slowdown is legitimately charged to Arm B.
+
+No learning or population change occurs in any temporary arm: no statistics updates, GA, covering, subsumption, exploration, or LCB calculation. Continuation is deterministic deployed arbitration with deterministic fallbacks. Thus the only systematic differences are the root actions and their consequences. Shared-seed pairing removes the dominant scenario-level variance. Cross-episode matching is only a robustness check or fallback when simulator forking is impossible.
+
+**Step 6 — Compute outcomes and update the two ledgers plus veto evidence.** Compute the same semi-local outcome *y* (§12) in each arm, including continuation actions, then distribute:
+
+```
+Delta_rival = y_A - y_B                         -> EVOLUTION ledger
+    +Delta_rival to every rule in [M]_alpha* advocating a
+    -Delta_rival to every rule in [M]_alpha* advocating c
+
+Delta_noop(a) = y_A - y_C                       -> DEPLOYMENT ledger
+    +Delta_noop(a) to every rule in [M]_alpha* advocating a
+
+Delta_noop(c) = y_B - y_C                       -> DEPLOYMENT ledger
+    +Delta_noop(c) to every rule in [M]_alpha* advocating c
+
+Delta_veto = y_C - max(y_A, y_B)                -> VETO evidence
+    +Delta_veto to every no-op rule in [M]_alpha*
+```
+
+Veto evidence is stored in a no-op rule's rival/evolution ledger because it measures no-op against the best proposed action. The rival ledger drives evolution; the no-op ledger drives deployment. Rules that acted only later inside an arm still receive nothing. A rule matching another, nonselected anchor receives no extra sample. Update recipients in the real population with Welford's online mean and variance update.
+
+**Step 7 — Commit only the first action and continue the world.** Discard all three temporary branches, return to the untouched real state at epoch *t*, and apply only *a*. None of Arm A's later simulated actions becomes real. Advance to the next event and solve a fresh three-arm problem. In short: **long closed-loop rollout for evaluation, one-step commitment in reality**.
+
+**Step 8 — Rule discovery and slow certification.** Roughly every 50 epochs, run the steady-state GA inside each `(role type × action)` niche. Select parents and survivors using rival-ledger `LCB(Delta_mean_rival)`, mutate and cross condition intervals, and insert offspring with discounted statistics. Offspring are uncertified and cannot act inside deployment or rollout continuation until they earn enough no-op-grounded evidence. Subsumption likewise uses the evolution ledger. Roughly every 500 real epochs, run certification over the population and atomically replace `π_dep,t`; only then does the continuation target move.
 
 ### 11. The fitness mathematics, precisely
 
-Each rule *r* maintains `(Δ̄_r, σ²_r, n_r)` over its received effect samples. Its selection score is a lower confidence bound:
+Each action rule maintains two independent running ledgers:
 
 ```
-LCB(r) = Δ̄_r − z · σ_r / √n_r        (z ≈ 1.0–1.96; a tunable pessimism knob)
+evolution:   (Delta_mean_rival, sigma_squared_rival, n_rival)
+deployment:  (Delta_mean_noop,  sigma_squared_noop,  n_noop)
 ```
 
-Three design notes, each answering a real failure mode:
+No-op rules use rival/evolution statistics as veto evidence; their no-op-grounded effect is zero by construction.
 
-**Why LCB and not the mean.** Effect samples are noisy even after pairing; young rules have tiny *n*. Selecting on the raw mean lets lucky junk reproduce; the LCB makes a rule prove its effect against its own uncertainty before it breeds — the same logic as optimism-under-uncertainty bandits, run in reverse because reproduction is a commitment.
+As in XCS, prediction and fitness answer different questions:
 
-**What the estimate *is*.** Conditional on rule *r*'s predicates holding, Δ̄_r estimates the conditional average **policy-mediated action advantage** of *r*'s initial action versus the contender mix it was tested against: "choose this action now, then continue under frozen policy `π(P_t)`" versus "choose the contender now, then continue under that same policy." It is not the isolated physical effect of the first maneuver with all later actions suppressed. This is intentional: an initial action is valuable partly because it leads the rule system to need fewer, smaller, or safer corrections later. It also means a rule's measured value depends on the quality of the rest of the population; as that population changes across real epochs, the same initial action can acquire a different long-run value.
+```
+prediction: w_r = Delta_mean_noop,r
+fitness:    F_r = n_noop,r / sigma_squared_noop,r
+```
 
-Two further caveats belong in any write-up. First, exploration is not uniformly random, so effect estimates carry selection pressure from the behavior policy; within-match-set randomization on explore steps (choose among advocated actions uniformly at random) keeps the initial-action comparison interpretable. Exploration used *inside* rollouts must still obey the frozen-policy and coupled-randomness requirements of Step 5. Second, the contender is the *current* best rival, so fitness is **nonstationary**: as the population improves, the bar rises — an advantage measured against a stronger baseline shrinks. This is the same self-play-like nonstationarity as any advantage-based method and is mostly benign (surviving rules are those that beat *good* alternatives), but it means absolute effect sizes drift. The stabilizer: periodically re-run a fraction of twin rollouts against a fixed `no-op` arm regardless of rivals, maintaining an absolutely grounded second statistic per rule. Report both.
+Prediction says what effect to expect relative to doing nothing. Fitness is precision — the inverse squared standard error — and says how strongly to trust that estimate. Deployment pools overlapping certified advocates as
 
-**Sample sharing.** All co-advocates in the match set share each Δ sample. This is the classifier-system analogue of every-visit credit and is what lets general rules accumulate *n* fast. Its known pathology — an over-general rule harvesting credit from a subregion where the effect is real and coasting elsewhere — is handled by the decorrelating generator (Part V): if the generator visits the rule's whole condition region, the over-general rule's Δ samples mix in the zero-effect region, its mean drops, its variance rises, its LCB collapses, and the GA's specialization pressure carves out the subregion where the effect actually lives.
+```
+Q(alpha,a) = sum_r(w_r * F_r) / sum_r(F_r).
+```
+
+This is inverse-variance fixed-effect pooling: the minimum-variance combined estimate at that `(anchor, action)`. Fitness must not be numerosity or a count of matching rules. GA offspring and subsumption remnants create correlated near-clones; vote-counting would let a family shout louder merely because it bred well. A rule whose condition straddles effect and no-effect regions receives scattered samples, inflating `sigma_squared_noop` and collapsing `F`. Precision weighting therefore penalizes over-generality by the same logic as XCS's accuracy-based fitness while remaining interventional.
+
+The lower confidence bound remains
+
+```
+LCB(r) = Delta_mean_r - z * sigma_r / sqrt(n_r).
+```
+
+It is used at the offline certification gate (`z = 1.96`) and for GA selection and survival on the rival ledger (`z ≈ 1.0–1.96`). It is never computed at inference. Young, noisy rules therefore must prove themselves before breeding or shipping, while deployed arbitration uses the frozen mean and precision only.
+
+Conditional on a rule's predicates, `Delta_mean_rival` estimates the policy-mediated advantage of its root action over the contender mix, while `Delta_mean_noop` estimates its policy-mediated advantage over no-op. All three arms continue under the same frozen `π_dep,t`; the estimate includes downstream corrections caused by the root choice rather than pretending the first maneuver acts in isolation.
+
+There is **no value function anywhere in SEQD, deliberately**. Triple-arm same-seed differencing cancels the common state-value term rather than estimating it. `w_r` is a local, condition-averaged advantage; `F_r` is estimator precision; neither is a critic or `V(s)`. State enters `Q` only through matching, which selects the constant-valued boxes to pool.
+
+Exploration at the root changes the sampling distribution, so uniform choice among advocated actions on explore steps helps keep comparisons interpretable. Exploration is never used inside rollout continuation. Rival-grounded effects will shrink as the population improves and contenders become stronger; that is expected and benign. The slow snapshot interval *N* bounds target-policy drift, removing the need for periodic no-op re-grounding because Arm C supplies that ground every epoch.
+
+**Sample sharing.** All co-advocates in the selected match set share the applicable ledger samples. This lets general rules accumulate evidence quickly. If the generator visits the whole condition region, an over-general rule mixes effect and no-effect samples: its mean falls, variance rises, deployment precision and GA LCB collapse, and specialization carves out the region where the effect holds.
 
 ### 12. The outcome function: windowed and semi-local
 
@@ -218,7 +317,7 @@ y = w₁ · pair term:        spacing outcome of (L,F) at the shared resource �
                            horizon H (past the k-th trailer's resource crossing)
   + w₃ · parsimony term:   −(count and magnitude of interventions issued in
                            the temporary rollout window, including the initial
-                           action and all later actions selected by frozen π(P_t))
+                           action and all later actions selected by frozen pi_dep,t)
   + w₄ · global residual:  small-weight throughput term over the window,
                            insurance against effects escaping the k-window
 ```
@@ -249,7 +348,7 @@ The situation *distribution* also carries a second duty from the original framin
 
 ## Part VI — Two heuristics, traced end to end
 
-These traces are the proof-of-concept in prose: one positive action rule (the easy case, which validates the machinery) and one prohibition (the hard case, which *required* the advantage-fitness revision). Numbers are illustrative but of realistic magnitude.
+These traces are the proof-of-concept in prose: one positive action rule and one prohibition, the case that requires separate rival/no-op evidence and executable veto semantics. Numbers are illustrative but of realistic magnitude.
 
 ### 14. Trace 1 — "Small error → speed, large error → path"
 
@@ -264,7 +363,7 @@ R_path:   spacing_deviation ∈ [−300 s, −90 s)  ∧  required_delay/path_ca
 
 Both conditions are single intervals on Tier 3 ratios plus one on the raw deviation — expressible as *one rule each* only because the ratio library exists (§7). Without Tier 3, the same causal content shatters into a tiling of boxes over (deviation × track-miles × speed-margin) space.
 
-**A learning event, concretely.** Epoch t: pair (L, F), predicted deviation −60 s at the merge, F has speed capacity ≈ 90 s. The follower-role match set contains `R_speed` (advocating speed), a covering-born rival `R_junk` (advocating stretch under similar conditions), and a no-op advocate. Exploration picks speed. Contender: stretch (strongest rival). Freeze `P_t`, then run both temporary branches under `π(P_t)`: arm A (speed) closes the deviation to −5 s, trailing aircraft unaffected, one small intervention charged → y_A ≈ +0.8. Arm B (stretch) also closes the gap but the wider geometry disturbs the third aircraft in trail and causes the frozen policy to make a larger downstream correction → y_B ≈ +0.4. Sample Δ = +0.4 flows to `R_speed`; −0.4 flows to `R_junk`; the downstream correction's advocate receives no update from this initial-action comparison. Both branches are then discarded, and only the initial speed action is applied in reality. Over dozens of such matched events, `R_speed`'s LCB climbs, `R_junk`'s collapses, the GA breeds variants of `R_speed`, and subsumption widens its intervals to the largest region where the advantage holds — which is exactly the ratio boundary.
+**A learning event, concretely.** Epoch t: pair (L, F), predicted deviation −60 s at the merge, F has speed capacity ≈ 90 s. The match set contains `R_speed`, a stretch rival, and a no-op rule. Exploration picks speed; the strongest certified rival is stretch. Under the same frozen `π_dep,t`, Arm A (speed) yields `y_A ≈ +0.8`, Arm B (stretch) yields `y_B ≈ +0.4`, and Arm C (no-op) leaves compression and yields `y_C ≈ −0.4`. Thus `Delta_rival = +0.4` drives evolution, while `Delta_noop(speed) = +1.2` supplies `R_speed`'s deployment ledger and eventual shipped score. The stretch advocates also receive the free no-op-grounded sample `+0.8`. The downstream correction's advocate receives no root update. All arms are discarded and only the initial speed action is applied in reality. Over many events, rival-ledger LCBs guide specialization while no-op-ledger means and precision determine which action rules certify and how they arbitrate at deployment.
 
 **The confound test.** The natural confounder of "error is small" is "close to final" (small errors are usually *detected* late under naturalistic traffic, so the two co-occur). A confounded rule `distance_to_final < θ ⇒ speed` predicts success well observationally. The generator's registered decorrelation produces late-detected *large* errors; the confounded rule is eligible there and, when its speed candidate is selected, speed fails to absorb the error, the pair term of y_A goes negative, and the rule inherits negative Δ samples it cannot escape. It dies not because it predicted badly — it predicted fine on the naturalistic majority — but because its advocated action performed badly where its predicate and the true cause came apart. That sentence is the entire epistemic difference from accuracy-based fitness and from distillation, exhibited on one rule.
 
@@ -283,11 +382,11 @@ Encoding B (population boundary):
   region; the heuristic is the survival frontier of the swap population.
 ```
 
-**Why the original fitness definition failed here.** Under "credit = outcome-with-lever minus outcome-with-no-op," a rule whose lever *is* no-op has identically zero fitness forever. As originally written, the framework could represent the profession's most characteristic heuristic only as an absence (Encoding B), which is fragile — it requires dense coverage of the region by attempted swaps before the frontier is readable, and an absence is an awkward deliverable to hand a controller. Under the revised **advantage fitness**, when a high-commitment match set contains a swap advocate and a no-op advocate, the twin rollout arms are *swap vs no-op*, and the no-op rule earns +Δ exactly when acting hurts. Prohibitions become storable, reportable, first-class rules. This single heuristic is what forced the fitness redefinition, and it is the honest way to motivate that change in a paper.
+**Why deployment needs veto semantics.** A no-op rule has zero advantage over the no-op grounding baseline, so it cannot act as a scored advocate. Its evidence instead asks whether no-op beat the best proposed action. When that rival-grounded estimate passes the stricter veto gate, the rule ships as a scoped veto. The framework can therefore represent the profession's most characteristic heuristic both actively (Encoding A suppresses action) and passively (Encoding B is the missing swap-survival region).
 
-**Why the effect is detectable.** A late swap's damage is a chain effect: the swapped pair compresses, the compression propagates rearward, and the cost lands on the third and fourth aircraft in trail, tens of seconds later. Three pieces of the design earn their keep simultaneously here. The *windowed multi-aircraft outcome* (k ≥ 3) is what sees the damage at all — a pair-only outcome frequently scores a late swap as fine while the trailers eat the go-around risk. The *twin rollout* is a textbook blocking intervention, and the cascade-identifiability results are the theoretical warrant that this comparison recovers structure that observational scoring provably cannot. And *graded margin scoring* turns "this swap consumed 40% of the trailing pair's margin" into a smooth signal aligned with the rare catastrophe.
+**Why the effect is detectable.** A late swap's damage is a chain effect: the swapped pair compresses, the compression propagates rearward, and the cost lands on the third and fourth aircraft in trail, tens of seconds later. Three pieces of the design earn their keep simultaneously here. The *windowed multi-aircraft outcome* (k ≥ 3) is what sees the damage at all — a pair-only outcome frequently scores a late swap as fine while the trailers eat the go-around risk. The *shared-seed three-arm rollout* supplies the blocking intervention and permanent no-op ground; cascade-identifiability results warrant that this comparison recovers structure observational scoring cannot. And *graded margin scoring* turns "this swap consumed 40% of the trailing pair's margin" into a smooth signal aligned with the rare catastrophe.
 
-**A learning event.** High-commitment epoch: F established on intercept, 4 min to threshold, a tempting order improvement available. Exploration (region-scheduled — this cell is protected from annealing precisely so this event happens) selects the swap as the initial action; contender is no-op. Under the same frozen `π(P_t)`, arm A's sequence order improves on paper, but trailers 2–3 compress, one margin drops 45%, and the policy issues an extra corrective intervention → y_A ≈ −0.9. In arm B, nothing is done initially and the stream lands as built → y_B ≈ +0.1. Δ = −1.0: the initial swap advocates absorb −1.0, the initial no-op advocate absorbs +1.0; any rule responsible only for the later correction receives no sample from this comparison. Both futures are discarded after scoring, and only the initially selected swap is tried in the real simulator. Repeated across the decorrelated distribution, swap rules retreat from the high-commitment region (Encoding B emerges) while the explicit no-op rule's LCB climbs (Encoding A emerges). **Reporting both and showing the no-op rule's condition coincides with the swap-survival frontier is an internal-validity check no distillation baseline can offer.**
+**A learning event.** High-commitment epoch: F is established on intercept, 4 min to threshold, and a tempting reorder is available. Region-scheduled exploration selects swap. With no certified non-no-op rival, Arm B is no-op and therefore coincides with Arm C. Under frozen `π_dep,t`, swap produces `y_A ≈ −0.9`; no-op produces `y_B = y_C ≈ +0.1`. The swap advocates receive `Delta_rival = −1.0` in evolution and `Delta_noop = −1.0` in deployment. Matching no-op rules receive `Delta_veto = +1.0` in their rival ledgers. Repeated evidence pushes swap rules out of this region and can certify the explicit no-op rule as a veto. Encoding A is therefore storable, reportable, **and enforceable**; agreement between its veto region and Encoding B's swap-survival frontier is an internal-validity check between active and passive mechanisms.
 
 **The confound test.** High commitment co-occurs naturally with high pressure (streams get committed *because* they are built under demand). A correlational learner therefore tends to learn `pressure high ⇒ don't swap` — which is wrong: under *low* commitment, swapping under pressure is often exactly right ("insert into a gap"). The registered decorrelation produces high-commitment/low-pressure and low-commitment/high-pressure situations; interventionally, swaps in the second quadrant show *positive* Δ, so the pressure predicate cannot survive in the prohibition, while the commitment signature (time-to-final × path freedom × established geometry — the *commitment* concept) can and does.
 
@@ -297,7 +396,11 @@ Encoding B (population boundary):
 
 ### 16. What counts as success
 
-The north star is "the learned concepts are real," so evaluation targets the rule population, not single-scenario control scores.
+The north star is "the learned concepts are real and the shipped controller is the evaluated artifact," so evaluation targets both the population's discoveries and the certified rulebook.
+
+**Deployment consistency (first-class).** Run `π_deploy(certify(P_final))` on held-out scenarios with no exploration, covering, LCB calculations, or rollouts, and compare it with the training-time behavior policy. Material divergence indicates that Step 5's frozen-snapshot discipline was violated. This experiment certifies that the deliverable is the controller whose continuation behavior defined the learned effects.
+
+**Compilation check (optional).** Compile the certified population into a conflict-free decision list ordered by specificity, with fixed role priority across anchors and first match firing. Report the performance delta. A statement such as "compiling the population into a flat rule list costs X% of its advantage" is useful in its own right, and the list may be more defensible as a human-readable artifact than precision-weighted voting.
 
 **Causal load-bearing (primary).** For each surviving rule and each of its predicates: use the *generator* to manufacture matched situations where that predicate is flipped while the rest of the condition holds, run the rule's action, and measure the effect. A load-bearing predicate's flip should erase or reverse the advantage; an inert predicate's flip should not change it — and inert predicates should already have been stripped by subsumption, so finding one is a bug report. This is predicate ablation done interventionally, closing the loop on the method's own claim.
 
@@ -309,9 +412,9 @@ The north star is "the learned concepts are real," so evaluation targets the rul
 
 ### 17. The staged plan
 
-**Phase 0 — one pair, three actions (weeks, not months).** A single leader–follower pair on a simple merge geometry; levers {speed, stretch, no-op}, two bands; the H1 decorrelation registered and audited. Success: H1 recovered as ≤ 3 rules whose load-bearing predicates are the slack ratios, while vanilla XCS on the same runs keeps the confound. This is the minimum publishable signal that interventional fitness does something accuracy cannot, and every later phase inherits its infrastructure (twin rollouts, windowed outcome, audit).
+**Phase 0 — one pair, three actions (weeks, not months).** A single leader–follower pair on a simple merge geometry; levers {speed, stretch, no-op}, two bands; the H1 decorrelation registered and audited. Deliver both the learned population and the certified rulebook, and pass the deployment-consistency check. Success: H1 recovered as no more than three rules whose load-bearing predicates are slack ratios, while vanilla XCS on the same runs keeps the confound. Every later phase inherits the three-arm rollout, two ledgers, frozen continuation, windowed outcome, and audit.
 
-**Phase 1 — three-aircraft chain, add {swap}.** Target: H2 by both encodings, plus the coincidence check between the no-op rule and the swap-survival frontier; the distillation baseline demonstrably learns the pressure confound. Region-scheduled exploration becomes necessary here and should be validated (measure sampling density in the high-commitment cell with and without it).
+**Phase 1 — three-aircraft chain, add {swap}.** Add the executable veto mechanism and its over-generality audit. Target H2 by both encodings, plus agreement between the veto region and swap-survival frontier; the distillation baseline should expose the pressure confound. Validate region-scheduled exploration by measuring high-commitment sampling density with and without it.
 
 **Phase 2 — full distribution.** Remaining levers ({hold, meter-upstream}), three bands per lever via the refinement operator, hyperedge conditions (conjunctions across multiple node types) enabled, the full concept-correspondence table, and the generalization evaluation. Multi-anchor simultaneous interventions and oblique predicates remain listed as extensions beyond even this phase.
 
@@ -319,36 +422,120 @@ The north star is "the learned concepts are real," so evaluation targets the rul
 
 | Failure mode | Symptom | Designed answer |
 |---|---|---|
-| Effect drowned in noise | LCBs never separate from zero | Twin rollouts (§10.5) + windowed outcome (§12); check w₄ is small |
+| Effect drowned in noise | LCBs never separate from zero | Shared-seed three-arm rollouts (§10.5) + windowed outcome (§12); check w₄ is small |
 | Concept fragmentation | Many small same-action rules tiling a diagonal | Tier 3 ratio features (§7); phase-2 oblique predicates |
 | Confound survives | Registered pair predicate persists in rules | Generator audit failed — fix decorrelation, retrain (§13) |
-| Prohibitions unlearnable | No surviving no-op rules where freezing is right | Verify advantage fitness (not do-vs-no-op) is implemented (§10.4) |
+| Prohibitions unlearnable | No certified vetoes where freezing is right | Verify `Delta_veto` credit and the stricter veto gate (§9.6, §10.6) |
 | Exploration dies early | High-commitment cells unsampled; no late-swap data | Region-scheduled exploration with per-cell coverage floors (§10.3) |
 | Lucky junk reproduces | Volatile population, young rules breeding | Select on LCB, not mean; raise z; raise GA experience threshold (§11) |
 | Over-general credit harvesting | Broad rule with bimodal Δ samples | Generator coverage of full condition region + specialization pressure (§11) |
 | Cliff-penalty variance | Δ variance explodes near separation limits | Graded margin scoring, not catastrophic constants (§12) |
 | Band data starvation | Per-(lever,band) n too small | Two coarse bands to start; refine only confident rules (§8, §17) |
-| Fitness drift | Effect sizes shrink as population improves | Expected (advantage vs. improving rivals); keep the no-op-grounded second statistic (§11) |
+| Fitness drift | Rival-grounded effects shrink as the population improves | Expected and benign; bound target-policy drift with snapshot interval N (§10.5) |
+| Train/deploy mismatch | Rulebook underperforms the training behavior policy | Rollout continuation = frozen `π_deploy(certify(P_t))` (§10.5) |
+| Junk acting inside rollouts | High Δ variance; young rules win continuation arbitration | Apply certification to the rollout snapshot, not only export (§10.5) |
+| Veto over-generality | A certified no-op rule fires broadly and suppresses high-Q actions | Audit firing rate × mean suppressed Q; use stricter `n_min_veto` (§9.6) |
 
 ### 19. Starting parameter sheet
 
-All values are starting points, not conclusions: population size 1,000–2,000 (Phase 0) rising with phases; learning-rate β = 0.1–0.2 for online stats; LCB z = 1.0 exploratory, 1.96 for reproduction eligibility; GA experience threshold ≈ 20 effect samples; k = 3 trailers; horizon H = k-th trailer's threshold crossing + one slot; outcome weights 1 : 1 : 0.3 : 0.1; bands = 2 per lever; decorrelation audit threshold |ρ| ≤ 0.3; exploration coverage floor ≈ 200 visits per registered concept-axis cell before annealing; fraction of twin rollouts re-grounded against no-op ≈ 10%.
+| Parameter | Starting value |
+|---|---:|
+| Population size | 1,000–2,000 in Phase 0; increase by phase |
+| Online-statistics learning rate β | 0.1–0.2 |
+| GA-selection LCB z | 1.0 exploratory; up to 1.96 for reproduction eligibility |
+| GA experience threshold | ≈20 rival-grounded samples |
+| Action-rule certification | `n_min = 30` no-op-grounded samples and LCB > 0 |
+| Veto certification | `n_min_veto = 60` rival-grounded samples and LCB > 0 |
+| Certification z | 1.96 |
+| Deployment snapshot refresh N | ≈500 real epochs |
+| Trailers k | 3 |
+| Horizon H | k-th trailer's threshold crossing + one slot |
+| Outcome weights | 1 : 1 : 0.3 : 0.1 |
+| Bands | 2 per lever initially |
+| Decorrelation audit | `abs(rho) <= 0.3` |
+| Exploration coverage floor | ≈200 visits per registered concept-axis cell |
+| No-op re-grounding fraction | obsolete; Arm C runs every epoch |
 
 ### 20. What was deliberately dropped, and the open questions that remain
 
 Dropped as decisions, unchanged from the consolidated note: autonomous procedure design (second paper); fuel/workload/monitorability reward terms (dilute the signal); concepts-as-embedding-clusters (replaced by the interventional-survival definition — one definition, not three); distillation as a method (kept only as the baseline it is meant to beat); neuro-symbolic-from-scratch (one mechanism, not a menu).
 
-Genuinely open after the revisions, in rough order of risk: the constants of the windowed outcome (k, H, weights) and their sensitivity; whether sample sharing plus generator coverage suffices against over-general harvesting or a per-rule heterogeneity test (variance decomposition of a rule's Δ samples over its condition region) is needed; the arbitration rule when several anchors want interventions in one epoch; how far the nonstationary-contender drift can go before the no-op re-grounding fraction must rise; and the one remaining literature sweep in causal-ML/online-RL before claiming the intersection is open.
+One action fires per epoch in training and deployment. Dense events make deferral inexpensive (the complete workflow below shows about 90 seconds). Simultaneous multi-fire remains a Phase 2 extension; if implemented, its counterfactual must become leave-one-out ablation from the fired set, `Arm B = S_t \ {r's action}`, rather than action replacement, because individually good rules can jointly overcorrect. Contender drift is bounded by snapshot interval *N*, which is now the tunable.
+
+Genuinely open after the revisions, in rough order of risk: the constants of the windowed outcome (`k`, `H`, weights) and their sensitivity; whether sample sharing and generator coverage suffice against over-general harvesting or require per-rule heterogeneity tests; whether the veto's stricter certification bar starves prohibition rules of samples, given that vetoed anchors produce no deployment rollouts even though training exploration can override vetoes; the best value of *N*; and the remaining causal-ML/online-RL literature sweep.
 
 ---
 
-## Appendix — Glossary
+## Appendix A — Glossary
 
-**Anchor** — a graph node/edge where a rule may be eligible; a match provisionally binds it, but an intervention is physically applied there only if its anchor–action candidate wins arbitration. **Advantage fitness** — a rule's credit: paired-rollout outcome gap between its advocated initial action and the strongest contender in its match set, followed in both arms by the same frozen policy. **Band** — coarse magnitude slot of an intervention tuple. **Blocking intervention** — withholding/replacing an action in a cascade system; the theoretical basis for identifiability here. **CATE** — conditional average treatment effect; here, the policy-mediated action advantage that Δ̄ estimates conditional on a rule's predicates. **Candidate application** — a rule match paired with its particular anchor and advocated action; it is eligible for arbitration, not an executed action. **Commitment** — accumulated cost of changing an aircraft's role/order; a target concept. **Contender** — the counterfactual initial action in a twin rollout: strongest rival action at the selected anchor, fallback no-op. **Covering** — XCS mechanism creating a rule when a situation lacks an advocate. **Ego-graph** — the local subgraph rooted at a candidate anchor over which a rule's predicates are evaluated. **Encoding B / frontier** — a prohibition read off as the survival boundary of an action's rule population. **Epoch** — event-driven decision point of the semi-MDP. **Frozen policy** — the snapshot `π(P_t)` used without learning or structural population changes throughout both rollout arms; the same mapping may produce different later actions in different arm states. **LCB** — lower confidence bound on a rule's mean effect; the selection score. **Lever** — the action verb of a tuple: speed, stretch, hold, swap, meter-upstream, no-op. **Match set** — rules whose conditions hold for one particular candidate anchor; membership means eligibility, not execution. **Minimum-time map** — per-aircraft earliest-feasible times at downstream points; basis of spacing deviation, slack, pressure. **Niche** — (role type × action) context within which the GA competes rules. **Receding-horizon execution** — use a long simulated future to evaluate a choice, commit only its first action, then recompute at the next real epoch. **Region-scheduled exploration** — per-cell coverage floors over concept axes, preventing premature annealing. **Role-centric matching** — evaluating rule conditions per candidate anchor rather than on a global state vector; one rule can create several candidate applications but cannot execute at more than one anchor in an epoch. **SEQP** — the lower-level realization layer that turns tuples into legal geometry. **Slack** — absorbable delay; speed-slack and path-slack variants. **Subsumption** — absorption of a specific rule by a confidently-at-least-as-good more general one. **Tier 3 features** — derived ratio/comparison features; the operationalized concept vocabulary. **Twin rollout** — same-seed temporary simulator forks that differ in the initial action and then use the same frozen policy; the interventional estimator. **Windowed outcome** — semi-local outcome: pair term + k-trailer propagation + parsimony + small global residual.
+**Anchor** — a graph node or edge where a rule may be eligible; physical action occurs only if its candidate wins arbitration.
+
+**Band** — a coarse magnitude slot of an intervention tuple.
+
+**Blocking intervention** — withholding or replacing an action in a cascade system; the theoretical basis for identifiability here.
+
+**Candidate application** — a rule match paired with one anchor and advocated action; eligible, not yet executed.
+
+**CATE** — conditional average treatment effect; here, a policy-mediated root-action advantage conditional on a rule's predicates.
+
+**Certification** — the offline snapshot-time gate `n >= n_min and LCB > 0`; the only deployment-related place a confidence bound is computed.
+
+**Commitment** — accumulated cost of changing an aircraft's role or order; a target concept.
+
+**Contender** — the strongest certified rival action at the selected anchor by rival-ledger LCB; an experimental instrument, never a deployed policy.
+
+**Covering** — the training-only XCS mechanism that creates a rule when a context lacks an advocate.
+
+**Deployment ledger** — no-op-grounded `(Delta_mean, sigma_squared, n)`; supplies a shipped action rule's prediction `w` and precision `F`.
+
+**Ego-graph** — the local subgraph rooted at a candidate anchor over which rule predicates are evaluated.
+
+**Encoding B / frontier** — a prohibition read passively from the survival boundary of an action-rule population.
+
+**Epoch** — an event-driven decision point of the semi-MDP.
+
+**Evolution ledger** — rival-grounded `(Delta_mean, sigma_squared, n)`; drives GA selection, survival, and veto evidence.
+
+**Frozen policy** — the certified `π_dep,t`, refreshed every *N* real epochs and used read-only in all rollout continuations.
+
+**LCB** — lower confidence bound used for certification and GA selection; never an inference-time score.
+
+**Lever** — speed, stretch, hold, swap, meter-upstream, or no-op.
+
+**Match set** — rules whose conditions hold at one candidate anchor; membership means eligibility, not execution.
+
+**Minimum-time map** — per-aircraft earliest-feasible times at downstream points; basis of spacing deviation, slack, and pressure.
+
+**Niche** — the `(role type × action)` context in which the GA competes rules.
+
+**Precision fitness** — `F = n / sigma_squared`; an estimator weight, not a value or numerosity vote.
+
+**Receding-horizon execution** — use a long simulated future to evaluate one move, commit only that first action, then recompute.
+
+**Region-scheduled exploration** — per-cell coverage floors over concept axes, preventing premature annealing.
+
+**Role-centric matching** — evaluating conditions per candidate anchor; one rule can create several candidates but at most one action fires per epoch.
+
+**Rulebook** — the certified subset of [P], containing conditions plus frozen `w` and `F` for action rules or a veto flag for prohibitions; the deliverable, deployed policy, and rollout continuation policy.
+
+**SEQP** — the lower-level realization layer that turns tuples into legal geometry.
+
+**Slack** — absorbable delay, including speed-slack and path-slack variants.
+
+**Subsumption** — absorption of a specific rule by a confidently at-least-as-good, more general rule.
+
+**Three-arm rollout** — same-seed temporary forks for the selected action, strongest rival, and no-op, all continued by the same frozen rulebook.
+
+**Tier 3 features** — derived ratios and comparisons forming the operationalized concept vocabulary.
+
+**Veto** — a certified no-op rule that suppresses action at each anchor where it matches.
+
+**Windowed outcome** — semi-local outcome combining pair, k-trailer propagation, parsimony, and a small global residual.
 
 ---
-# Complete Example
-Here's one complete epoch, run with actual numbers from start to finish. Same machinery as before, but now nothing is abstract — every step produces a concrete quantity you can follow into the next step.
+## Appendix B — Complete end-to-end workflow
+
+This section works deployment and training end to end on the same event. It makes explicit which artifact acts, when each ledger moves, and when the frozen policy may change.
 
 **The scene.** Four arrivals converging on merge point M for runway 25, in predicted order: AAL12 (a heavy), then UAL88 (a 737), then DAL34 (an A320), then JBU77 well behind. The graph holds three leader–follower edges — (AAL12→UAL88), (UAL88→DAL34), (DAL34→JBU77) — one flow node grouping all four, and the aircraft–runway pairs.
 
@@ -362,59 +549,92 @@ Here's one complete epoch, run with actual numbers from start to finish. Same ma
 
 *Anchor 2, edge (UAL88→DAL34).* Predicted deviation **+45 s** — a modest gap, wasted capacity. Some rules see an opportunity here.
 
-**Step 2 — Build match sets per anchor.** On anchor 1, four rules match:
+Before this epoch, the latest slow-timescale certification pass produced this relevant rulebook:
 
 ```
-r_23 (speed, 0–1.5 min):  Δ̄=+0.51, σ²=0.16, n=48  →  LCB = 0.51 − 0.40/√48 ≈ +0.45
-r_87 (speed, 0–1.5 min):  Δ̄=+0.60, σ²=0.49, n=9   →  LCB = 0.60 − 0.70/√9  ≈ +0.37
-r_61 (stretch, 2–4 min):  Δ̄=+0.22, σ²=0.36, n=25  →  LCB = 0.22 − 0.60/√25 ≈ +0.10
-r_09 (no-op):             Δ̄=+0.02, σ²=0.09, n=40  →  LCB ≈ −0.03
+r_A: deviation [-90 s, 0), speed ratio [0, 1.0]
+     -> speed 0-1.5 min; ships with w = 0.62, F = 160
+
+r_B: deviation [-300 s, -60 s), path ratio [0, 1.0]
+     -> stretch 2-4 min; ships with w = 0.55, F = 56
+
+r_C: time_to_final < 5 min and intercept_established
+     -> VETO
 ```
 
-(Using z = 1 for selection. Notice r_87 has a *higher mean* than r_23 but a *lower* LCB — nine noisy samples buy less trust than forty-eight consistent ones. That's the LCB doing its job.) On anchor 2, `r_44` (swap, LCB +0.12) and a no-op advocate (+0.01) match. Suppose the covering policy notices anchor 2's cell has no `hold` advocate — it mints `r_cov112` on the spot, intervals centered on anchor 2's current features and randomly widened, statistics zeroed. It exists now but has no standing.
+### Deployment path for this event
 
-**Step 3 — Arbitrate one intervention.** First, explore or exploit? The region scheduler checks this epoch's cell — (low commitment × moderate pressure × medium error) — visit count 640, well above the 200 floor. So: exploit. Pool advocates into per-action scores on each anchor (fitness-weighted): anchor 1 gives speed ≈ +0.44 (r_23 and r_87 fused), stretch +0.10, no-op −0.03; anchor 2 gives swap +0.12. The global arbitration compares those *anchor–action* candidates: **+0.44 for (anchor 1 / UAL88, speed) wins**. Thus SEQP receives one bound tuple, `(UAL88, speed, 0–1.5 min)`. The swap candidate on anchor 2 is deferred — not cancelled; its edge is still live next epoch.
+**Step 2D — Match certified rules only.** On Anchor 1, `r_A` matches because −65 is in `[−90, 0)` and `0.81 <= 1`; `r_B` matches because −65 is in `[−300, −60)` and `0.27 <= 1`. `r_C` does not match because UAL88 is 14 minutes from final and not established. There is no veto. Deployment never considers uncertified rules and never covers.
 
-If, in this same epoch, r_23 also happened to match a different edge — say (UAL88→DAL34), where its follower binding would be DAL34 — that would create a second candidate for r_23, not a second speed command. Since r_23's candidate on anchor 1 won, only UAL88 is acted on. The DAL34 candidate would have to survive recomputation and win a new arbitration at a later epoch before SEQP could act on it.
-
-**Step 4 — Choose the contender.** Within anchor 1's match set, the strongest rival to speed is stretch at +0.10 (beats no-op's −0.03). So c = (UAL88, stretch, absorb 2–4 min). Note the contender is *not* the swap from anchor 2 — the comparison is always within the match set at the selected anchor, because that is the counterfactual "what else could I have done *here*."
-
-**Step 5 — Freeze and run the twin rollout.** Snapshot the current population as `P_t`, then fork the simulator from 12:02:10: identical exogenous seed, identical pending event stream (JBU77's entry at 12:04:30, a wind shift event at 12:06:00 — both will happen in both arms). Arm A initially realizes speed — UAL88 reduces from 250 to 210 kt, absorbing ~70 s. Arm B initially realizes stretch — a heading-240 vector worth ~2.5 min of delay. Horizon H: the third trailer behind the intervention is JBU77, so both temporary arms roll to JBU77's threshold crossing plus one slot — about 12 minutes of simulated time. During those minutes, epochs keep firing and both arms use exactly the same frozen rule population, scores, arbitration, and tie-breaking. No learning, covering, or GA runs inside either arm. The states nevertheless diverge, so different rules may match and later actions may differ. That closed-loop divergence is *part of the effect being measured*; it does not mean those later actions will be committed to reality.
-
-**Step 6 — Score and distribute.** Windowed outcome per arm, with weights w = (1, 1, 0.3, 0.1):
-
-*Arm A (speed):* pair (AAL12, UAL88) lands at −8 s deviation — nearly closed, graded pair term **+0.85**. Trailers: DAL34's 45 s gap comfortably absorbs UAL88's slowdown, JBU77 untouched — propagation **+0.75**. The frozen policy needs no later correction, so only the initial small intervention is charged — parsimony **−0.4**. Residual +0.1.
-y_A = 1(0.85) + 1(0.75) + 0.3(−0.4) + 0.1(0.1) = **+1.49**
-
-*Arm B (stretch):* also closes the pair deviation, pair term +0.80. But the vector swings UAL88 wide, eroding 20% of the (UAL88→DAL34) margin; the same frozen policy now matches a different situation and issues a corrective speed cut to DAL34 — propagation drops to **+0.40**, and parsimony charges *two* simulated interventions, one of them large: **−1.3**. Residual +0.1.
-y_B = 1(0.80) + 1(0.40) + 0.3(−1.3) + 0.1(0.1) = **+0.82**
-
-**Δ = 1.49 − 0.82 = +0.67.** Distribution: every advocate of the initially selected speed action gets +Δ, every advocate of the initial stretch contender gets −Δ, and everyone else gets nothing. In particular, a rule that selected DAL34's corrective speed cut inside arm B does not update from this comparison; that hypothetical correction affects the score but is not a separately credited learning event.
+**Step 3D — Score and act.** Each action has one advocate here:
 
 ```
-r_23: n 48→49, Δ̄ 0.51 → 0.51 + (0.67−0.51)/49 ≈ 0.513   LCB ticks up
-r_87: n 9→10,  Δ̄ 0.60 → 0.607                            SE shrinks, LCB → ≈ +0.39
-r_61: n 25→26, Δ̄ 0.22 → 0.22 + (−0.67−0.22)/26 ≈ 0.186   variance up, LCB → ≈ +0.06
-r_09, r_44, r_cov112: nothing
+Q(anchor 1, speed)   = (0.62 * 160) / 160 = +0.62
+Q(anchor 1, stretch) = (0.55 *  56) /  56 = +0.55
 ```
 
-One epoch has moved three ledgers by a few hundredths. The heuristic "small-ish error with adequate speed capacity → use speed, not geometry" is being carved one Δ at a time.
+The global argmax selects speed at Anchor 1 because `+0.62 > 0`. SEQP receives `(UAL88, speed, 0–1.5 min)`. Only one action fires. A positive candidate on Anchor 2 would be deferred and recomputed at the next event. Deployment has used no exploration, covering, contender, rollout, LCB, or update.
 
-**Step 7 — Commit one action; reality continues.** Neither 12-minute branch becomes the real timeline. Delete both temporary arms, return to the still-untouched real state at 12:02:10, and issue only Arm A's first command: UAL88 flies 210 kt. The simulated later no-ops or corrections are not queued. The real simulator now advances from 12:02:10 using actual events. When DAL34 crosses a fix at 12:03:40, a new epoch begins at Step 1 and the system recomputes from the observed state. Anchor 2's swap opportunity, deferred 90 seconds earlier, is re-arbitrated against whatever the world actually looks like after the speed reduction.
+For contrast, suppose the next event is DAL34 at 4 minutes to final with intercept established. If `r_A` and `r_C` both match there, `r_C` vetoes the anchor before global arbitration. The `+0.62` speed score is suppressed and the controller chooses no-op. The veto is operational, not decorative.
 
-**Step 8 — Periodic GA (fires on its own schedule, say every 50 epochs).** Inside the niche (leader–follower role × speed action): parents drawn with probability increasing in LCB — r_23 is selected, crossed with another speed rule, a mutation nudges one interval boundary, offspring r_101 inserted with discounted inherited stats. Deletion culls a low-LCB redundant rule elsewhere in the population. Subsumption check: r_23's condition strictly contains r_87's, and r_23's effect is confidently positive and at least as large within tolerance — so r_23 *absorbs* r_87: r_87 is deleted, r_23's numerosity increments. The population just got one rule simpler while losing nothing it had learned.
+### Training path for the original event
+
+Training begins from the same original state and includes the deployment path, then adds experimentation and learning.
+
+**Step 2T — Match the whole population and cover.** Suppose Anchor 2 lacks a hold advocate. Covering mints `r_cov112` with widened intervals and zeroed ledgers. It can accumulate evidence at the root, but with `n = 0` it is uncertified and cannot act in deployment or inside rollout continuation.
+
+**Step 3T — Explore or exploit.** The region cell `(low commitment, moderate pressure, medium error)` has 640 visits, above its floor of 200, so this epoch exploits and chooses speed as deployment did. In an undersampled cell, exploration could choose stretch, hold, or an uncertified covering rule. That root experiment is intentional; none of those privileges carries into continuation.
+
+**Step 4T — Choose the contender.** Among certified non-speed advocates at Anchor 1, `r_B` has the strongest rival-ledger LCB, so `c = stretch`. The contender is local to Anchor 1 and is used only as Arm B's first action.
+
+**Step 5T — Run three same-seed arms.** Use the already frozen `π_dep,t`, not the raw population. Fork from 12:02:10 with identical pending events and roll to JBU77's threshold crossing plus one slot, about 12 simulated minutes:
+
+```
+Arm A  speed   -> clean pair, no later correction                    y_A = +1.49
+Arm B  stretch -> geometry disturbs DAL34; pi_dep,t later corrects   y_B = +0.82
+Arm C  no-op   -> compression persists; late large correction        y_C = +0.11
+```
+
+All continuation decisions use certified rules, deterministic precision pooling, active vetoes, and no learning. Different later actions across arms are consequences of different root states and properly affect each arm's outcome.
+
+**Step 6T — Update both ledgers and veto evidence.** The three outcomes yield:
+
+```
+Delta_rival    = y_A - y_B           = +0.67
+Delta_noop(a)  = y_A - y_C           = +1.38
+Delta_noop(c)  = y_B - y_C           = +0.71
+Delta_veto     = y_C - max(y_A,y_B)  = -1.38
+```
+
+Consequently, every speed advocate at Anchor 1 receives `+0.67` in its evolution ledger and `+1.38` in its deployment ledger. Every stretch advocate receives `−0.67` in evolution and `+0.71` in deployment. Both facts can be true: stretch lost to speed but still beat doing nothing. Any matching no-op rule receives `−1.38` in its rival/veto ledger, evidence that a prohibition does not belong in this region. Rules that acted only during continuation receive no update.
+
+A representative online update is:
+
+```
+r_A evolution:   n 52->53, mean 0.34 -> 0.34 + (0.67 - 0.34)/53 = 0.346
+r_A deployment:  n 40->41, mean 0.62 -> 0.62 + (1.38 - 0.62)/41 = 0.639
+
+r_B evolution:   n 44->45, mean 0.28 -> 0.28 + (-0.67 - 0.28)/45 = 0.259
+r_B deployment:  n 36->37, mean 0.55 -> 0.55 + (0.71 - 0.55)/37 = 0.554
+```
+
+`r_cov112` receives nothing in this exploit epoch because it was neither selected nor the contender. It remains in the population, not the rulebook.
+
+**Step 7T — Commit one action; reality continues.** Delete all three temporary arms, return to the untouched real state at 12:02:10, and issue only Arm A's first command: UAL88 flies 210 kt. No simulated continuation action is queued. When DAL34 crosses a fix at 12:03:40, a new epoch recomputes every anchor. The deferred opportunity on Anchor 2 waited about 90 seconds, illustrating why one-action arbitration is practical when events are dense.
+
+**Step 8T — Evolve and, later, re-certify.** At roughly epoch 50, the niche GA selects parents by rival-ledger LCB, mutates conditions, and inserts discounted-stat offspring. Those offspring remain unable to act in continuation. At roughly epoch 500, certification recomputes action-rule `w` and `F`, applies the stricter veto gate, freezes the next rulebook, and atomically replaces `π_dep,t`. Only this slow tick changes the deployment and continuation target.
 
 ---
 
-Three things this concrete run makes visible that the abstract version hides. First, where the "one intervention" rule bit: the swap candidate on anchor 2 had a positive score but lost global arbitration and was made to wait ~90 seconds — the cost of clean credit was a minor deferral, because events are dense. Second, why the contender choice mattered: had the contender been no-op instead of stretch, Δ would have been measured against "do nothing" (y ≈ +0.3 as the compression partially persists), giving speed a bigger but less informative advantage — "+1.2 versus doing nothing" says less than "+0.67 versus the best alternative treatment." Third, the propagation term earned its keep in arm B: a pair-only outcome would have scored stretch nearly as well as speed (+0.80 vs +0.85), and the real difference — the disturbance to DAL34, the extra corrective intervention — lives entirely in the trailing window and the parsimony charge. Delete w₂ and w₃ and this epoch teaches almost nothing.
+The workflow exposes the division of labor. Rival-grounded evidence says which rule wins competition and reproduction. No-op-grounded evidence says whether an action deserves to ship and how it should be pooled. Veto evidence says where even a positive action score must be suppressed. The same frozen rulebook performs deployment and every rollout continuation; only root exploration, ledger updates, GA, and slow re-certification distinguish training.
 
 ---
-# Notes about Updates
+### What changes when
 
-**What updated immediately: the rules' scores, and those scores are global to the rule, not local to the selected anchor.** r_23's ledger is attached to r_23 the *pattern*, not to the (AAL12→UAL88) edge where its candidate won. At the next epoch, when the system evaluates edge (DAL34→JBU77), some different pair tomorrow, or the same UAL88 edge again — anywhere r_23's condition intervals hold — arbitration uses r_23's post-update LCB, +0.513-ish and slightly tighter. One Δ sample from the selected anchor shifts r_23's standing at every future anchor where it may match. That is a **knowledge update**, not a physical broadcast of the original speed command: matching r_23 elsewhere still creates only candidates, each of which must independently win a later arbitration before any aircraft is acted on. This evidence amortization across the condition region is the economy of the design (the contrast with MCTS node statistics from earlier). It cuts both ways, of course — a rule burned on one anchor becomes more cautious everywhere, including in subregions where it might actually be fine, and it's the GA's specialization pressure that eventually splits the condition if those subregions genuinely differ.
+**Every epoch:** the selected rules' ledgers update globally in the mutable population. Their frozen deployment scores do **not** change immediately; the current `π_dep,t` remains read-only until the next certification tick. New world state from the single committed action changes which rules match at the next event.
 
-**What did *not* update: the conditions themselves.** Within an ordinary epoch, no rule's IF-part changes — intervals only move via the GA (mutation, crossover), covering (new rules), and subsumption (deleted rules), which run on their own schedule. So *matching* in the strict sense — which rules appear in which match sets — is determined by conditions and features, and this epoch left conditions untouched (except that r_cov112 now exists and will start appearing in match sets, and after the GA pass, r_87 is gone and r_101 is new). What changed for the very next epoch is *selection within* the match sets: same candidates, different scores, so the prediction arrays, the arbitration winner, and the choice of contender can all come out differently. Concretely: if the deferred swap on anchor 2 gets re-arbitrated next epoch, it's now competing against a speed action whose pooled score just went *up* — the bar it must clear rose because of an experiment it wasn't even part of.
+**Every roughly 50 epochs:** GA and subsumption change conditions and population membership using the evolution ledger. Covering can add a rule at any root epoch. None of these changes enters the frozen rulebook immediately.
 
-**And a second, independent channel: the world itself changed.** Only Arm A's *first action* is committed, so UAL88 is physically flying 210 kt; the rest of Arm A's 12-minute simulated action sequence was discarded. Next epoch's anchors are enumerated from the real world produced by that first command and whatever actually occurred afterward: the (AAL12→UAL88) deviation may now be near zero, so r_23's compression predicate may no longer hold there and it can drop out of that match set; the (UAL88→DAL34) gap may have shrunk as UAL88 slid back toward DAL34, so anchor 2's features can move and a different set of rules may match it. Thus two effects stack: on the *knowledge* side, every future match set containing the initially credited rules sees updated scores; on the *world* side, the one committed action reshapes future states and therefore which anchors and conditions actually appear.
+**Every roughly 500 epochs:** certification reads the current ledgers, admits or removes rules, freezes `w` and `F` or veto flags, and publishes a new `π_dep`. This is the policy-improvement boundary and the only moment continuation semantics change.
 
-The one-sentence version: rule statistics propagate instantly and globally through the population's scores; rule conditions propagate slowly through the GA; and the real world propagates from the single committed first action — while the longer arm-A and arm-B futures remain temporary evidence used only to evaluate that choice.
+The one-sentence version: evidence moves fast, rule structure moves at the GA timescale, the deployed target moves slowly, and reality advances from one committed first action while all three longer futures remain temporary evidence.
