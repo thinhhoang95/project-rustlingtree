@@ -5,7 +5,12 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from hailmary.actions import ActionCatalog, ActionLever, PathStretchRealizer, apply_action
+from hailmary.actions import (
+    ActionCatalog,
+    ActionLever,
+    PathStretchRealizer,
+    apply_action,
+)
 from hailmary.adapters import SIMAPAdapter
 from hailmary.config import StretchConfig
 from hailmary.features import resource_station_m
@@ -50,7 +55,11 @@ def _live_action_simulator() -> Simulator:
         ),
         variants=(baseline,),
     )
-    return Simulator(definition, action_applier=apply_action)
+    return Simulator(
+        definition,
+        action_applier=apply_action,
+        runtime_configuration_hash="test-native-apply-action-v1",
+    )
 
 
 def _next_station_batch(simulator: Simulator, station_type: str):
@@ -145,9 +154,9 @@ def test_live_stretch_then_speed_preserves_splices_and_maps_future_events() -> N
     assert merge_event.time_s == pytest.approx(
         origin + trajectory.elapsed_at_station(mapped_merge_station)
     )
-    assert simulator.state.flight("F1").predicted_resource_time("MERGE") == pytest.approx(
-        merge_event.time_s
-    )
+    assert simulator.state.flight("F1").predicted_resource_time(
+        "MERGE"
+    ) == pytest.approx(merge_event.time_s)
 
     speed_batch = _next_station_batch(simulator, "speed")
     before_speed = simulator.sample_flight("F1")
@@ -173,7 +182,9 @@ def test_live_stretch_then_speed_preserves_splices_and_maps_future_events() -> N
         for event in simulator.state.event_heap
         if event.kind is EventKind.RESOURCE_CROSSED and event.resource_id == "MERGE"
     )
-    assert remapped_merge_event.payload_dict["s_m"] == pytest.approx(mapped_merge_station)
+    assert remapped_merge_event.payload_dict["s_m"] == pytest.approx(
+        mapped_merge_station
+    )
     assert remapped_merge_event.time_s > merge_event.time_s
 
 
@@ -214,9 +225,9 @@ def test_active_time_shift_preserves_stretch_mapped_pending_stations() -> None:
     definition = replace(
         initial.definition,
         exogenous_events=(
-                MaterializedExogenousEvent(
-                    event_id="DELAY_F1",
-                    time_s=120.0,
+            MaterializedExogenousEvent(
+                event_id="DELAY_F1",
+                time_s=120.0,
                 payload={
                     "target_flight_id": "F1",
                     "flight_time_shift_s": 30.0,
@@ -224,7 +235,11 @@ def test_active_time_shift_preserves_stretch_mapped_pending_stations() -> None:
             ),
         ),
     )
-    simulator = Simulator(definition, action_applier=apply_action)
+    simulator = Simulator(
+        definition,
+        action_applier=apply_action,
+        runtime_configuration_hash="test-native-apply-action-v1",
+    )
     stretch_batch = _next_station_batch(simulator, "path_stretch")
     stretch = next(
         candidate
@@ -334,7 +349,9 @@ def test_replay_compiled_stretch_preserves_the_live_simap_splice() -> None:
         same_elapsed=False,
     )
     compiled = simulator.definition.variant(realization.variant_id)
-    assert compiled.diagnostics.message == "public SIMAP coupled replay validation passed"
+    assert (
+        compiled.diagnostics.message == "public SIMAP coupled replay validation passed"
+    )
     envelope = adapter.envelope(compiled.s_m, compiled.altitude_m)
     np.testing.assert_allclose(compiled.lower_cas_mps, envelope.lower_cas_mps)
     np.testing.assert_allclose(compiled.upper_cas_mps, envelope.upper_cas_mps)
@@ -355,9 +372,7 @@ def test_replay_compiled_speed_action_preserves_the_live_physical_prefix() -> No
                     flight_id="F1",
                     release_time_s=0.0,
                     baseline_variant_id=baseline.variant_id,
-                    action_stations=(
-                        ActionStationDefinition(0, 80_000.0, "speed"),
-                    ),
+                    action_stations=(ActionStationDefinition(0, 80_000.0, "speed"),),
                 ),
             ),
             resources=(
@@ -387,4 +402,6 @@ def test_replay_compiled_speed_action_preserves_the_live_physical_prefix() -> No
     details = dict(compiled.diagnostics.details)
     assert details["live_splice_prefix_source"] == "parent_physical_profile"
     assert details["live_splice_suffix_source"] == "simap_public_coupled_replay"
-    assert compiled.duration_s == pytest.approx(compiled.diagnostics.compiled_duration_s)
+    assert compiled.duration_s == pytest.approx(
+        compiled.diagnostics.compiled_duration_s
+    )

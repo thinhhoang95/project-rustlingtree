@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 import numpy as np
 
-from hailmary.actions.models import ActionCandidate, ActionLever, ActionRealization
+from hailmary.actions.models import (
+    ActionCandidate,
+    ActionIdentity,
+    ActionLever,
+    ActionRealization,
+)
+from hailmary.actions.vocabulary import ActionVocabulary, action_vocabulary
 from hailmary.actions.speed import realize_speed_variant
 from hailmary.actions.stretch import (
     PathStretchRealizer,
@@ -86,7 +92,9 @@ def _run_no_later_action_conflict_rollout(
     interval_start = float(start_time_s)
     interval_end = float(horizon_s)
     if abs(float(simulator.state.sim_time_s) - interval_start) > 1e-8:
-        raise ValueError("inner conflict rollout must start at the frozen decision time")
+        raise ValueError(
+            "inner conflict rollout must start at the frozen decision time"
+        )
     totals: dict[tuple[str, str], float] = {}
     while float(simulator.state.sim_time_s) < interval_end - 1e-9:
         cursor = float(simulator.state.sim_time_s)
@@ -126,11 +134,15 @@ def _variant_station_mapping_m(
     metadata = dict(variant.action_provenance.realization_metadata)
     raw_mapping = metadata.get("parent_to_variant_station_mapping_m")
     if raw_mapping is None:
-        raise InfeasibleActionError("path-stretch variant is missing its physical station mapping")
+        raise InfeasibleActionError(
+            "path-stretch variant is missing its physical station mapping"
+        )
     try:
         return tuple((float(item[0]), float(item[1])) for item in raw_mapping)
     except (TypeError, ValueError, IndexError) as exc:
-        raise InfeasibleActionError("path-stretch variant has an invalid station mapping") from exc
+        raise InfeasibleActionError(
+            "path-stretch variant has an invalid station mapping"
+        ) from exc
 
 
 def _automatic_simap_validator(current: TrajectoryVariant) -> object | None:
@@ -176,6 +188,7 @@ def _default_stretch_outcome_evaluator(
         simulator_outcome_plan,
     )
     from hailmary.features.anchors import build_current_leader_follower_anchors
+
     parent_hash = str(getattr(simulator, "dynamic_content_hash"))
     state = getattr(simulator, "state")
     decision_time_s = float(state.sim_time_s)
@@ -226,8 +239,7 @@ def _default_stretch_outcome_evaluator(
         )
         outcome = score_simulator_outcome(
             branch,
-            plan.cohort,
-            horizon_s=plan.horizon_s,
+            outcome_plan=plan,
         )
         new_pairs = tuple(sorted(set(candidate_duration).difference(baseline_duration)))
         excess_duration_s = sum(
@@ -248,8 +260,14 @@ def _default_stretch_outcome_evaluator(
             diagnostics=(
                 ("new_conflict_pairs", new_pairs),
                 ("excess_conflict_duration_s", float(excess_duration_s)),
-                ("baseline_conflict_pair_durations_s", tuple(sorted(baseline_duration.items()))),
-                ("candidate_conflict_pair_durations_s", tuple(sorted(candidate_duration.items()))),
+                (
+                    "baseline_conflict_pair_durations_s",
+                    tuple(sorted(baseline_duration.items())),
+                ),
+                (
+                    "candidate_conflict_pair_durations_s",
+                    tuple(sorted(candidate_duration.items())),
+                ),
                 ("pair_score", float(outcome.pair_score)),
                 ("propagation_score", float(outcome.propagation_score)),
                 ("intervention_penalty", float(outcome.intervention_penalty)),
@@ -262,9 +280,18 @@ def _default_stretch_outcome_evaluator(
     return evaluate
 
 
+@dataclass(frozen=True, init=False)
 class ActionCatalog:
+    config: TemplateConfig
+
     def __init__(self, config: TemplateConfig | None = None) -> None:
-        self.config = config or TemplateConfig()
+        object.__setattr__(
+            self, "config", TemplateConfig() if config is None else config
+        )
+
+    @property
+    def vocabulary(self) -> ActionVocabulary:
+        return action_vocabulary(self.config)
 
     def enumerate_for_batch(
         self,
@@ -278,8 +305,13 @@ class ActionCatalog:
         decision = getattr(batch, "decision_epoch", None)
         if decision is None:
             return ()
-        if getattr(decision, "state_id") != state.state_id or getattr(decision, "state_version") != state.version:
-            raise StaleActionError("event batch no longer describes the current simulator state")
+        if (
+            getattr(decision, "state_id") != state.state_id
+            or getattr(decision, "state_version") != state.version
+        ):
+            raise StaleActionError(
+                "event batch no longer describes the current simulator state"
+            )
         dynamic = state.flight(bound_flight_id)
         if str(getattr(dynamic.lifecycle, "value", dynamic.lifecycle)) != "active":
             return ()
@@ -298,14 +330,18 @@ class ActionCatalog:
                 event.station_index,
             )
         )
+        vocabulary = self.vocabulary
+        no_op_identity = vocabulary.identities[0]
+        speed_identities = vocabulary.identities[1:-1]
+        stretch_identity = vocabulary.identities[-1]
         first = station_events[0]
         candidates: list[ActionCandidate] = [
             self._candidate(
                 state,
                 anchor_id=anchor_id,
                 flight_id=bound_flight_id,
-                lever=ActionLever.NO_OP,
-                band="no_op",
+                lever=no_op_identity.lever,
+                band=no_op_identity.band,
                 station_index=first.station_index,
                 s_m=float(first.payload_dict["s_m"]),
             )
@@ -313,10 +349,13 @@ class ActionCatalog:
         for event in station_events:
             station_type = str(event.payload_dict.get("station_type", "speed"))
             station_s = float(event.payload_dict["s_m"])
-            if station_type == "speed" and dynamic.speed_action_count < self.config.max_speed_actions:
-                for band, reduction in zip(
-                    self.config.speed_band_names,
-                    self.config.speed_reduction_kts,
+            if (
+                station_type == "speed"
+                and dynamic.speed_action_count < self.config.max_speed_actions
+            ):
+                for identity, reduction in zip(
+                    speed_identities,
+                    vocabulary.speed_reductions_kts,
                     strict=True,
                 ):
                     if isinstance(current_variant, TrajectoryVariant):
@@ -344,28 +383,34 @@ class ActionCatalog:
                         requested = reference - reduction * MPS_PER_KNOT
                         realized = max(requested, lower)
                         effective_kts = (current_command - realized) / MPS_PER_KNOT
-                        if effective_kts < self.config.min_effective_reduction_kts - 1e-9:
+                        if (
+                            effective_kts
+                            < self.config.min_effective_reduction_kts - 1e-9
+                        ):
                             continue
                     candidates.append(
                         self._candidate(
                             state,
                             anchor_id=anchor_id,
                             flight_id=bound_flight_id,
-                            lever=ActionLever.SPEED,
-                            band=band,
+                            lever=identity.lever,
+                            band=identity.band,
                             station_index=event.station_index,
                             s_m=station_s,
                             metadata=(("reduction_kts", reduction),),
                         )
                     )
-            if station_type == "path_stretch" and dynamic.path_stretch_count < self.config.max_path_stretches:
+            if (
+                station_type == "path_stretch"
+                and dynamic.path_stretch_count < self.config.max_path_stretches
+            ):
                 candidates.append(
                     self._candidate(
                         state,
                         anchor_id=anchor_id,
                         flight_id=bound_flight_id,
-                        lever=ActionLever.PATH_STRETCH,
-                        band="oracle_short_medium_long",
+                        lever=stretch_identity.lever,
+                        band=stretch_identity.band,
                         station_index=event.station_index,
                         s_m=station_s,
                     )
@@ -412,7 +457,9 @@ def _install_variant(simulator: object, variant: TrajectoryVariant) -> None:
     state = getattr(simulator, "state")
     definition = state.definition
     if not isinstance(definition, ScenarioDefinition):
-        raise TypeError("simulator definition does not support branch-local variant installation")
+        raise TypeError(
+            "simulator definition does not support branch-local variant installation"
+        )
     if variant.variant_id in definition.variant_ids:
         return
     new_definition = replace(definition, variants=(*definition.variants, variant))
@@ -427,15 +474,19 @@ def _install_variant(simulator: object, variant: TrajectoryVariant) -> None:
     )
 
 
-def _increment_action_counter(simulator: object, flight_id: str, lever: ActionLever) -> None:
+def _increment_action_counter(
+    simulator: object, flight_id: str, lever: ActionLever
+) -> None:
     from hailmary.simulator.state import evolve_state
 
     state = getattr(simulator, "state")
     dynamic = state.flight(flight_id)
     updated = replace(
         dynamic,
-        speed_action_count=dynamic.speed_action_count + (1 if lever is ActionLever.SPEED else 0),
-        path_stretch_count=dynamic.path_stretch_count + (1 if lever is ActionLever.PATH_STRETCH else 0),
+        speed_action_count=dynamic.speed_action_count
+        + (1 if lever is ActionLever.SPEED else 0),
+        path_stretch_count=dynamic.path_stretch_count
+        + (1 if lever is ActionLever.PATH_STRETCH else 0),
     )
     setattr(
         simulator,
@@ -444,7 +495,8 @@ def _increment_action_counter(simulator: object, flight_id: str, lever: ActionLe
             state,
             transition=f"increment-action-counter:{flight_id}:{lever.value}",
             flights=tuple(
-                updated if item.flight_id == flight_id else item for item in state.flights
+                updated if item.flight_id == flight_id else item
+                for item in state.flights
             ),
         ),
     )
@@ -462,8 +514,13 @@ def apply_action(
 ) -> ActionRealization:
     """Apply one epoch-bound action and return its audited realization."""
 
-    action.assert_applicable(simulator)
     settings = config or TemplateConfig()
+    identity = ActionIdentity(action.lever, action.band)
+    if identity not in action_vocabulary(settings).identities:
+        raise InfeasibleActionError(
+            f"unsupported action identity {identity.lever.value}/{identity.band}"
+        )
+    action.assert_applicable(simulator)
     state = getattr(simulator, "state")
     dynamic = state.flight(action.bound_flight_id)
     current = state.definition.variant(dynamic.current_variant_id)
@@ -482,7 +539,9 @@ def apply_action(
     if action.lever is ActionLever.NO_OP:
         record_action = getattr(simulator, "record_action", None)
         if not callable(record_action):
-            raise TypeError("simulator must implement record_action for audited no-op actions")
+            raise TypeError(
+                "simulator must implement record_action for audited no-op actions"
+            )
         record_action(
             {
                 "action_id": action.action_id,
@@ -494,13 +553,20 @@ def apply_action(
             },
             expected_version=state.version,
         )
-        return ActionRealization(action=action, variant_id=None, realized_delay_s=0.0, intervention_magnitude=0.0)
+        return ActionRealization(
+            action=action,
+            variant_id=None,
+            realized_delay_s=0.0,
+            intervention_magnitude=0.0,
+        )
 
     if action.lever is ActionLever.SPEED:
         station_mapping_m = None
         if dynamic.speed_action_count >= settings.max_speed_actions:
             raise InfeasibleActionError("aircraft has exhausted its two speed actions")
-        reductions = dict(zip(settings.speed_band_names, settings.speed_reduction_kts, strict=True))
+        reductions = dict(
+            zip(settings.speed_band_names, settings.speed_reduction_kts, strict=True)
+        )
         if action.band not in reductions:
             raise InfeasibleActionError(f"unknown speed band {action.band!r}")
         variant = realize_speed_variant(
@@ -520,7 +586,9 @@ def apply_action(
         if dynamic.path_stretch_count >= settings.max_path_stretches:
             raise InfeasibleActionError("aircraft has exhausted its one path stretch")
         if stretch_realizer is None:
-            raise InfeasibleActionError("path-stretch action requires a configured realization layer")
+            raise InfeasibleActionError(
+                "path-stretch action requires a configured realization layer"
+            )
         stretch_validator = (
             variant_validator
             if variant_validator is not None
@@ -566,7 +634,11 @@ def apply_action(
             ("candidate_scores", realized.candidate_scores),
             (
                 "candidate_failures",
-                tuple((item.name, item.failure) for item in realized.candidates if item.failure is not None),
+                tuple(
+                    (item.name, item.failure)
+                    for item in realized.candidates
+                    if item.failure is not None
+                ),
             ),
             (
                 "candidate_diagnostics",

@@ -7,13 +7,18 @@ from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
+from hailmary._arrays import readonly_float64
 from hailmary.actions.splice import preserve_compiled_live_prefix
 from hailmary.config import M_PER_NM, StretchConfig, TemplateConfig
 from hailmary.errors import InfeasibleActionError
 from hailmary.geometry.dogleg import DoglegGeometry, construct_runway_away_dogleg
 from hailmary.geometry.frame import LocalFrame
 from hailmary.geometry.polyline import cumulative_lengths_m
-from hailmary.templates.models import ActionProvenance, TrajectoryVariant, VariantDiagnostics
+from hailmary.templates.models import (
+    ActionProvenance,
+    TrajectoryVariant,
+    VariantDiagnostics,
+)
 
 
 class VariantValidator(Protocol):
@@ -32,7 +37,11 @@ class StretchCandidateResult:
 
     @property
     def feasible(self) -> bool:
-        return self.variant is not None and self.geometry is not None and self.failure is None
+        return (
+            self.variant is not None
+            and self.geometry is not None
+            and self.failure is None
+        )
 
 
 @dataclass(frozen=True)
@@ -50,7 +59,11 @@ class StretchRealization:
     def station_mapping_m(self) -> tuple[tuple[float, float], ...]:
         """Monotone parent-to-child station mapping for the chosen dogleg."""
 
-        chosen = next(candidate for candidate in self.candidates if candidate.name == self.chosen_name)
+        chosen = next(
+            candidate
+            for candidate in self.candidates
+            if candidate.name == self.chosen_name
+        )
         if not chosen.station_mapping_m:
             raise RuntimeError("chosen path-stretch candidate has no station mapping")
         return chosen.station_mapping_m
@@ -98,7 +111,9 @@ def _variant_with_exact_station(
 
     station = float(station_s_m)
     if not 0.0 < station < current.path_length_m:
-        raise InfeasibleActionError("path-stretch anchor is outside the controllable trajectory")
+        raise InfeasibleActionError(
+            "path-stretch anchor is outside the controllable trajectory"
+        )
     nearest = int(np.argmin(np.abs(current.s_m - station)))
     if abs(float(current.s_m[nearest]) - station) <= 1e-7:
         return current
@@ -106,7 +121,9 @@ def _variant_with_exact_station(
     stations = np.insert(current.s_m, insertion_index, station)
 
     def inserted(values: np.ndarray) -> np.ndarray:
-        return np.insert(values, insertion_index, np.interp(station, current.s_m, values))
+        return np.insert(
+            values, insertion_index, np.interp(station, current.s_m, values)
+        )
 
     threshold_id = current.threshold_resource_id or "runway_threshold"
     resources = tuple(
@@ -270,7 +287,10 @@ def _compile_geometry_variant(
             added_distance_m=realized_added,
             realization_metadata=(
                 ("geometry_family", "raised_cosine_lateral_lane_change_v1"),
-                ("medoid_clearance_m", _finite_artifact_number(geometry.medoid_clearance_m)),
+                (
+                    "medoid_clearance_m",
+                    _finite_artifact_number(geometry.medoid_clearance_m),
+                ),
                 ("runway_away_displacement_m", geometry.runway_away_displacement_m),
                 ("parent_to_variant_station_mapping_m", station_mapping),
             ),
@@ -319,16 +339,26 @@ class PathStretchRealizer:
     validator: VariantValidator | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "other_medoid_polylines_m",
-            tuple(np.asarray(item, dtype=float) for item in self.other_medoid_polylines_m),
+        medoids = tuple(
+            readonly_float64(
+                item,
+                name=f"other_medoid_polylines_m[{index}]",
+                ndim=2,
+            )
+            for index, item in enumerate(self.other_medoid_polylines_m)
         )
-        object.__setattr__(
-            self,
-            "boundary_polylines_m",
-            tuple(np.asarray(item, dtype=float) for item in self.boundary_polylines_m),
+        boundaries = tuple(
+            readonly_float64(
+                item,
+                name=f"boundary_polylines_m[{index}]",
+                ndim=2,
+            )
+            for index, item in enumerate(self.boundary_polylines_m)
         )
+        if any(item.shape[1] != 2 for item in (*medoids, *boundaries)):
+            raise ValueError("path-stretch geometry polylines must have shape (n, 2)")
+        object.__setattr__(self, "other_medoid_polylines_m", medoids)
+        object.__setattr__(self, "boundary_polylines_m", boundaries)
 
     def candidates(
         self,
@@ -360,8 +390,10 @@ class PathStretchRealizer:
                     boundary_polylines_m=self.boundary_polylines_m,
                     candidate_azimuth_count=self.config.candidate_azimuth_count,
                     max_turn_deg=self.config.max_turn_deg,
-                    added_distance_tolerance_m=self.config.added_distance_tolerance_nm * M_PER_NM,
-                    minimum_medoid_clearance_m=self.config.minimum_medoid_clearance_nm * M_PER_NM,
+                    added_distance_tolerance_m=self.config.added_distance_tolerance_nm
+                    * M_PER_NM,
+                    minimum_medoid_clearance_m=self.config.minimum_medoid_clearance_nm
+                    * M_PER_NM,
                     minimum_rejoin_station_m=gate_m,
                 )
                 variant, station_mapping = _compile_geometry_variant(
@@ -371,9 +403,14 @@ class PathStretchRealizer:
                     validator=self.validator,
                     lineage_parent=current,
                 )
-                error = abs((variant.path_length_m - current.path_length_m) - added_nm * M_PER_NM)
+                error = abs(
+                    (variant.path_length_m - current.path_length_m)
+                    - added_nm * M_PER_NM
+                )
                 if error > self.config.added_distance_tolerance_nm * M_PER_NM + 1e-6:
-                    raise InfeasibleActionError("compiled dogleg misses its added-distance tolerance")
+                    raise InfeasibleActionError(
+                        "compiled dogleg misses its added-distance tolerance"
+                    )
                 results.append(
                     StretchCandidateResult(
                         name=name,
@@ -383,7 +420,11 @@ class PathStretchRealizer:
                     )
                 )
             except (InfeasibleActionError, ValueError) as exc:
-                results.append(StretchCandidateResult(name=name, variant=None, geometry=None, failure=str(exc)))
+                results.append(
+                    StretchCandidateResult(
+                        name=name, variant=None, geometry=None, failure=str(exc)
+                    )
+                )
         return tuple(results)
 
     def realize(
@@ -422,7 +463,9 @@ class PathStretchRealizer:
                     score = float(evaluation)
                     selection_diagnostics = ()
                 if not np.isfinite(score):
-                    raise InfeasibleActionError("path-stretch outcome evaluator returned a non-finite score")
+                    raise InfeasibleActionError(
+                        "path-stretch outcome evaluator returned a non-finite score"
+                    )
                 candidate = replace(
                     candidate,
                     selection_diagnostics=selection_diagnostics,
@@ -430,10 +473,16 @@ class PathStretchRealizer:
             else:
                 raise ValueError(f"unknown path-stretch selector {selection!r}")
             scored.append(replace(candidate, score=score))
-        feasible = [candidate for candidate in scored if candidate.feasible and candidate.score is not None]
+        feasible = [
+            candidate
+            for candidate in scored
+            if candidate.feasible and candidate.score is not None
+        ]
         if not feasible:
             failures = "; ".join(f"{item.name}: {item.failure}" for item in scored)
-            raise InfeasibleActionError(f"all path-stretch variants are infeasible ({failures})")
+            raise InfeasibleActionError(
+                f"all path-stretch variants are infeasible ({failures})"
+            )
         rank = {name: index for index, name in enumerate(self.config.variant_names)}
         chosen = max(
             feasible,
@@ -464,7 +513,9 @@ class PathStretchRealizer:
                 ("chosen_variant", chosen.name),
             ),
         )
-        logged_variant = replace(chosen.variant, action_provenance=provenance, variant_id="")
+        logged_variant = replace(
+            chosen.variant, action_provenance=provenance, variant_id=""
+        )
         scored = [
             replace(item, variant=logged_variant) if item.name == chosen.name else item
             for item in scored
@@ -477,7 +528,9 @@ class PathStretchRealizer:
         )
 
 
-def medoid_polylines(variants: Iterable[TrajectoryVariant], *, exclude_cluster_id: str) -> tuple[np.ndarray, ...]:
+def medoid_polylines(
+    variants: Iterable[TrajectoryVariant], *, exclude_cluster_id: str
+) -> tuple[np.ndarray, ...]:
     return tuple(
         np.column_stack((variant.east_m, variant.north_m))
         for variant in variants

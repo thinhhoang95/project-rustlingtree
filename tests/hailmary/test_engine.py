@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
+from hailmary.errors import SimulationError
 from hailmary.scenario import (
     ActionStationDefinition,
     FlightDefinition,
@@ -64,8 +65,12 @@ def _definition(*, include_slow_variant: bool = False) -> ScenarioDefinition:
                 baseline_variant_id="BASE",
                 observed_release_time_s=100.0,
                 action_stations=(
-                    ActionStationDefinition(station_index=0, s_m=1_500.0, station_type="speed"),
-                    ActionStationDefinition(station_index=1, s_m=500.0, station_type="speed"),
+                    ActionStationDefinition(
+                        station_index=0, s_m=1_500.0, station_type="speed"
+                    ),
+                    ActionStationDefinition(
+                        station_index=1, s_m=500.0, station_type="speed"
+                    ),
                 ),
                 resource_crossings=(
                     ResourceCrossingDefinition(resource_id="RWY", s_m=0.0),
@@ -83,6 +88,55 @@ def _definition(*, include_slow_variant: bool = False) -> ScenarioDefinition:
             ),
         ),
     )
+
+
+def test_simulator_validates_optional_runtime_configuration_hash() -> None:
+    bare = Simulator(_definition())
+    configured = Simulator(
+        _definition(), runtime_configuration_hash="runtime-config-v1"
+    )
+
+    assert bare.runtime_configuration_hash is None
+    assert configured.runtime_configuration_hash == "runtime-config-v1"
+    with pytest.raises(ValueError, match="exact string"):
+        Simulator(_definition(), runtime_configuration_hash=" runtime-config-v1 ")
+    with pytest.raises(ValueError, match="cannot be blank"):
+        Simulator(_definition(), runtime_configuration_hash="   ")
+    with pytest.raises(TypeError, match="must be a string or None"):
+        Simulator(
+            _definition(),
+            runtime_configuration_hash=1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(
+        ValueError,
+        match="action_applier requires a non-empty runtime_configuration_hash",
+    ):
+        Simulator(_definition(), action_applier=lambda _simulator, _action: None)
+
+
+def test_bare_simulator_accepts_exact_canonical_no_op() -> None:
+    simulator = Simulator(_definition())
+    before = simulator.dynamic_content_hash
+
+    assert simulator.apply({"lever": "no_op", "band": "no_op"}) is simulator
+    assert simulator.dynamic_content_hash == before
+
+
+@pytest.mark.parametrize(
+    "action",
+    (
+        {"lever": "no_op"},
+        {"lever": "noop", "band": "no_op"},
+        {"lever": "none", "band": "no_op"},
+        {"lever": "NO_OP", "band": "no_op"},
+        {"lever": "no_op", "band": "noop"},
+    ),
+)
+def test_bare_simulator_rejects_noncanonical_no_op_aliases(
+    action: dict[str, str],
+) -> None:
+    with pytest.raises(SimulationError, match="no action realization layer"):
+        Simulator(_definition()).apply(action)
 
 
 def test_monotone_interpolation_accepts_canonical_station_order() -> None:
@@ -284,7 +338,9 @@ def test_materialized_exogenous_event_updates_branch_state_and_schedule() -> Non
     assert simulator.state.metrics_dict == {"injected_error_s": 12.0}
     assert simulator.state.exogenous_event_records[0]["event_id"] == "ERROR"
     assert simulator.state.flight("F1").release_time_s == pytest.approx(112.0)
-    assert simulator.state.flight("F1").trajectory_clock_origin_s == pytest.approx(112.0)
+    assert simulator.state.flight("F1").trajectory_clock_origin_s == pytest.approx(
+        112.0
+    )
     assert simulator.next_event_time_s == pytest.approx(112.0)
     assert simulator.dynamic_content_hash != initial_hash
 

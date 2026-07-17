@@ -24,6 +24,8 @@ from hailmary.simulator.interpolation import MonotoneTrajectory, TrajectorySampl
 from hailmary.simulator.state import (
     FlightDynamic,
     FlightLifecycle,
+    LEGACY_SIMULATION_SNAPSHOT_VERSION,
+    SIMULATION_SNAPSHOT_VERSION,
     SimulationState,
     evolve_state,
     fork_state,
@@ -50,6 +52,19 @@ class PolicyDecisionContext:
     event_batch: EventBatchResult
 
 
+def _runtime_configuration_hash(value: Any) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError("runtime_configuration_hash must be a string or None")
+    resolved = value.strip()
+    if not resolved:
+        raise ValueError("runtime_configuration_hash cannot be blank")
+    if resolved != value:
+        raise ValueError("runtime_configuration_hash must be an exact string")
+    return resolved
+
+
 class Simulator:
     """Mutable driver around immutable, lineage-tracked simulation states."""
 
@@ -59,11 +74,19 @@ class Simulator:
         *,
         state: SimulationState | None = None,
         action_applier: Callable[["Simulator", Any], Any] | None = None,
+        runtime_configuration_hash: str | None = None,
     ) -> None:
         if (definition is None) == (state is None):
             raise ValueError("provide exactly one of definition or state")
+        resolved_runtime_hash = _runtime_configuration_hash(runtime_configuration_hash)
+        if action_applier is not None and resolved_runtime_hash is None:
+            raise ValueError(
+                "action_applier requires a non-empty runtime_configuration_hash"
+            )
         self.state = initial_state(definition) if state is None else state
         self._action_applier = action_applier
+        self._runtime_configuration_hash = resolved_runtime_hash
+        self._fork_origin_dynamic_content_hash: str | None = None
         self.last_run_batches: tuple[EventBatchResult, ...] = ()
         self.last_action_result: Any | None = None
 
@@ -73,16 +96,65 @@ class Simulator:
         state: SimulationState,
         *,
         action_applier: Callable[["Simulator", Any], Any] | None = None,
+        runtime_configuration_hash: str | None = None,
     ) -> "Simulator":
-        return cls(state=state, action_applier=action_applier)
+        return cls(
+            state=state,
+            action_applier=action_applier,
+            runtime_configuration_hash=runtime_configuration_hash,
+        )
 
     @classmethod
-    def resume(cls, definition: ScenarioDefinition, snapshot: Mapping[str, Any]) -> "Simulator":
-        return cls(state=SimulationState.from_snapshot(definition, snapshot))
+    def resume(
+        cls,
+        definition: ScenarioDefinition,
+        snapshot: Mapping[str, Any],
+        *,
+        action_applier: Callable[["Simulator", Any], Any] | None = None,
+        runtime_configuration_hash: str | None = None,
+    ) -> "Simulator":
+        resolved_runtime_hash = _runtime_configuration_hash(runtime_configuration_hash)
+        schema_version = snapshot.get("schema_version")
+        if schema_version == SIMULATION_SNAPSHOT_VERSION:
+            if "runtime_configuration_hash" not in snapshot:
+                raise ValueError(
+                    "simulation snapshot v2 requires runtime_configuration_hash"
+                )
+            snapshot_runtime_hash = _runtime_configuration_hash(
+                snapshot["runtime_configuration_hash"]
+            )
+            if snapshot_runtime_hash != resolved_runtime_hash:
+                raise ValueError(
+                    "snapshot runtime_configuration_hash does not match the resume runtime"
+                )
+        elif schema_version == LEGACY_SIMULATION_SNAPSHOT_VERSION:
+            if resolved_runtime_hash is not None:
+                raise ValueError(
+                    "legacy simulation snapshot cannot prove the configured resume runtime"
+                )
+        else:
+            raise ValueError("unsupported simulation snapshot schema version")
+        return cls(
+            state=SimulationState.from_snapshot(definition, snapshot),
+            action_applier=action_applier,
+            runtime_configuration_hash=resolved_runtime_hash,
+        )
 
     @property
     def definition(self) -> ScenarioDefinition:
         return self.state.definition
+
+    @property
+    def action_applier(self) -> Callable[["Simulator", Any], Any] | None:
+        return self._action_applier
+
+    @property
+    def runtime_configuration_hash(self) -> str | None:
+        return self._runtime_configuration_hash
+
+    @property
+    def fork_origin_dynamic_content_hash(self) -> str | None:
+        return self._fork_origin_dynamic_content_hash
 
     @property
     def dynamic_content_hash(self) -> str:
@@ -95,13 +167,18 @@ class Simulator:
         return float(self.state.event_heap[0].time_s)
 
     def snapshot(self) -> dict[str, Any]:
-        return self.state.to_snapshot()
+        return self.state.to_snapshot(
+            runtime_configuration_hash=self._runtime_configuration_hash
+        )
 
     def fork(self, *, label: str) -> "Simulator":
-        return Simulator.from_state(
+        child = Simulator.from_state(
             fork_state(self.state, label=label),
             action_applier=self._action_applier,
+            runtime_configuration_hash=self._runtime_configuration_hash,
         )
+        child._fork_origin_dynamic_content_hash = self.dynamic_content_hash
+        return child
 
     def assert_fresh(
         self,
@@ -114,10 +191,16 @@ class Simulator:
             expected_state_id=expected_state_id,
         )
 
-    def sample_flight(self, flight_id: str, *, at_time_s: float | None = None) -> TrajectorySample:
+    def sample_flight(
+        self, flight_id: str, *, at_time_s: float | None = None
+    ) -> TrajectorySample:
         dynamic = self.state.flight(flight_id)
-        absolute_time_s = self.state.sim_time_s if at_time_s is None else float(at_time_s)
-        trajectory = MonotoneTrajectory.from_variant(self.definition.variant(dynamic.current_variant_id))
+        absolute_time_s = (
+            self.state.sim_time_s if at_time_s is None else float(at_time_s)
+        )
+        trajectory = MonotoneTrajectory.from_variant(
+            self.definition.variant(dynamic.current_variant_id)
+        )
         elapsed = absolute_time_s - dynamic.trajectory_clock_origin_s
         return trajectory.sample(elapsed)
 
@@ -147,7 +230,9 @@ class Simulator:
                 updates = payload.get("state_updates", {})
                 if not isinstance(updates, Mapping):
                     raise ValueError("exogenous state_updates must be a mapping")
-                exogenous_state.update({str(key): value for key, value in updates.items()})
+                exogenous_state.update(
+                    {str(key): value for key, value in updates.items()}
+                )
                 metric_deltas = payload.get("metric_deltas", {})
                 if not isinstance(metric_deltas, Mapping):
                     raise ValueError("exogenous metric_deltas must be a mapping")
@@ -170,10 +255,16 @@ class Simulator:
                 if raw_shift is not None:
                     shift_s = float(raw_shift)
                     if not math.isfinite(shift_s) or shift_s < 0.0:
-                        raise ValueError("exogenous flight_time_shift_s must be finite and non-negative")
-                    target_flight_id = str(payload.get("target_flight_id", event.flight_id))
+                        raise ValueError(
+                            "exogenous flight_time_shift_s must be finite and non-negative"
+                        )
+                    target_flight_id = str(
+                        payload.get("target_flight_id", event.flight_id)
+                    )
                     if not target_flight_id:
-                        raise ValueError("flight-time disturbances require target_flight_id")
+                        raise ValueError(
+                            "flight-time disturbances require target_flight_id"
+                        )
                     try:
                         target = by_flight[target_flight_id]
                     except KeyError as exc:
@@ -191,7 +282,8 @@ class Simulator:
                                 if target.lifecycle is FlightLifecycle.SCHEDULED
                                 else target.release_time_s
                             ),
-                            trajectory_origin_time_s=target.trajectory_clock_origin_s + shift_s,
+                            trajectory_origin_time_s=target.trajectory_clock_origin_s
+                            + shift_s,
                         )
                         if lifecycle_before_shift is FlightLifecycle.ACTIVE:
                             pending_to_shift = [
@@ -231,7 +323,9 @@ class Simulator:
                                     predicted[shifted.resource_id] = shifted.time_s
                             target = replace(
                                 target,
-                                predicted_resource_crossing_times=tuple(sorted(predicted.items())),
+                                predicted_resource_crossing_times=tuple(
+                                    sorted(predicted.items())
+                                ),
                             )
                         else:
                             heap = [
@@ -240,10 +334,15 @@ class Simulator:
                                 if not (
                                     pending.flight_id == target_flight_id
                                     and pending.kind
-                                    in (_FLIGHT_FUTURE_EVENT_KINDS | {EventKind.FLIGHT_RELEASED})
+                                    in (
+                                        _FLIGHT_FUTURE_EVENT_KINDS
+                                        | {EventKind.FLIGHT_RELEASED}
+                                    )
                                 )
                             ]
-                            definition_flight = before.definition.flight(target_flight_id)
+                            definition_flight = before.definition.flight(
+                                target_flight_id
+                            )
                             future, next_sequence, predicted = _flight_events(
                                 definition=before.definition,
                                 flight=definition_flight,
@@ -253,13 +352,17 @@ class Simulator:
                                 after_time_s=time_s,
                             )
                             heap.extend(future)
-                            target = replace(target, predicted_resource_crossing_times=predicted)
+                            target = replace(
+                                target, predicted_resource_crossing_times=predicted
+                            )
                         by_flight[target_flight_id] = target
                         invalidated_current_flights.add(target_flight_id)
                 commitment_controls = payload.get("commitment_controls")
                 if commitment_controls is not None:
                     if not isinstance(commitment_controls, Mapping):
-                        raise ValueError("exogenous commitment_controls must be a mapping")
+                        raise ValueError(
+                            "exogenous commitment_controls must be a mapping"
+                        )
                     target_flight_id = str(
                         commitment_controls.get(
                             "target_flight_id",
@@ -274,10 +377,17 @@ class Simulator:
                         raise ValueError(
                             f"commitment controls reference unknown flight {target_flight_id!r}"
                         ) from exc
-                    station_cap = float(commitment_controls["action_station_fraction_cap"])
-                    budget_cap = float(commitment_controls["intervention_budget_fraction_cap"])
+                    station_cap = float(
+                        commitment_controls["action_station_fraction_cap"]
+                    )
+                    budget_cap = float(
+                        commitment_controls["intervention_budget_fraction_cap"]
+                    )
                     gate_value = float(commitment_controls["intercept_gate_flag"])
-                    if not all(math.isfinite(value) for value in (station_cap, budget_cap, gate_value)):
+                    if not all(
+                        math.isfinite(value)
+                        for value in (station_cap, budget_cap, gate_value)
+                    ):
                         raise ValueError("commitment control values must be finite")
                     if not 0.0 <= station_cap <= 1.0 or not 0.0 <= budget_cap <= 1.0:
                         raise ValueError("commitment freedom caps must lie in [0, 1]")
@@ -296,11 +406,15 @@ class Simulator:
                 # physical event before it could be applied.
                 continue
             if event.flight_id not in by_flight:
-                raise RuntimeError(f"event {event.event_id!r} references unknown flight {event.flight_id!r}")
+                raise RuntimeError(
+                    f"event {event.event_id!r} references unknown flight {event.flight_id!r}"
+                )
             dynamic = by_flight[event.flight_id]
             if event.kind is EventKind.FLIGHT_RELEASED:
                 if dynamic.lifecycle is not FlightLifecycle.SCHEDULED:
-                    raise RuntimeError(f"flight {event.flight_id!r} was released more than once")
+                    raise RuntimeError(
+                        f"flight {event.flight_id!r} was released more than once"
+                    )
                 dynamic = replace(dynamic, lifecycle=FlightLifecycle.ACTIVE)
             elif event.kind is EventKind.ACTION_STATION_CROSSED:
                 _require_active(dynamic, event)
@@ -343,7 +457,9 @@ class Simulator:
             sim_time_s=time_s,
             event_heap=tuple(heap),
             event_sequence=next_sequence,
-            flights=tuple(sorted(by_flight.values(), key=lambda flight: flight.flight_id)),
+            flights=tuple(
+                sorted(by_flight.values(), key=lambda flight: flight.flight_id)
+            ),
             metrics=tuple(sorted(metrics.items())),
             exogenous_state=freeze_payload(exogenous_state),
             exogenous_event_log=tuple(exogenous_log),
@@ -389,7 +505,9 @@ class Simulator:
                 if policy is not None and batch.decision_epoch is not None:
                     selector = getattr(policy, "select_action", None)
                     if not callable(selector):
-                        raise TypeError("rollout policy must implement select_action(context)")
+                        raise TypeError(
+                            "rollout policy must implement select_action(context)"
+                        )
                     action = selector(
                         PolicyDecisionContext(
                             simulator=self,
@@ -425,19 +543,27 @@ class Simulator:
     def apply(self, action: Any) -> "Simulator":
         """Apply a branch-local action through the configured realization layer.
 
-        With no realization layer, a no-op is an identity. Otherwise every
-        action is delegated so eligibility and audit logging stay consistent.
-        Audit objects are retained as ``last_action_result`` while returned
-        state/simulator objects are adopted.
+        With no realization layer, only the canonical ``no_op/no_op`` action
+        is an identity. Otherwise every action is delegated so eligibility and
+        audit logging stay consistent. Audit objects are retained as
+        ``last_action_result`` while returned state/simulator objects are
+        adopted.
         """
 
-        lever = action.get("lever") if isinstance(action, Mapping) else getattr(action, "lever", None)
+        if isinstance(action, Mapping):
+            lever = action.get("lever")
+            band = action.get("band")
+        else:
+            lever = getattr(action, "lever", None)
+            band = getattr(action, "band", None)
         lever_value = getattr(lever, "value", lever)
-        is_no_op = str(lever_value).lower() in {"no_op", "noop", "none"}
-        if is_no_op and self._action_applier is None:
-            return self
+        band_value = getattr(band, "value", band)
         if self._action_applier is None:
-            raise SimulationError("no action realization layer is configured for this simulator")
+            if lever_value == "no_op" and band_value == "no_op":
+                return self
+            raise SimulationError(
+                "no action realization layer is configured for this simulator"
+            )
         result = self._action_applier(self, action)
         self.last_action_result = result
         if isinstance(result, SimulationState):
@@ -462,11 +588,15 @@ class Simulator:
         parent or sibling.
         """
 
-        self.assert_fresh(expected_version=expected_version, expected_state_id=expected_state_id)
+        self.assert_fresh(
+            expected_version=expected_version, expected_state_id=expected_state_id
+        )
         variant_id = trajectory_variant_id(variant)
         if variant_id in self.definition.variant_ids:
             return self.state
-        definition = replace(self.definition, variants=(*self.definition.variants, variant))
+        definition = replace(
+            self.definition, variants=(*self.definition.variants, variant)
+        )
         self.state = evolve_state(
             self.state,
             transition=f"install-variant:{variant_id}",
@@ -495,11 +625,15 @@ class Simulator:
         live payloads rather than regenerated from baseline definitions.
         """
 
-        self.assert_fresh(expected_version=expected_version, expected_state_id=expected_state_id)
+        self.assert_fresh(
+            expected_version=expected_version, expected_state_id=expected_state_id
+        )
         before = self.state
         dynamic = before.flight(flight_id)
         if dynamic.lifecycle is not FlightLifecycle.ACTIVE:
-            raise ValueError("a trajectory variant can only be replaced for an active flight")
+            raise ValueError(
+                "a trajectory variant can only be replaced for an active flight"
+            )
         current_variant = self.definition.variant(dynamic.current_variant_id)
         replacement_variant = self.definition.variant(variant_id)
         current_trajectory = MonotoneTrajectory.from_variant(current_variant)
@@ -523,7 +657,9 @@ class Simulator:
             current_trajectory=current_trajectory,
             replacement_trajectory=replacement_trajectory,
         )
-        replacement_elapsed_s = replacement_trajectory.elapsed_at_station(mapped_splice_s_m)
+        replacement_elapsed_s = replacement_trajectory.elapsed_at_station(
+            mapped_splice_s_m
+        )
         replacement_origin_s = before.sim_time_s - replacement_elapsed_s
         _assert_splice_position_continuity(
             current_trajectory.sample(current_elapsed_s),
@@ -534,31 +670,41 @@ class Simulator:
             (
                 event
                 for event in before.event_heap
-                if event.flight_id == flight_id and event.kind in _FLIGHT_FUTURE_EVENT_KINDS
+                if event.flight_id == flight_id
+                and event.kind in _FLIGHT_FUTURE_EVENT_KINDS
             ),
             key=lambda event: event.sort_key,
         )
         remaining = [
             event
             for event in before.event_heap
-            if not (event.flight_id == flight_id and event.kind in _FLIGHT_FUTURE_EVENT_KINDS)
+            if not (
+                event.flight_id == flight_id
+                and event.kind in _FLIGHT_FUTURE_EVENT_KINDS
+            )
         ]
         sequence = before.event_sequence
         predicted = dict(dynamic.predicted_resource_crossing_times)
         future_events: list[ScheduledEvent] = []
         for event in pending_for_flight:
             payload = event.payload_dict
-            if event.kind in {EventKind.ACTION_STATION_CROSSED, EventKind.RESOURCE_CROSSED}:
+            if event.kind in {
+                EventKind.ACTION_STATION_CROSSED,
+                EventKind.RESOURCE_CROSSED,
+            }:
                 if "s_m" not in payload:
-                    raise ValueError(f"pending event {event.event_id!r} has no physical station")
+                    raise ValueError(
+                        f"pending event {event.event_id!r} has no physical station"
+                    )
                 mapped_station = _mapped_station_s_m(
                     float(payload["s_m"]),
                     station_mapping_m,
                     current_trajectory=current_trajectory,
                     replacement_trajectory=replacement_trajectory,
                 )
-                event_time_s = replacement_origin_s + replacement_trajectory.elapsed_at_station(
-                    mapped_station
+                event_time_s = (
+                    replacement_origin_s
+                    + replacement_trajectory.elapsed_at_station(mapped_station)
                 )
                 payload["s_m"] = mapped_station
                 if event.kind is EventKind.RESOURCE_CROSSED:
@@ -584,10 +730,14 @@ class Simulator:
             current_variant_id=variant_id,
             trajectory_origin_time_s=replacement_origin_s,
             action_history=(
-                dynamic.action_history if not action_id else (*dynamic.action_history, action_id)
+                dynamic.action_history
+                if not action_id
+                else (*dynamic.action_history, action_id)
             ),
-            speed_action_count=dynamic.speed_action_count + (1 if action_lever == "speed" else 0),
-            path_stretch_count=dynamic.path_stretch_count + (1 if action_lever == "path_stretch" else 0),
+            speed_action_count=dynamic.speed_action_count
+            + (1 if action_lever == "speed" else 0),
+            path_stretch_count=dynamic.path_stretch_count
+            + (1 if action_lever == "path_stretch" else 0),
             predicted_resource_crossing_times=tuple(sorted(predicted.items())),
         )
         remaining.extend(future_events)
@@ -638,7 +788,9 @@ class Simulator:
         expected_version: int | None = None,
         expected_state_id: str | None = None,
     ) -> ScheduledEvent:
-        self.assert_fresh(expected_version=expected_version, expected_state_id=expected_state_id)
+        self.assert_fresh(
+            expected_version=expected_version, expected_state_id=expected_state_id
+        )
         event_time = float(time_s)
         if event_time < self.state.sim_time_s - 1e-9:
             raise ValueError("cannot schedule an event in the past")
@@ -725,14 +877,19 @@ def initial_state(definition: ScenarioDefinition | None) -> SimulationState:
     dynamics: list[FlightDynamic] = []
     sequence = 0
 
-    for disturbance in sorted(definition.exogenous_events, key=lambda item: (item.time_s, item.event_id)):
+    for disturbance in sorted(
+        definition.exogenous_events, key=lambda item: (item.time_s, item.event_id)
+    ):
         events.append(
             ScheduledEvent(
                 time_s=disturbance.time_s,
                 kind=EventKind.EXOGENOUS_DISTURBANCE,
                 event_id=disturbance.event_id,
                 insertion_sequence=sequence,
-                payload={**disturbance.payload_dict, "stream_name": disturbance.stream_name},
+                payload={
+                    **disturbance.payload_dict,
+                    "stream_name": disturbance.stream_name,
+                },
             )
         )
         sequence += 1
@@ -796,12 +953,15 @@ def _flight_events(
         )
 
     crossed_station_keys = set(dynamic.crossed_action_station_keys)
-    for station in sorted(flight.action_stations, key=lambda item: (item.station_type, item.station_index)):
+    for station in sorted(
+        flight.action_stations, key=lambda item: (item.station_type, item.station_index)
+    ):
         key = (station.station_type, station.station_index)
         if key in crossed_station_keys:
             continue
-        crossing_time_s = dynamic.trajectory_clock_origin_s + trajectory.elapsed_at_station(
-            station.s_m
+        crossing_time_s = (
+            dynamic.trajectory_clock_origin_s
+            + trajectory.elapsed_at_station(station.s_m)
         )
         if crossing_time_s <= after_time_s + 1e-9:
             continue
@@ -828,11 +988,15 @@ def _flight_events(
         key=lambda item: (item.resource_id, item.station_index),
     ):
         definition.resource(crossing.resource_id)  # validate resource ownership
-        crossing_time_s = dynamic.trajectory_clock_origin_s + trajectory.elapsed_at_station(
-            crossing.s_m
+        crossing_time_s = (
+            dynamic.trajectory_clock_origin_s
+            + trajectory.elapsed_at_station(crossing.s_m)
         )
         predicted.append((crossing.resource_id, crossing_time_s))
-        if crossing.resource_id in crossed_resources or crossing_time_s <= after_time_s + 1e-9:
+        if (
+            crossing.resource_id in crossed_resources
+            or crossing_time_s <= after_time_s + 1e-9
+        ):
             continue
         append(
             ScheduledEvent(
@@ -883,15 +1047,21 @@ def _mapped_station_s_m(
     else:
         mapping = np.asarray(station_mapping_m, dtype=np.float64)
         if mapping.ndim != 2 or mapping.shape[1:] != (2,) or len(mapping) < 2:
-            raise ValueError("station_mapping_m must contain at least two (parent, child) pairs")
+            raise ValueError(
+                "station_mapping_m must contain at least two (parent, child) pairs"
+            )
         if not np.all(np.isfinite(mapping)):
             raise ValueError("station_mapping_m must be finite")
         parent_s = mapping[:, 0]
         child_s = mapping[:, 1]
         if np.any(np.diff(parent_s) <= 0.0) or np.any(np.diff(child_s) <= 0.0):
-            raise ValueError("station_mapping_m must be strictly monotone in both coordinates")
+            raise ValueError(
+                "station_mapping_m must be strictly monotone in both coordinates"
+            )
         if station < parent_s[0] - 1e-7 or station > parent_s[-1] + 1e-7:
-            raise ValueError("station mapping does not cover a pending physical station")
+            raise ValueError(
+                "station mapping does not cover a pending physical station"
+            )
         mapped = float(np.interp(station, parent_s, child_s))
     if (
         mapped < replacement_trajectory.downstream_s_m - 1e-7
@@ -948,7 +1118,9 @@ def _resource_crossings(flight: FlightDefinition, variant: object) -> tuple[Any,
         resource_id = str(getattr(crossing, "resource_id", ""))
         s_m = float(getattr(crossing, "s_m"))
         if not resource_id:
-            raise ValueError("variant resource crossing must have a non-empty resource_id")
+            raise ValueError(
+                "variant resource crossing must have a non-empty resource_id"
+            )
         normalized.append(
             _VariantResourceCrossing(
                 resource_id=resource_id,

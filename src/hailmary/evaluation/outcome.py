@@ -9,6 +9,7 @@ import numpy as np
 
 from hailmary.config import OutcomeConfig
 from hailmary.evaluation.spacing import spacing_ratio_score
+
 if TYPE_CHECKING:
     from hailmary.features.anchors import LeaderFollowerAnchor
 
@@ -26,7 +27,11 @@ class OutcomeCohort:
 
     def __post_init__(self) -> None:
         identifiers = (self.leader_id, self.follower_id, *self.trailer_ids)
-        if not self.anchor_id or not self.resource_id or any(not item for item in identifiers):
+        if (
+            not self.anchor_id
+            or not self.resource_id
+            or any(not item for item in identifiers)
+        ):
             raise ValueError("outcome cohort IDs cannot be empty")
         if len(set(identifiers)) != len(identifiers):
             raise ValueError("outcome cohort flights must be distinct")
@@ -43,7 +48,9 @@ class OutcomeCohort:
 
     @property
     def evaluated_edges(self) -> tuple[tuple[str, str], ...]:
-        return tuple(zip(self.ordered_flight_ids, self.ordered_flight_ids[1:], strict=False))
+        return tuple(
+            zip(self.ordered_flight_ids, self.ordered_flight_ids[1:], strict=False)
+        )
 
 
 def freeze_outcome_cohort(
@@ -84,14 +91,18 @@ def rollout_horizon_s(
 ) -> float:
     """One nominal slot after trailer 3, the last trailer, or the follower."""
 
-    slot = cohort.required_interval_s if nominal_slot_s is None else float(nominal_slot_s)
+    slot = (
+        cohort.required_interval_s if nominal_slot_s is None else float(nominal_slot_s)
+    )
     if not np.isfinite(slot) or slot <= 0.0:
         raise ValueError("nominal_slot_s must be finite and positive")
     terminal_id = cohort.trailer_ids[-1] if cohort.trailer_ids else cohort.follower_id
     try:
         crossing = float(crossing_times_s[terminal_id])
     except KeyError as exc:
-        raise ValueError(f"missing crossing time for horizon flight {terminal_id!r}") from exc
+        raise ValueError(
+            f"missing crossing time for horizon flight {terminal_id!r}"
+        ) from exc
     if not np.isfinite(crossing):
         raise ValueError("horizon crossing time must be finite")
     return float(crossing + slot)
@@ -109,15 +120,62 @@ class InterventionSummary:
 
     def __post_init__(self) -> None:
         counts = (self.action_count, self.speed_action_count, self.stretch_action_count)
+        if any(type(value) is not int for value in counts):
+            raise TypeError("intervention counts must be exact non-bool integers")
         if any(value < 0 for value in counts):
             raise ValueError("intervention counts cannot be negative")
         if self.speed_action_count + self.stretch_action_count > self.action_count:
             raise ValueError("lever counts cannot exceed total action_count")
-        magnitudes = (self.total_speed_reduction_kts, self.total_stretch_added_distance_nm)
+        magnitudes = (
+            self.total_speed_reduction_kts,
+            self.total_stretch_added_distance_nm,
+        )
         if any(not np.isfinite(value) or value < 0.0 for value in magnitudes):
             raise ValueError("intervention magnitudes must be finite and non-negative")
 
-    def normalized_cost(self, config: OutcomeConfig) -> tuple[float, Mapping[str, float]]:
+    def difference(self, baseline: "InterventionSummary") -> "InterventionSummary":
+        """Return interventions added after a frozen cumulative baseline.
+
+        Both summaries describe cumulative trajectory lineage. A final branch
+        cannot contain fewer interventions, or less realized magnitude, than
+        the parent from which it was forked. Rejecting such a delta keeps a
+        mismatched outcome plan from silently reducing rollout parsimony.
+        """
+
+        if not isinstance(baseline, InterventionSummary):
+            raise TypeError("baseline must be an InterventionSummary")
+        values: dict[str, int | float] = {
+            "action_count": self.action_count - baseline.action_count,
+            "speed_action_count": self.speed_action_count - baseline.speed_action_count,
+            "total_speed_reduction_kts": (
+                self.total_speed_reduction_kts - baseline.total_speed_reduction_kts
+            ),
+            "stretch_action_count": self.stretch_action_count
+            - baseline.stretch_action_count,
+            "total_stretch_added_distance_nm": (
+                self.total_stretch_added_distance_nm
+                - baseline.total_stretch_added_distance_nm
+            ),
+        }
+        negative_fields = tuple(name for name, value in values.items() if value < 0)
+        if negative_fields:
+            raise ValueError(
+                "intervention summary has negative rollout deltas for "
+                + ", ".join(negative_fields)
+            )
+        return InterventionSummary(
+            action_count=int(values["action_count"]),
+            speed_action_count=int(values["speed_action_count"]),
+            total_speed_reduction_kts=float(values["total_speed_reduction_kts"]),
+            stretch_action_count=int(values["stretch_action_count"]),
+            total_stretch_added_distance_nm=float(
+                values["total_stretch_added_distance_nm"]
+            ),
+        )
+
+    def normalized_cost(
+        self, config: OutcomeConfig
+    ) -> tuple[float, Mapping[str, float]]:
         # Version 1 has at most two speed actions and one stretch: three total.
         count_component = float(np.clip(self.action_count / 3.0, 0.0, 1.0))
         speed_component = (
@@ -144,7 +202,9 @@ class InterventionSummary:
             if self.stretch_action_count
             else 0.0
         )
-        normalized = float((count_component + speed_component + stretch_component) / 3.0)
+        normalized = float(
+            (count_component + speed_component + stretch_component) / 3.0
+        )
         return normalized, {
             "count_component": count_component,
             "speed_magnitude_component": speed_component,
@@ -185,22 +245,50 @@ class SimulatorOutcomePlan:
     cohort: OutcomeCohort
     horizon_s: float
     baseline_crossing_times_s: tuple[tuple[str, float], ...]
+    root_dynamic_content_hash: str
+    baseline_intervention_summary: InterventionSummary = InterventionSummary()
+    root_time_s: float = 0.0
 
     def __post_init__(self) -> None:
+        if (
+            type(self.root_dynamic_content_hash) is not str
+            or not self.root_dynamic_content_hash
+            or self.root_dynamic_content_hash != self.root_dynamic_content_hash.strip()
+        ):
+            raise ValueError(
+                "outcome-plan root_dynamic_content_hash must be a non-empty exact string"
+            )
         if not np.isfinite(self.horizon_s):
             raise ValueError("outcome-plan horizon must be finite")
-        if tuple(flight_id for flight_id, _ in self.baseline_crossing_times_s) != self.cohort.ordered_flight_ids:
-            raise ValueError("baseline crossing order must match the frozen outcome cohort")
+        if not np.isfinite(self.root_time_s):
+            raise ValueError("outcome-plan root time must be finite")
+        if self.horizon_s < self.root_time_s - 1.0e-9:
+            raise ValueError("outcome-plan horizon cannot precede its root time")
+        if (
+            tuple(flight_id for flight_id, _ in self.baseline_crossing_times_s)
+            != self.cohort.ordered_flight_ids
+        ):
+            raise ValueError(
+                "baseline crossing order must match the frozen outcome cohort"
+            )
+        if not isinstance(self.baseline_intervention_summary, InterventionSummary):
+            raise TypeError(
+                "baseline_intervention_summary must be an InterventionSummary"
+            )
 
     @property
     def baseline_crossing_times(self) -> dict[str, float]:
         return dict(self.baseline_crossing_times_s)
 
 
-def _throughput_score(intervals_s: Sequence[float], *, required_s: float, normalizer_s: float) -> float:
+def _throughput_score(
+    intervals_s: Sequence[float], *, required_s: float, normalizer_s: float
+) -> float:
     if not intervals_s:
         return 0.0
-    inefficient_gaps = [max(0.0, float(interval) - required_s) for interval in intervals_s]
+    inefficient_gaps = [
+        max(0.0, float(interval) - required_s) for interval in intervals_s
+    ]
     mean_excess = float(np.mean(inefficient_gaps))
     return float(-np.clip(mean_excess / normalizer_s, 0.0, 1.0))
 
@@ -231,7 +319,9 @@ def score_semi_local_outcome(
     edges: list[EdgeOutcome] = []
     for leader_id, follower_id in cohort.evaluated_edges:
         interval = float(times[follower_id] - times[leader_id])
-        dynamically_feasible = bool(feasibility.get(leader_id, True) and feasibility.get(follower_id, True))
+        dynamically_feasible = bool(
+            feasibility.get(leader_id, True) and feasibility.get(follower_id, True)
+        )
         edges.append(
             EdgeOutcome(
                 leader_id=leader_id,
@@ -248,7 +338,9 @@ def score_semi_local_outcome(
 
     pair_score = float(edges[0].score)
     propagation_scores = [edge.score for edge in edges[1:]]
-    propagation_score = float(np.mean(propagation_scores)) if propagation_scores else 0.0
+    propagation_score = (
+        float(np.mean(propagation_scores)) if propagation_scores else 0.0
+    )
     summary = InterventionSummary() if intervention is None else intervention
     intervention_penalty, intervention_components = summary.normalized_cost(cfg)
     throughput_score = _throughput_score(
@@ -263,9 +355,7 @@ def score_semi_local_outcome(
     throughput_term = float(cfg.throughput_weight * throughput_score)
     score = float(pair_term + propagation_term + intervention_term + throughput_term)
     effective_horizon = (
-        rollout_horizon_s(times, cohort)
-        if horizon_s is None
-        else float(horizon_s)
+        rollout_horizon_s(times, cohort) if horizon_s is None else float(horizon_s)
     )
     if not np.isfinite(effective_horizon):
         raise ValueError("horizon_s must be finite")
@@ -298,7 +388,9 @@ def score_semi_local_outcome(
 class OutcomeQuery(Protocol):
     """Canonical branch query needed by the scorer adapter."""
 
-    def crossing_time_s(self, state: Any, flight_id: str, resource_id: str) -> float: ...
+    def crossing_time_s(
+        self, state: Any, flight_id: str, resource_id: str
+    ) -> float: ...
 
     def completed_feasibly(self, state: Any, flight_id: str) -> bool: ...
 
@@ -351,7 +443,9 @@ def simulator_outcome_plan(
         resource_id=anchor.resource_id,
     )
     if anchor.anchor_id not in {item.anchor_id for item in anchors.leader_follower}:
-        raise StaleActionError("outcome anchor is stale for the current threshold ordering")
+        raise StaleActionError(
+            "outcome anchor is stale for the current threshold ordering"
+        )
     resource = simulator.state.definition.resource(anchor.resource_id)
     cohort = freeze_outcome_cohort(
         anchor,
@@ -371,6 +465,9 @@ def simulator_outcome_plan(
         cohort=cohort,
         horizon_s=horizon,
         baseline_crossing_times_s=crossing_pairs,
+        root_dynamic_content_hash=str(simulator.dynamic_content_hash),
+        baseline_intervention_summary=simulator_intervention_summary(simulator),
+        root_time_s=float(simulator.state.sim_time_s),
     )
 
 
@@ -389,7 +486,9 @@ def simulator_intervention_summary(simulator: Any) -> InterventionSummary:
         variant = definition.variant(dynamic.current_variant_id)
         visited: set[str] = set()
         while True:
-            variant_id = str(getattr(variant, "variant_id", getattr(variant, "content_hash", "")))
+            variant_id = str(
+                getattr(variant, "variant_id", getattr(variant, "content_hash", ""))
+            )
             if variant_id in visited:
                 raise ValueError("trajectory action provenance contains a cycle")
             visited.add(variant_id)
@@ -400,11 +499,16 @@ def simulator_intervention_summary(simulator: Any) -> InterventionSummary:
             if lever == "speed":
                 action_count += 1
                 speed_count += 1
-                speed_reduction_kts += float(getattr(provenance, "speed_reduction_mps", 0.0)) / MPS_PER_KNOT
+                speed_reduction_kts += (
+                    float(getattr(provenance, "speed_reduction_mps", 0.0))
+                    / MPS_PER_KNOT
+                )
             elif lever == "path_stretch":
                 action_count += 1
                 stretch_count += 1
-                stretch_distance_nm += float(getattr(provenance, "added_distance_m", 0.0)) / M_PER_NM
+                stretch_distance_nm += (
+                    float(getattr(provenance, "added_distance_m", 0.0)) / M_PER_NM
+                )
             parent_variant_id = getattr(provenance, "parent_variant_id", None)
             if not parent_variant_id:
                 break
@@ -420,30 +524,88 @@ def simulator_intervention_summary(simulator: Any) -> InterventionSummary:
 
 def score_simulator_outcome(
     simulator: Any,
-    cohort: OutcomeCohort,
+    cohort: OutcomeCohort | SimulatorOutcomePlan | None = None,
     *,
+    outcome_plan: SimulatorOutcomePlan | None = None,
+    baseline_intervention_summary: InterventionSummary | None = None,
     config: OutcomeConfig | None = None,
     horizon_s: float | None = None,
 ) -> SemiLocalOutcome:
-    """Score a realized branch through its canonical current variants."""
+    """Score a realized branch through its canonical current variants.
+
+    Passing an outcome plan (either positionally or by keyword) subtracts its
+    root intervention baseline before applying the parsimony term. Passing an
+    OutcomeCohort retains the original cumulative-scoring behavior unless an
+    explicit baseline intervention summary is supplied.
+    """
 
     from hailmary.features.anchors import resource_eta_s
 
+    positional_plan = cohort if isinstance(cohort, SimulatorOutcomePlan) else None
+    if positional_plan is not None:
+        if outcome_plan is not None and outcome_plan != positional_plan:
+            raise ValueError("conflicting positional and keyword outcome plans")
+        outcome_plan = positional_plan
+        cohort = None
+    if outcome_plan is not None:
+        from hailmary.rollout.paired import dynamic_content_fingerprint
+
+        if cohort is not None and cohort != outcome_plan.cohort:
+            raise ValueError("outcome cohort conflicts with the frozen outcome plan")
+        fork_origin_hash = getattr(
+            simulator,
+            "fork_origin_dynamic_content_hash",
+            None,
+        )
+        scored_root_hash = fork_origin_hash or dynamic_content_fingerprint(simulator)
+        if (
+            type(scored_root_hash) is not str
+            or scored_root_hash != outcome_plan.root_dynamic_content_hash
+        ):
+            raise ValueError(
+                "outcome plan root dynamic-content hash does not match the scored branch root"
+            )
+        resolved_cohort = outcome_plan.cohort
+        if (
+            baseline_intervention_summary is not None
+            and baseline_intervention_summary
+            != outcome_plan.baseline_intervention_summary
+        ):
+            raise ValueError(
+                "intervention baseline conflicts with the frozen outcome plan"
+            )
+        baseline_intervention_summary = outcome_plan.baseline_intervention_summary
+        if horizon_s is not None and not np.isclose(
+            float(horizon_s),
+            outcome_plan.horizon_s,
+            rtol=0.0,
+            atol=1.0e-9,
+        ):
+            raise ValueError("outcome horizon conflicts with the frozen outcome plan")
+        horizon_s = outcome_plan.horizon_s
+    else:
+        if cohort is None:
+            raise TypeError("provide an outcome cohort or outcome plan")
+        resolved_cohort = cohort
+
     crossing_times = {
-        flight_id: resource_eta_s(simulator, flight_id, cohort.resource_id)
-        for flight_id in cohort.ordered_flight_ids
+        flight_id: resource_eta_s(simulator, flight_id, resolved_cohort.resource_id)
+        for flight_id in resolved_cohort.ordered_flight_ids
     }
     feasibility: dict[str, bool] = {}
-    for flight_id in cohort.ordered_flight_ids:
+    for flight_id in resolved_cohort.ordered_flight_ids:
         dynamic = simulator.state.flight(flight_id)
         variant = simulator.state.definition.variant(dynamic.current_variant_id)
         diagnostics = getattr(variant, "diagnostics", None)
         feasibility[flight_id] = bool(getattr(diagnostics, "feasible", True))
+    intervention = simulator_intervention_summary(simulator)
+    if baseline_intervention_summary is not None:
+        intervention = intervention.difference(baseline_intervention_summary)
     return score_semi_local_outcome(
-        cohort,
+        resolved_cohort,
         crossing_times_s=crossing_times,
         feasible_by_flight=feasibility,
-        intervention=simulator_intervention_summary(simulator),
+        intervention=intervention,
         config=config,
         horizon_s=horizon_s,
     )

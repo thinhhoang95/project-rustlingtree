@@ -114,7 +114,7 @@ The Tier 2/3 library is also, deliberately, the operationalization of the contro
 
 ### 8. The action interface: (anchor, lever, band)
 
-SEQD does not steer aircraft. It emits an **abstract intervention tuple** and hands it to a lower-level realization layer (SEQP) that owns the geometry:
+Phase 0 learns the physical macro-actions already exposed by Hailmary. It emits a bound action identity and hands that identity to the shared realization layer:
 
 ```
 tuple = (anchor, lever, band)
@@ -122,18 +122,18 @@ tuple = (anchor, lever, band)
 anchor:  a node or edge in the graph, provisionally bound when a rule matches
          and finally bound only if that anchor–action candidate is selected
          for execution (see §9) —
-         e.g. "the follower of this leader–follower edge",
-         "this flow", "this region near merge point M"
-lever:   one of { speed, stretch, hold, swap, meter-upstream, no-op }
-band:    a coarse magnitude — e.g. "absorb ~0–1.5 min", "absorb ~2–4 min",
-         "stretch within ~4 nm, headings 220–230"
+         currently "the follower of this leader–follower edge"
+lever:   one of { speed, path_stretch, no_op }
+band:    one of { light, medium, heavy, oracle_short_medium_long, no_op }
 ```
 
-SEQP consumes the tuple plus concrete geometry, realizes a legal maneuver (or reports infeasibility), and rolls the simulator to the next epoch. The division of labor is the whole point of the interface: heuristics live at the tuple level; geometry lives below it.
+The three speed bands are physical command reductions of 10, 15, and 20 kt. They are not promises to absorb fixed amounts of time: the realized delay depends on the remaining route and speed envelope. Path stretch is one learner-visible macro-action. Its realization layer evaluates the existing short, medium, and long geometries and logs the winning geometry and all candidate scores. The geometry-only selector remains an explicit ablation.
 
-`no-op` is a first-class lever during learning, but it has different deployment semantics from an action. A certified no-op rule becomes a **scoped veto**: wherever its condition matches, action at that anchor is suppressed. This makes prohibitions ("don't touch the sequence near final") explicit, storable, reportable, and enforceable (§9.6).
+All simulators—real, forked rollout arms, resumed checkpoints, and deployment—use the same frozen action runtime. Thus an action identity has one physical meaning everywhere. Unsupported operational actions such as swap, hold, and meter-upstream are outside the current scientific claim rather than silently represented by approximate substitutes.
 
-A practical warning about bands that shapes the staging plan: every distinct `(lever, band)` pair is a separate action for credit purposes, so bands **split the effect-estimation data**. Start with two coarse bands per lever, and treat band refinement as a specialization operator applied only to rules whose effect estimate is already confidently positive (§13).
+`no_op` is a first-class identity during learning, but it has different deployment semantics from an action. A certified no-op rule becomes a **scoped veto**: wherever its condition matches, action at that anchor is suppressed. This makes prohibitions ("don't touch the sequence near final") explicit, storable, reportable, and enforceable (§9.6).
+
+The exact vocabulary is therefore `no_op/no_op`, `speed/light`, `speed/medium`, `speed/heavy`, and `path_stretch/oracle_short_medium_long`. It is serialized and content-hashed from the action catalog configuration. Every distinct identity remains a separate action for credit purposes.
 
 ### 9. Rules and role-centric matching
 
@@ -150,7 +150,7 @@ RULE r_17   (role: leader–follower edge, anchored on follower)
   IF    spacing_deviation(L,F)@merge   ∈ [-300 s, -90 s]        # large compression
     AND required_delay / path_capacity ∈ [0.0, 0.8]             # stretch can absorb it
     AND time_to_final(F)               ∈ [8 min, ∞)             # not yet committed
-  THEN  (anchor = F, lever = stretch, band = absorb 2–4 min)
+  THEN  (anchor = F, lever = path_stretch, band = oracle_short_medium_long)
   EVOLUTION  Δ̄_rival = +0.30, σ²_rival = 0.15, n_rival = 71
   DEPLOYMENT Δ̄_noop  = +0.42, σ²_noop  = 0.11, n_noop  = 63
   TRAINING   numerosity = 4
@@ -197,7 +197,7 @@ A no-op rule's advocated action is the grounding baseline, so its no-op-grounded
 
 Because a veto is a strong operator, it uses the stricter certification bar above and receives an over-generality audit. For every certified veto, report its firing fraction and the mean `Q` of the actions it suppressed. A rule that fires broadly while suppressing high-`Q` actions is an over-general rule the GA failed to specialize, not a heuristic.
 
-Encoding A (§15) is consequently executable as well as reportable. Comparing its veto region with Encoding B's swap-survival frontier checks whether an active and a passive prohibition mechanism agree.
+Encoding A (§15) is consequently executable as well as reportable. Comparing its veto region with the survival frontier of the existing speed and path-stretch rules checks whether active and passive prohibition evidence agree.
 
 ---
 
@@ -215,7 +215,7 @@ At each event-driven epoch *t*:
 
 **Step 3 — Select at most one intervention for this epoch.** The root behavior policy is the current frozen `π_dep,t = π_deploy(certify(P_snapshot))` (§9.5), augmented by exploration and covering. On exploit steps it computes the deployed precision-pooled `Q` scores and applies the same veto and global arbitration rules as deployment; on explore steps the region scheduler may choose a different advocated action, including one from an uncertified covering rule. Every nonwinning candidate remains unexecuted. The three-arm rollout evaluates the selected pair and supplies learning samples; it does not retroactively replace the selected action when another arm scores better. Simultaneous multi-anchor interventions are a Phase 2 extension because they entangle credit.
 
-**Exploration is region-scheduled, not merely time-annealed.** Maintain visitation counts over a coarse discretization of the concept axes that matter for the target heuristics — commitment band × pressure band × error-magnitude band is enough to start. Boost exploration probability in undersampled cells, and do not anneal exploration in a cell before it has minimum coverage. The reason is concrete: the agent can only learn "don't swap near final" by *executing late swaps and getting burned*, and a naive time-annealed schedule typically stops exploring before the rare high-commitment region has been sampled. Dangerous exploration is fine — this is a simulator — but it must actually happen.
+**Exploration is region-scheduled, not merely time-annealed.** Maintain visitation counts over a coarse discretization of the concept axes that matter for the target heuristics — commitment band × pressure band × error-magnitude band is enough to start. Boost exploration probability in undersampled cells, and do not anneal exploration in a cell before it has minimum coverage. The reason is concrete: the agent can only learn "do not intervene near final" by *executing late speed or path-stretch actions and observing their cost*, and a naive time-annealed schedule typically stops exploring before the rare high-commitment region has been sampled. Dangerous exploration is fine — this is a simulator — but it must actually happen.
 
 This root off-policy-ness is intended. Exploration and covering change which states are sampled and therefore how a rule's effect is averaged over its condition region. For heuristic discovery that breadth is desirable: a rule should hold across its full region, not only where the current controller visits. This differs from off-policy continuation in Step 5, which would change the quantity being estimated and is therefore a bug.
 
@@ -324,7 +324,7 @@ y = w₁ · pair term:        spacing outcome of (L,F) at the shared resource �
 
 Defaults to start: k = 3, H = the k-th trailer's threshold crossing plus one slot, w₁ : w₂ : w₃ : w₄ ≈ 1 : 1 : 0.3 : 0.1.
 
-**The separation penalty must be graded, not catastrophic.** Score margin erosion piecewise (full margin → partial erosion → violation → go-around) rather than as a single huge negative constant. With a cliff penalty, Δ samples in risky regions are all-or-nothing and their variance swamps the estimator; with a graded score, "this swap ate 40% of the trailing pair's margin" is a smooth, learnable signal that points in the same direction as the rare disaster. (Fuel, workload-as-entropy, and monitorability terms remain deliberately dropped from the outcome — they dilute the credit signal and are second-paper material. Parsimony stays because it is the pressure toward sparse, controller-like intervention patterns.)
+**The separation penalty must be graded, not catastrophic.** Score margin erosion piecewise (full margin → partial erosion → violation → go-around) rather than as a single huge negative constant. With a cliff penalty, Δ samples in risky regions are all-or-nothing and their variance swamps the estimator; with a graded score, "this late intervention ate 40% of the trailing pair's margin" is a smooth, learnable signal that points in the same direction as the rare disaster. (Fuel, workload-as-entropy, and monitorability terms remain deliberately dropped from the outcome — they dilute the credit signal and are second-paper material. Parsimony stays because it is the pressure toward sparse, controller-like intervention patterns.)
 
 ---
 
@@ -352,43 +352,44 @@ These traces are the proof-of-concept in prose: one positive action rule and one
 
 ### 14. Trace 1 — "Small error → speed, large error → path"
 
-**Target.** The delay-absorption heuristic decomposes into two rules over a leader–follower pair, anchored on the follower:
+**Target.** The delay-absorption heuristic decomposes into exact-identity rules over a leader–follower pair, anchored on the follower:
 
 ```
-R_speed:  spacing_deviation ∈ [−90 s, 0)  ∧  required_delay/speed_capacity ≤ 1
-          ⇒ (F, speed, absorb 0–1.5 min)
+For each b ∈ {light, medium, heavy}:
+R_speed,b: spacing_deviation ∈ [−90 s, 0)  ∧  required_delay/speed_capacity ≤ 1
+           ⇒ (F, speed, b)
 R_path:   spacing_deviation ∈ [−300 s, −90 s)  ∧  required_delay/path_capacity ≤ 1
-          ⇒ (F, stretch, absorb 2–4 min)
+          ⇒ (F, path_stretch, oracle_short_medium_long)
 ```
 
-Both conditions are single intervals on Tier 3 ratios plus one on the raw deviation — expressible as *one rule each* only because the ratio library exists (§7). Without Tier 3, the same causal content shatters into a tiling of boxes over (deviation × track-miles × speed-margin) space.
+Each condition is a single interval region on Tier 3 ratios plus one on the raw deviation — one macro-rule per exact action identity because learned rules never contain union bands. Without Tier 3, the same causal content shatters into a tiling of boxes over (deviation × track-miles × speed-margin) space.
 
 **A learning event, concretely.** Epoch t: pair (L, F), predicted deviation −60 s at the merge, F has speed capacity ≈ 90 s. The match set contains `R_speed`, a stretch rival, and a no-op rule. Exploration picks speed; the strongest certified rival is stretch. Under the same frozen `π_dep,t`, Arm A (speed) yields `y_A ≈ +0.8`, Arm B (stretch) yields `y_B ≈ +0.4`, and Arm C (no-op) leaves compression and yields `y_C ≈ −0.4`. Thus `Delta_rival = +0.4` drives evolution, while `Delta_noop(speed) = +1.2` supplies `R_speed`'s deployment ledger and eventual shipped score. The stretch advocates also receive the free no-op-grounded sample `+0.8`. The downstream correction's advocate receives no root update. All arms are discarded and only the initial speed action is applied in reality. Over many events, rival-ledger LCBs guide specialization while no-op-ledger means and precision determine which action rules certify and how they arbitrate at deployment.
 
 **The confound test.** The natural confounder of "error is small" is "close to final" (small errors are usually *detected* late under naturalistic traffic, so the two co-occur). A confounded rule `distance_to_final < θ ⇒ speed` predicts success well observationally. The generator's registered decorrelation produces late-detected *large* errors; the confounded rule is eligible there and, when its speed candidate is selected, speed fails to absorb the error, the pair term of y_A goes negative, and the rule inherits negative Δ samples it cannot escape. It dies not because it predicted badly — it predicted fine on the naturalistic majority — but because its advocated action performed badly where its predicate and the true cause came apart. That sentence is the entire epistemic difference from accuracy-based fitness and from distillation, exhibited on one rule.
 
-**Expected artifact.** Two surviving rules whose load-bearing predicates are the slack-ratio features — i.e., the *slack* concept, emerged and certified. The vanilla-XCS baseline run on identical experience is predicted to retain the distance-to-final confound; that contrast is the Phase 0 headline figure.
+**Expected artifact.** A surviving exact speed-band rule family and path-stretch macro rule whose load-bearing predicates are the slack-ratio features — i.e., the *slack* concept, emerged and certified. The vanilla-XCS baseline run on identical experience is predicted to retain the distance-to-final confound; that contrast is the Phase 0 headline figure.
 
 ### 15. Trace 2 — "Freeze the sequence near final"
 
-**Target.** A prohibition: when commitment is high, do not reorder (and mostly do not act). Two encodings exist, and the framework should produce **both** and show they coincide:
+**Target.** A prohibition: when commitment is high, avoid unnecessary speed or path interventions. Two encodings exist, and the framework should produce **both** and show they coincide:
 
 ```
 Encoding A (explicit rule):
   time_to_final < θ  ∧  intercept_established  ∧  path_freedom low
-  ⇒ (—, no-op, —)
+  ⇒ (—, no_op, no_op)
 Encoding B (population boundary):
-  swap-advocating rules simply fail to survive in the high-commitment
-  region; the heuristic is the survival frontier of the swap population.
+  action rules fail to survive in the high-commitment region;
+  the heuristic is the survival frontier of the physical-action population.
 ```
 
-**Why deployment needs veto semantics.** A no-op rule has zero advantage over the no-op grounding baseline, so it cannot act as a scored advocate. Its evidence instead asks whether no-op beat the best proposed action. When that rival-grounded estimate passes the stricter veto gate, the rule ships as a scoped veto. The framework can therefore represent the profession's most characteristic heuristic both actively (Encoding A suppresses action) and passively (Encoding B is the missing swap-survival region).
+**Why deployment needs veto semantics.** A no-op rule has zero advantage over the no-op grounding baseline, so it cannot act as a scored advocate. Its evidence instead asks whether no-op beat the best proposed action. When that rival-grounded estimate passes the stricter veto gate, the rule ships as a scoped veto. The framework can therefore represent the heuristic both actively (Encoding A suppresses action) and passively (Encoding B is the missing physical-action survival region).
 
-**Why the effect is detectable.** A late swap's damage is a chain effect: the swapped pair compresses, the compression propagates rearward, and the cost lands on the third and fourth aircraft in trail, tens of seconds later. Three pieces of the design earn their keep simultaneously here. The *windowed multi-aircraft outcome* (k ≥ 3) is what sees the damage at all — a pair-only outcome frequently scores a late swap as fine while the trailers eat the go-around risk. The *shared-seed three-arm rollout* supplies the blocking intervention and permanent no-op ground; cascade-identifiability results warrant that this comparison recovers structure observational scoring cannot. And *graded margin scoring* turns "this swap consumed 40% of the trailing pair's margin" into a smooth signal aligned with the rare catastrophe.
+**Why the effect is detectable.** A late slowdown or stretch can move the bound aircraft while compressing a trailing edge, so the cost lands on the third and fourth aircraft in trail seconds to minutes later. The *windowed multi-aircraft outcome* (k ≥ 3) sees that damage, the *shared-seed three-arm rollout* compares the physical action with its strongest rival and a root no-op under the same frozen continuation policy, and *graded margin scoring* turns partial margin erosion into a smooth signal aligned with the rare catastrophe.
 
-**A learning event.** High-commitment epoch: F is established on intercept, 4 min to threshold, and a tempting reorder is available. Region-scheduled exploration selects swap. With no certified non-no-op rival, Arm B is no-op and therefore coincides with Arm C. Under frozen `π_dep,t`, swap produces `y_A ≈ −0.9`; no-op produces `y_B = y_C ≈ +0.1`. The swap advocates receive `Delta_rival = −1.0` in evolution and `Delta_noop = −1.0` in deployment. Matching no-op rules receive `Delta_veto = +1.0` in their rival ledgers. Repeated evidence pushes swap rules out of this region and can certify the explicit no-op rule as a veto. Encoding A is therefore storable, reportable, **and enforceable**; agreement between its veto region and Encoding B's swap-survival frontier is an internal-validity check between active and passive mechanisms.
+**A learning event.** High-commitment epoch: F is established on intercept, 4 min to threshold, and a heavy slowdown is still technically feasible. Region-scheduled exploration selects `speed/heavy`. With no certified non-no-op rival, Arm B is no-op and therefore coincides with Arm C. Under frozen `π_dep,t`, the slowdown produces `y_A ≈ −0.9`; no-op produces `y_B = y_C ≈ +0.1`. Heavy-speed advocates receive `Delta_rival = −1.0` in evolution and `Delta_noop = −1.0` in deployment. By the fixed `Delta_veto = y_C - max(y_A, y_B)` definition, matching no-op rules receive `0.0` here because Arm B already is the no-op baseline. Veto evidence is produced when a distinct physical rival is present, for example when no-op is selected and speed is Arm B. Repeated evidence specializes action rules away from this region; repeated distinct-rival evidence can certify the explicit no-op rule as a veto.
 
-**The confound test.** High commitment co-occurs naturally with high pressure (streams get committed *because* they are built under demand). A correlational learner therefore tends to learn `pressure high ⇒ don't swap` — which is wrong: under *low* commitment, swapping under pressure is often exactly right ("insert into a gap"). The registered decorrelation produces high-commitment/low-pressure and low-commitment/high-pressure situations; interventionally, swaps in the second quadrant show *positive* Δ, so the pressure predicate cannot survive in the prohibition, while the commitment signature (time-to-final × path freedom × established geometry — the *commitment* concept) can and does.
+**The confound test.** High commitment co-occurs naturally with high pressure. A correlational learner therefore tends to learn `pressure high ⇒ no intervention`, which is wrong when a low-commitment aircraft still has useful speed or path capacity. Registered high-commitment/low-pressure and low-commitment/high-pressure cases let the action deltas remove pressure from the prohibition while retaining the commitment signature.
 
 ---
 
@@ -412,11 +413,11 @@ The north star is "the learned concepts are real and the shipped controller is t
 
 ### 17. The staged plan
 
-**Phase 0 — one pair, three actions (weeks, not months).** A single leader–follower pair on a simple merge geometry; levers {speed, stretch, no-op}, two bands; the H1 decorrelation registered and audited. Deliver both the learned population and the certified rulebook, and pass the deployment-consistency check. Success: H1 recovered as no more than three rules whose load-bearing predicates are slack ratios, while vanilla XCS on the same runs keeps the confound. Every later phase inherits the three-arm rollout, two ledgers, frozen continuation, windowed outcome, and audit.
+**Phase 0 — one pair, the five Hailmary action identities (weeks, not months).** A single leader–follower pair on a simple merge geometry; actions {`no_op/no_op`, three physical speed bands, one path-stretch macro}; the H1 decorrelation registered and audited. Deliver both the learned population and the certified rulebook, and pass the deployment-consistency check. Success: H1 is recovered in compact rules whose load-bearing predicates are capacity ratios, while vanilla XCS on the same runs keeps the confound. Every later phase inherits the three-arm rollout, two ledgers, frozen continuation, windowed outcome, and audit.
 
-**Phase 1 — three-aircraft chain, add {swap}.** Add the executable veto mechanism and its over-generality audit. Target H2 by both encodings, plus agreement between the veto region and swap-survival frontier; the distillation baseline should expose the pressure confound. Validate region-scheduled exploration by measuring high-commitment sampling density with and without it.
+**Phase 1 — three-aircraft chain, same action vocabulary.** Exercise the executable veto mechanism and its over-generality audit without introducing a new realization contract. Validate propagation credit and region-scheduled exploration by measuring high-commitment sampling density with and without it.
 
-**Phase 2 — full distribution.** Remaining levers ({hold, meter-upstream}), three bands per lever via the refinement operator, hyperedge conditions (conjunctions across multiple node types) enabled, the full concept-correspondence table, and the generalization evaluation. Multi-anchor simultaneous interventions and oblique predicates remain listed as extensions beyond even this phase.
+**Phase 2 — full distribution, same action vocabulary.** Scale scenarios, population size, persistence, and generalization evaluation while retaining the five audited identities. New levers, multi-anchor simultaneous interventions, flow/resource learning vectors, and oblique predicates remain separately scoped extensions.
 
 ### 18. Failure modes and their designed answers
 
@@ -426,11 +427,11 @@ The north star is "the learned concepts are real and the shipped controller is t
 | Concept fragmentation | Many small same-action rules tiling a diagonal | Tier 3 ratio features (§7); phase-2 oblique predicates |
 | Confound survives | Registered pair predicate persists in rules | Generator audit failed — fix decorrelation, retrain (§13) |
 | Prohibitions unlearnable | No certified vetoes where freezing is right | Verify `Delta_veto` credit and the stricter veto gate (§9.6, §10.6) |
-| Exploration dies early | High-commitment cells unsampled; no late-swap data | Region-scheduled exploration with per-cell coverage floors (§10.3) |
+| Exploration dies early | High-commitment cells unsampled; no late-action data | Region-scheduled exploration with per-cell coverage floors (§10.3) |
 | Lucky junk reproduces | Volatile population, young rules breeding | Select on LCB, not mean; raise z; raise GA experience threshold (§11) |
 | Over-general credit harvesting | Broad rule with bimodal Δ samples | Generator coverage of full condition region + specialization pressure (§11) |
 | Cliff-penalty variance | Δ variance explodes near separation limits | Graded margin scoring, not catastrophic constants (§12) |
-| Band data starvation | Per-(lever,band) n too small | Two coarse bands to start; refine only confident rules (§8, §17) |
+| Band data starvation | Per-(lever,band) n too small | Keep the fixed three speed bands and one path-stretch macro; do not add bands (§8, §17) |
 | Fitness drift | Rival-grounded effects shrink as the population improves | Expected and benign; bound target-policy drift with snapshot interval N (§10.5) |
 | Train/deploy mismatch | Rulebook underperforms the training behavior policy | Rollout continuation = frozen `π_deploy(certify(P_t))` (§10.5) |
 | Junk acting inside rollouts | High Δ variance; young rules win continuation arbitration | Apply certification to the rollout snapshot, not only export (§10.5) |
@@ -440,20 +441,20 @@ The north star is "the learned concepts are real and the shipped controller is t
 
 | Parameter | Starting value |
 |---|---:|
-| Population size | 1,000–2,000 in Phase 0; increase by phase |
-| Online-statistics learning rate β | 0.1–0.2 |
+| Population size | 1,000 in Phase 0; increase by phase |
+| Online statistics | Exact Welford updates; no learning-rate β |
 | GA-selection LCB z | 1.0 exploratory; up to 1.96 for reproduction eligibility |
-| GA experience threshold | ≈20 rival-grounded samples |
+| GA experience threshold | 20 rival-grounded samples |
 | Action-rule certification | `n_min = 30` no-op-grounded samples and LCB > 0 |
 | Veto certification | `n_min_veto = 60` rival-grounded samples and LCB > 0 |
 | Certification z | 1.96 |
-| Deployment snapshot refresh N | ≈500 real epochs |
+| Deployment snapshot refresh N | 500 real epochs |
 | Trailers k | 3 |
 | Horizon H | k-th trailer's threshold crossing + one slot |
 | Outcome weights | 1 : 1 : 0.3 : 0.1 |
-| Bands | 2 per lever initially |
+| Action identities | no-op, three speed bands, one path-stretch macro |
 | Decorrelation audit | `abs(rho) <= 0.3` |
-| Exploration coverage floor | ≈200 visits per registered concept-axis cell |
+| Exploration coverage floor | 200 visits per registered concept-axis cell |
 | No-op re-grounding fraction | obsolete; Arm C runs every epoch |
 
 ### 20. What was deliberately dropped, and the open questions that remain
@@ -500,7 +501,7 @@ Genuinely open after the revisions, in rough order of risk: the constants of the
 
 **LCB** — lower confidence bound used for certification and GA selection; never an inference-time score.
 
-**Lever** — speed, stretch, hold, swap, meter-upstream, or no-op.
+**Lever** — in the current implementation, speed, path stretch, or no-op.
 
 **Match set** — rules whose conditions hold at one candidate anchor; membership means eligibility, not execution.
 
@@ -553,10 +554,10 @@ Before this epoch, the latest slow-timescale certification pass produced this re
 
 ```
 r_A: deviation [-90 s, 0), speed ratio [0, 1.0]
-     -> speed 0-1.5 min; ships with w = 0.62, F = 160
+     -> speed/light; ships with w = 0.62, F = 160
 
 r_B: deviation [-300 s, -60 s), path ratio [0, 1.0]
-     -> stretch 2-4 min; ships with w = 0.55, F = 56
+     -> path_stretch/oracle_short_medium_long; ships with w = 0.55, F = 56
 
 r_C: time_to_final < 5 min and intercept_established
      -> VETO
@@ -570,10 +571,10 @@ r_C: time_to_final < 5 min and intercept_established
 
 ```
 Q(anchor 1, speed)   = (0.62 * 160) / 160 = +0.62
-Q(anchor 1, stretch) = (0.55 *  56) /  56 = +0.55
+Q(anchor 1, path_stretch/oracle_short_medium_long) = (0.55 * 56) / 56 = +0.55
 ```
 
-The global argmax selects speed at Anchor 1 because `+0.62 > 0`. SEQP receives `(UAL88, speed, 0–1.5 min)`. Only one action fires. A positive candidate on Anchor 2 would be deferred and recomputed at the next event. Deployment has used no exploration, covering, contender, rollout, LCB, or update.
+The global argmax selects speed at Anchor 1 because `+0.62 > 0`. The runtime receives `(UAL88, speed, light)`; its realized delay is audited rather than assumed from the band name. Only one action fires. A positive candidate on Anchor 2 would be deferred and recomputed at the next event. Deployment has used no exploration, covering, contender, rollout, LCB, or update.
 
 For contrast, suppose the next event is DAL34 at 4 minutes to final with intercept established. If `r_A` and `r_C` both match there, `r_C` vetoes the anchor before global arbitration. The `+0.62` speed score is suppressed and the controller chooses no-op. The veto is operational, not decorative.
 
@@ -581,17 +582,17 @@ For contrast, suppose the next event is DAL34 at 4 minutes to final with interce
 
 Training begins from the same original state and includes the deployment path, then adds experimentation and learning.
 
-**Step 2T — Match the whole population and cover.** Suppose Anchor 2 lacks a hold advocate. Covering mints `r_cov112` with widened intervals and zeroed ledgers. It can accumulate evidence at the root, but with `n = 0` it is uncertified and cannot act in deployment or inside rollout continuation.
+**Step 2T — Match the whole population and cover.** Suppose Anchor 2 lacks a `speed/medium` advocate. Covering mints `r_cov112` with widened intervals and zeroed ledgers. It can accumulate evidence at the root, but with `n = 0` it is uncertified and cannot act in deployment or inside rollout continuation.
 
-**Step 3T — Explore or exploit.** The region cell `(low commitment, moderate pressure, medium error)` has 640 visits, above its floor of 200, so this epoch exploits and chooses speed as deployment did. In an undersampled cell, exploration could choose stretch, hold, or an uncertified covering rule. That root experiment is intentional; none of those privileges carries into continuation.
+**Step 3T — Explore or exploit.** The region cell `(low commitment, moderate pressure, medium error)` has 640 visits, above its floor of 200, so this epoch exploits and chooses speed as deployment did. In an undersampled cell, exploration could choose any feasible speed band, the path-stretch macro, no-op, or an uncertified covering rule. That root experiment is intentional; none of those privileges carries into continuation.
 
-**Step 4T — Choose the contender.** Among certified non-speed advocates at Anchor 1, `r_B` has the strongest rival-ledger LCB, so `c = stretch`. The contender is local to Anchor 1 and is used only as Arm B's first action.
+**Step 4T — Choose the contender.** Among certified non-speed advocates at Anchor 1, `r_B` has the strongest frozen rival-ledger LCB, so `c = path_stretch/oracle_short_medium_long`. The contender is local to Anchor 1 and is used only as Arm B's first action.
 
 **Step 5T — Run three same-seed arms.** Use the already frozen `π_dep,t`, not the raw population. Fork from 12:02:10 with identical pending events and roll to JBU77's threshold crossing plus one slot, about 12 simulated minutes:
 
 ```
 Arm A  speed   -> clean pair, no later correction                    y_A = +1.49
-Arm B  stretch -> geometry disturbs DAL34; pi_dep,t later corrects   y_B = +0.82
+Arm B  path_stretch -> geometry disturbs DAL34; pi_dep,t corrects    y_B = +0.82
 Arm C  no-op   -> compression persists; late large correction        y_C = +0.11
 ```
 
@@ -606,7 +607,7 @@ Delta_noop(c)  = y_B - y_C           = +0.71
 Delta_veto     = y_C - max(y_A,y_B)  = -1.38
 ```
 
-Consequently, every speed advocate at Anchor 1 receives `+0.67` in its evolution ledger and `+1.38` in its deployment ledger. Every stretch advocate receives `−0.67` in evolution and `+0.71` in deployment. Both facts can be true: stretch lost to speed but still beat doing nothing. Any matching no-op rule receives `−1.38` in its rival/veto ledger, evidence that a prohibition does not belong in this region. Rules that acted only during continuation receive no update.
+Consequently, every selected speed advocate at Anchor 1 receives `+0.67` in its evolution ledger and `+1.38` in its deployment ledger. Every path-stretch macro advocate receives `−0.67` in evolution and `+0.71` in deployment. Both facts can be true: path stretch lost to speed but still beat doing nothing. Any matching no-op rule receives `−1.38` in its rival/veto ledger, evidence that a prohibition does not belong in this region. Rules that acted only during continuation receive no update.
 
 A representative online update is:
 

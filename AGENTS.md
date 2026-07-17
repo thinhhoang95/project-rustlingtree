@@ -1,1 +1,1 @@
-Use this Python interpeter: `/op/Users/thinhhoang/miniforge3/envs/rustlingtree/bin/python`
+Use this Python interpreter: `/home/hoang/miniforge3/envs/summerheat/bin/python3.14`

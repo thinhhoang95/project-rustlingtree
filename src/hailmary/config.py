@@ -7,6 +7,7 @@ serialized into artifacts, so experiments never depend on hidden constants.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from .errors import ConfigurationError
 
@@ -14,8 +15,17 @@ M_PER_NM = 1_852.0
 MPS_PER_KNOT = 0.514444
 
 
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
 def _positive(values: tuple[float, ...], *, name: str) -> None:
-    if not values or any(value <= 0.0 for value in values):
+    if not values or any(not _finite_number(value) or value <= 0.0 for value in values):
         raise ConfigurationError(f"{name} must contain positive values")
 
 
@@ -37,7 +47,9 @@ class HDBSCANScoreConfig:
             self.fragmentation_weight,
         )
         if any(weight < 0.0 for weight in weights) or sum(weights) <= 0.0:
-            raise ConfigurationError("HDBSCAN score weights must be non-negative with a positive sum")
+            raise ConfigurationError(
+                "HDBSCAN score weights must be non-negative with a positive sum"
+            )
         if not 0.0 <= self.max_noise_fraction < 1.0:
             raise ConfigurationError("max_noise_fraction must be in [0, 1)")
         if not 0.0 < self.max_cluster_fraction <= 1.0:
@@ -67,11 +79,17 @@ class ClusteringConfig:
             raise ConfigurationError("n_resample must be at least 2")
         if self.terminal_radius_nm <= 0.0 or self.threshold_capture_radius_nm <= 0.0:
             raise ConfigurationError("terminal/capture radii must be positive")
-        if not self.min_cluster_sizes or any(value < 2 for value in self.min_cluster_sizes):
+        if not self.min_cluster_sizes or any(
+            value < 2 for value in self.min_cluster_sizes
+        ):
             raise ConfigurationError("min_cluster_sizes must contain values >= 2")
         if any(value is not None and value < 1 for value in self.min_samples):
-            raise ConfigurationError("min_samples must contain positive integers or None")
-        if not self.selection_methods or any(value not in {"eom", "leaf"} for value in self.selection_methods):
+            raise ConfigurationError(
+                "min_samples must contain positive integers or None"
+            )
+        if not self.selection_methods or any(
+            value not in {"eom", "leaf"} for value in self.selection_methods
+        ):
             raise ConfigurationError("selection_methods must contain eom and/or leaf")
         if self.kmeans_k_min < 1 or self.kmeans_k_max < self.kmeans_k_min:
             raise ConfigurationError("invalid KMeans fallback range")
@@ -101,19 +119,77 @@ class TemplateConfig:
     zero_wind: bool = True
 
     def __post_init__(self) -> None:
-        if self.speed_action_count != 16 or self.path_stretch_count != 8:
-            raise ConfigurationError("version 1 requires exactly 16 speed and 8 path-stretch locations")
-        if self.commitment_gate_nm <= 0.0:
+        if self.schema_version != "hailmary.template.v1":
+            raise ConfigurationError("unsupported template schema version")
+        if (
+            isinstance(self.speed_action_count, bool)
+            or not isinstance(self.speed_action_count, int)
+            or isinstance(self.path_stretch_count, bool)
+            or not isinstance(self.path_stretch_count, int)
+            or self.speed_action_count != 16
+            or self.path_stretch_count != 8
+        ):
+            raise ConfigurationError(
+                "version 1 requires exactly 16 speed and 8 path-stretch locations"
+            )
+        if (
+            not _finite_number(self.commitment_gate_nm)
+            or self.commitment_gate_nm <= 0.0
+        ):
             raise ConfigurationError("commitment_gate_nm must be positive")
+        if self.speed_band_names != ("light", "medium", "heavy"):
+            raise ConfigurationError(
+                "version 1 requires speed bands light, medium, and heavy"
+            )
         if len(self.speed_reduction_kts) != len(self.speed_band_names):
-            raise ConfigurationError("speed reduction values and names must have equal length")
+            raise ConfigurationError(
+                "speed reduction values and names must have equal length"
+            )
         _positive(self.speed_reduction_kts, name="speed_reduction_kts")
         if tuple(sorted(self.speed_reduction_kts)) != self.speed_reduction_kts:
             raise ConfigurationError("speed reductions must be ordered light to heavy")
-        if self.max_speed_actions < 1 or self.max_path_stretches < 1:
+        if (
+            not _finite_number(self.min_effective_reduction_kts)
+            or self.min_effective_reduction_kts <= 0.0
+        ):
+            raise ConfigurationError("min_effective_reduction_kts must be positive")
+
+        if (
+            isinstance(self.max_speed_actions, bool)
+            or not isinstance(self.max_speed_actions, int)
+            or isinstance(self.max_path_stretches, bool)
+            or not isinstance(self.max_path_stretches, int)
+            or self.max_speed_actions < 1
+            or self.max_path_stretches < 1
+        ):
             raise ConfigurationError("intervention limits must be positive")
-        if not 0.0 <= self.max_clamped_fraction <= 1.0:
+        if (
+            not _finite_number(self.max_clamped_fraction)
+            or not 0.0 <= self.max_clamped_fraction <= 1.0
+        ):
             raise ConfigurationError("max_clamped_fraction must be in [0, 1]")
+        if (
+            not _finite_number(self.max_historical_clamp_kts)
+            or self.max_historical_clamp_kts < 0.0
+        ):
+            raise ConfigurationError(
+                "max_historical_clamp_kts must be finite and non-negative"
+            )
+        if (
+            not _finite_number(self.max_timing_error_fraction)
+            or not 0.0 <= self.max_timing_error_fraction <= 1.0
+        ):
+            raise ConfigurationError("max_timing_error_fraction must be in [0, 1]")
+        if not _finite_number(self.max_timing_error_s) or self.max_timing_error_s < 0.0:
+            raise ConfigurationError(
+                "max_timing_error_s must be finite and non-negative"
+            )
+        if self.aircraft_typecode != "A320":
+            raise ConfigurationError("version 1 requires aircraft_typecode A320")
+        if not _finite_number(self.payload_kg) or self.payload_kg < 0.0:
+            raise ConfigurationError("payload_kg must be finite and non-negative")
+        if self.zero_wind is not True:
+            raise ConfigurationError("version 1 requires zero_wind=true")
 
 
 @dataclass(frozen=True)
@@ -131,17 +207,49 @@ class StretchConfig:
     conflict_duration_scale_s: float = 60.0
 
     def __post_init__(self) -> None:
-        if not (len(self.variant_names) == len(self.rejoin_span_nm) == len(self.added_distance_nm) == 3):
-            raise ConfigurationError("stretch configuration requires short, medium, and long triples")
+        if self.variant_names != ("short", "medium", "long"):
+            raise ConfigurationError(
+                "stretch variant names must be short, medium, and long"
+            )
+        if self.selector != "semi_local_outcome":
+            raise ConfigurationError("version 1 requires semi_local_outcome selector")
+        if self.geometry_only_ablation_selector != "geometry_clearance":
+            raise ConfigurationError("version 1 requires geometry_clearance ablation")
+        if not (
+            len(self.variant_names)
+            == len(self.rejoin_span_nm)
+            == len(self.added_distance_nm)
+            == 3
+        ):
+            raise ConfigurationError(
+                "stretch configuration requires short, medium, and long triples"
+            )
         _positive(self.rejoin_span_nm, name="rejoin_span_nm")
         _positive(self.added_distance_nm, name="added_distance_nm")
-        if self.added_distance_tolerance_nm <= 0.0:
+        if (
+            not _finite_number(self.added_distance_tolerance_nm)
+            or self.added_distance_tolerance_nm <= 0.0
+        ):
             raise ConfigurationError("added_distance_tolerance_nm must be positive")
-        if self.candidate_azimuth_count < 4:
+        if (
+            isinstance(self.candidate_azimuth_count, bool)
+            or not isinstance(self.candidate_azimuth_count, int)
+            or self.candidate_azimuth_count < 4
+        ):
             raise ConfigurationError("candidate_azimuth_count must be at least 4")
-        if not 0.0 < self.max_turn_deg < 180.0:
+        if not _finite_number(self.max_turn_deg) or not 0.0 < self.max_turn_deg < 180.0:
             raise ConfigurationError("max_turn_deg must be between 0 and 180")
-        if self.new_conflict_penalty < 0.0 or self.conflict_duration_scale_s <= 0.0:
+        if (
+            not _finite_number(self.minimum_medoid_clearance_nm)
+            or self.minimum_medoid_clearance_nm < 0.0
+        ):
+            raise ConfigurationError("minimum_medoid_clearance_nm must be non-negative")
+        if (
+            not _finite_number(self.new_conflict_penalty)
+            or not _finite_number(self.conflict_duration_scale_s)
+            or self.new_conflict_penalty < 0.0
+            or self.conflict_duration_scale_s <= 0.0
+        ):
             raise ConfigurationError(
                 "stretch conflict penalty must be nonnegative and duration scale positive"
             )
@@ -162,14 +270,24 @@ class ScenarioConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.separation_s <= 0.0 or self.pressure_window_s <= 0.0:
+        if (
+            not _finite_number(self.separation_s)
+            or not _finite_number(self.pressure_window_s)
+            or self.separation_s <= 0.0
+            or self.pressure_window_s <= 0.0
+        ):
             raise ConfigurationError("separation and pressure window must be positive")
-        if not 0.0 <= self.feature_correlation_limit < 1.0:
+        if (
+            not _finite_number(self.feature_correlation_limit)
+            or not 0.0 <= self.feature_correlation_limit < 1.0
+        ):
             raise ConfigurationError("feature_correlation_limit must be in [0, 1)")
         if self.exogenous_coupling != "materialized_events":
             raise ConfigurationError("version 1 requires materialized exogenous events")
         if self.intervention_ordering != "any_chronological_order":
-            raise ConfigurationError("version 1 allows interventions in any chronological order")
+            raise ConfigurationError(
+                "version 1 allows interventions in any chronological order"
+            )
 
 
 @dataclass(frozen=True)
@@ -184,6 +302,35 @@ class FeatureConfig:
     station_freedom_weight: float = 0.5
     budget_freedom_weight: float = 0.5
 
+    def __post_init__(self) -> None:
+        if self.schema_version != "hailmary.features.leader_follower.v1":
+            raise ConfigurationError(
+                "unsupported leader-follower feature schema version"
+            )
+        for name, value in (
+            ("ratio_capacity_floor_s", self.ratio_capacity_floor_s),
+            ("ratio_clip_max", self.ratio_clip_max),
+            ("commitment_time_scale_s", self.commitment_time_scale_s),
+        ):
+            if not _finite_number(value) or value <= 0.0:
+                raise ConfigurationError(f"{name} must be finite and positive")
+        weights = {
+            "time_weight": self.time_weight,
+            "freedom_weight": self.freedom_weight,
+            "gate_weight": self.gate_weight,
+            "station_freedom_weight": self.station_freedom_weight,
+            "budget_freedom_weight": self.budget_freedom_weight,
+        }
+        for name, value in weights.items():
+            if not _finite_number(value) or value < 0.0:
+                raise ConfigurationError(f"{name} must be finite and non-negative")
+        if self.time_weight + self.freedom_weight + self.gate_weight <= 0.0:
+            raise ConfigurationError(
+                "commitment feature weights require a positive sum"
+            )
+        if self.station_freedom_weight + self.budget_freedom_weight <= 0.0:
+            raise ConfigurationError("freedom feature weights require a positive sum")
+
 
 @dataclass(frozen=True)
 class OutcomeConfig:
@@ -197,10 +344,14 @@ class OutcomeConfig:
     throughput_gap_normalizer_s: float = 90.0
 
     def __post_init__(self) -> None:
-        if self.trailer_count < 0:
-            raise ConfigurationError("trailer_count cannot be negative")
+        if (
+            isinstance(self.trailer_count, bool)
+            or not isinstance(self.trailer_count, int)
+            or self.trailer_count < 0
+        ):
+            raise ConfigurationError("trailer_count must be a non-negative integer")
         if any(
-            value < 0.0
+            not _finite_number(value) or value < 0.0
             for value in (
                 self.pair_weight,
                 self.propagation_weight,
@@ -220,6 +371,107 @@ class OutcomeConfig:
 
 
 @dataclass(frozen=True)
+class LearningConfig:
+    """Reproducible Phase-0 defaults for causal rule learning.
+
+    These values intentionally live beside the other experiment configuration
+    instead of being hidden in the future trainer implementation. Later
+    phases may tune them, but every run starts from one complete, serializable
+    set of choices.
+    """
+
+    population_limit: int = 1_000
+    ga_interval: int = 50
+    ga_min_experience: int = 20
+    certification_interval: int = 500
+    action_min_noop_samples: int = 30
+    veto_min_rival_samples: int = 60
+    action_lcb_z: float = 1.96
+    veto_lcb_z: float = 1.96
+    contender_min_samples: int = 2
+    contender_lcb_z: float = 1.96
+    base_exploration_rate: float = 0.05
+    exploration_coverage_floor: int = 200
+    covering_width_min_fraction: float = 0.05
+    covering_width_max_fraction: float = 0.25
+    mutation_probability: float = 0.04
+    crossover_probability: float = 0.80
+    variance_floor: float = 1.0e-6
+    offspring_evidence_discount: float = 0.50
+    young_rule_protection_epochs: int = 100
+    random_seed: int = 17
+
+    def __post_init__(self) -> None:
+        positive_integers = {
+            "population_limit": self.population_limit,
+            "ga_interval": self.ga_interval,
+            "ga_min_experience": self.ga_min_experience,
+            "certification_interval": self.certification_interval,
+            "action_min_noop_samples": self.action_min_noop_samples,
+            "veto_min_rival_samples": self.veto_min_rival_samples,
+            "contender_min_samples": self.contender_min_samples,
+            "exploration_coverage_floor": self.exploration_coverage_floor,
+        }
+        for name, value in positive_integers.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigurationError(f"{name} must be positive")
+        if self.contender_min_samples < 2:
+            raise ConfigurationError("contender_min_samples must be at least two")
+        if self.ga_min_experience < 2:
+            raise ConfigurationError("ga_min_experience must be at least two")
+        if (
+            isinstance(self.young_rule_protection_epochs, bool)
+            or not isinstance(self.young_rule_protection_epochs, int)
+            or self.young_rule_protection_epochs < 0
+        ):
+            raise ConfigurationError("young_rule_protection_epochs cannot be negative")
+        if (
+            isinstance(self.random_seed, bool)
+            or not isinstance(self.random_seed, int)
+            or self.random_seed < 0
+        ):
+            raise ConfigurationError("random_seed cannot be negative")
+
+        positive_floats = {
+            "action_lcb_z": self.action_lcb_z,
+            "veto_lcb_z": self.veto_lcb_z,
+            "contender_lcb_z": self.contender_lcb_z,
+            "variance_floor": self.variance_floor,
+        }
+        for name, value in positive_floats.items():
+            if not _finite_number(value) or value <= 0.0:
+                raise ConfigurationError(f"{name} must be positive")
+
+        probabilities = {
+            "base_exploration_rate": self.base_exploration_rate,
+            "mutation_probability": self.mutation_probability,
+            "crossover_probability": self.crossover_probability,
+        }
+        for name, value in probabilities.items():
+            if not _finite_number(value) or not 0.0 <= value <= 1.0:
+                raise ConfigurationError(f"{name} must be in [0, 1]")
+        if (
+            not _finite_number(self.offspring_evidence_discount)
+            or not 0.0 < self.offspring_evidence_discount <= 1.0
+        ):
+            raise ConfigurationError("offspring_evidence_discount must be in (0, 1]")
+        if (
+            not _finite_number(self.covering_width_min_fraction)
+            or not 0.0 < self.covering_width_min_fraction <= 1.0
+        ):
+            raise ConfigurationError("covering_width_min_fraction must be in (0, 1]")
+        if (
+            not _finite_number(self.covering_width_max_fraction)
+            or not self.covering_width_min_fraction
+            <= self.covering_width_max_fraction
+            <= 1.0
+        ):
+            raise ConfigurationError(
+                "covering width fractions must be ordered and no greater than one"
+            )
+
+
+@dataclass(frozen=True)
 class HailmaryConfig:
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     templates: TemplateConfig = field(default_factory=TemplateConfig)
@@ -227,3 +479,4 @@ class HailmaryConfig:
     scenario: ScenarioConfig = field(default_factory=ScenarioConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     outcome: OutcomeConfig = field(default_factory=OutcomeConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)

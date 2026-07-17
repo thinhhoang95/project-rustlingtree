@@ -6,6 +6,7 @@ from .config import (
     ClusteringConfig,
     FeatureConfig,
     HailmaryConfig,
+    LearningConfig,
     OutcomeConfig,
     ScenarioConfig,
     StretchConfig,
@@ -20,8 +21,18 @@ from .errors import (
     SimulationError,
     StaleActionError,
 )
-from .actions import ActionCandidate, ActionCatalog, ActionLever, apply_action
+from .actions import (
+    ActionCandidate,
+    ActionCatalog,
+    ActionIdentity,
+    ActionLever,
+    ActionVocabulary,
+    action_vocabulary,
+    apply_action,
+    is_supported_action_identity,
+)
 from .clustering import ClusterLibrary, build_cluster_library
+from .runtime import ActionRuntime, ConfiguredActionApplier, build_action_runtime
 from .scenario import FlightGenerationSpec, ScenarioDefinition, ScenarioGenerator
 from .simulator import SimulationState, Simulator
 from .templates import (
@@ -36,17 +47,22 @@ __all__ = [
     "ArtifactValidationError",
     "ActionCandidate",
     "ActionCatalog",
+    "ActionIdentity",
     "ActionLever",
+    "ActionRuntime",
+    "ActionVocabulary",
     "ClusteringConfig",
     "ClusterLibrary",
     "ClusterTemplate",
     "ConfigurationError",
+    "ConfiguredActionApplier",
     "CorrelationGateError",
     "FeatureConfig",
     "FlightGenerationSpec",
     "HailmaryConfig",
     "HailmaryError",
     "InfeasibleActionError",
+    "LearningConfig",
     "MedoidTrack",
     "OutcomeConfig",
     "ScenarioConfig",
@@ -61,6 +77,9 @@ __all__ = [
     "TemplateConfig",
     "TemplateStore",
     "TrajectoryVariant",
+    "action_vocabulary",
     "apply_action",
+    "build_action_runtime",
     "build_cluster_library",
+    "is_supported_action_identity",
 ]

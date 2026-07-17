@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests -k \"prompt\" -q)",
+      "Bash(python -m pytest tests -q)",
+      "Bash(git stash *)",
+      "Bash(python -m pytest tests/test_elastic_fpca.py tests/test_lateral_dynamics.py tests/test_simulator.py -q)",
+      "Bash(pip show *)",
+      "Bash(python -c \"import adjustText; print\\('adjustText available'\\)\")",
+      "Bash(python -m pytest tests/test_ppe_prompts.py tests/test_ppe_graph.py tests/test_vlm_client.py -q)"
+    ]
+  }
+}

@@ -18,6 +18,22 @@ class ActionLever(StrEnum):
     PATH_STRETCH = "path_stretch"
 
 
+@dataclass(frozen=True, slots=True)
+class ActionIdentity:
+    """Scenario-independent action key used by catalogs and learned rules."""
+
+    lever: ActionLever | str
+    band: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "lever", ActionLever(self.lever))
+        if not self.band:
+            raise ValueError("action identity band cannot be empty")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"lever": self.lever.value, "band": self.band}
+
+
 @dataclass(frozen=True)
 class ActionCandidate:
     anchor_id: str
@@ -77,9 +93,12 @@ class ActionCandidate:
         same_fork_content = bool(
             self.dynamic_content_hash
             and getattr(state, "parent_state_id", None) == self.state_id
-            and getattr(state, "dynamic_content_hash", None) == self.dynamic_content_hash
+            and getattr(state, "dynamic_content_hash", None)
+            == self.dynamic_content_hash
         )
-        if (not same_state and not same_fork_content) or getattr(state, "version", None) != self.state_version:
+        if (not same_state and not same_fork_content) or getattr(
+            state, "version", None
+        ) != self.state_version:
             raise StaleActionError("action was computed for a stale simulation state")
         if getattr(state, "decision_epoch_index", None) != self.epoch_index:
             raise StaleActionError("action eligibility expired with its decision epoch")
@@ -96,5 +115,8 @@ class ActionRealization:
     def __post_init__(self) -> None:
         if not np.isfinite(self.realized_delay_s) or self.realized_delay_s < -1e-8:
             raise ValueError("realized action delay must be finite and non-negative")
-        if not np.isfinite(self.intervention_magnitude) or self.intervention_magnitude < 0.0:
+        if (
+            not np.isfinite(self.intervention_magnitude)
+            or self.intervention_magnitude < 0.0
+        ):
             raise ValueError("intervention magnitude must be finite and non-negative")

@@ -15,6 +15,34 @@ from .test_templates import _straight_variant
 from .test_adapters import _ConstantPerformanceBackend, _aircraft_config
 
 
+def test_realizer_detaches_and_freezes_mutable_geometry_inputs() -> None:
+    medoid = np.asarray(((0.0, 1.0), (2.0, 3.0)), dtype=np.float64)
+    boundary = np.asarray(((4.0, 5.0), (6.0, 7.0)), dtype=np.float64)
+    expected_medoid = medoid.copy()
+    expected_boundary = boundary.copy()
+
+    realizer = PathStretchRealizer(
+        other_medoid_polylines_m=(medoid,),
+        boundary_polylines_m=(boundary,),
+    )
+
+    medoid[0, 0] = 100.0
+    boundary[0, 0] = 200.0
+    stored_medoid = realizer.other_medoid_polylines_m[0]
+    stored_boundary = realizer.boundary_polylines_m[0]
+    assert np.array_equal(stored_medoid, expected_medoid)
+    assert np.array_equal(stored_boundary, expected_boundary)
+    assert not np.shares_memory(stored_medoid, medoid)
+    assert not np.shares_memory(stored_boundary, boundary)
+    assert not stored_medoid.flags.writeable
+    assert not stored_boundary.flags.writeable
+
+    with pytest.raises(ValueError, match="read-only"):
+        stored_medoid[0, 0] = -1.0
+    with pytest.raises(ValueError, match="read-only"):
+        stored_boundary[0, 0] = -1.0
+
+
 def test_dogleg_meets_added_distance_and_chooses_runway_away_free_side() -> None:
     variant = _straight_variant()
     base = np.column_stack((variant.east_m, variant.north_m))
@@ -54,11 +82,15 @@ def test_realizer_compiles_short_medium_long_to_target_distance() -> None:
 
     assert [candidate.name for candidate in candidates] == ["short", "medium", "long"]
     assert all(candidate.feasible for candidate in candidates)
-    for candidate, target_nm in zip(candidates, settings.added_distance_nm, strict=True):
+    for candidate, target_nm in zip(
+        candidates, settings.added_distance_nm, strict=True
+    ):
         assert candidate.variant is not None
         assert candidate.geometry is not None
         realized = candidate.variant.path_length_m - baseline.path_length_m
-        assert realized == pytest.approx(target_nm * M_PER_NM, abs=settings.added_distance_tolerance_nm * M_PER_NM)
+        assert realized == pytest.approx(
+            target_nm * M_PER_NM, abs=settings.added_distance_tolerance_nm * M_PER_NM
+        )
         assert candidate.geometry.runway_away_displacement_m > 0.0
         assert candidate.variant.duration_s >= baseline.duration_s
 
@@ -110,7 +142,10 @@ def test_smooth_short_medium_long_compile_through_public_simap_replay() -> None:
         assert candidate.variant is not None
         details = dict(candidate.variant.diagnostics.details)
         assert candidate.variant.diagnostics.feasible
-        assert candidate.variant.diagnostics.message == "public SIMAP coupled replay validation passed"
+        assert (
+            candidate.variant.diagnostics.message
+            == "public SIMAP coupled replay validation passed"
+        )
         assert details["geometry_family"] == "raised_cosine_lateral_lane_change_v1"
         assert details["raw_max_bank_ratio"] <= adapter.maximum_raw_bank_ratio
         assert details["replay_final_threshold_error_m"] <= 0.10 * M_PER_NM
@@ -119,9 +154,10 @@ def test_smooth_short_medium_long_compile_through_public_simap_replay() -> None:
     assert first_variant is not None
     calibrated = dict(first_variant.diagnostics.details)
     assert calibrated["simap_replay_pass_count"] == 2
-    assert calibrated["simap_first_pass_threshold_error_m"] > calibrated[
-        "replay_final_threshold_error_m"
-    ]
+    assert (
+        calibrated["simap_first_pass_threshold_error_m"]
+        > calibrated["replay_final_threshold_error_m"]
+    )
 
 
 def test_equal_outcome_scores_tie_break_short_then_medium_then_long() -> None:
