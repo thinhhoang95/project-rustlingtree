@@ -2,11 +2,12 @@
 
 ## 1. Purpose
 
-Hailmary is a deterministic arrival-scenario simulator for evaluating tactical
-air-traffic interventions. It turns historical arrival tracks into reusable
-trajectory templates, builds immutable multi-aircraft scenarios, advances those
-scenarios through an exact event queue, and compares interventions on isolated
-forks.
+Hailmary is a deterministic arrival-scenario simulator and causal rule-learning
+system for tactical air-traffic interventions. It turns historical arrival
+tracks into reusable trajectory templates, builds immutable multi-aircraft
+scenarios, advances those scenarios through an exact event queue, compares
+interventions on isolated forks, and can publish independently certified rules
+as an immutable deployment policy.
 
 The package is designed for controlled experiments. Repeating a build or a
 rollout with the same inputs, configuration, seed, and policy should produce the
@@ -21,7 +22,7 @@ schedule.
 
 ## 2. The mental model
 
-Think of Hailmary as two connected planes:
+Think of Hailmary as three connected planes:
 
 1. **The offline compiler plane** converts observations into validated,
    immutable artifacts. This work can be relatively expensive and includes
@@ -30,6 +31,10 @@ Think of Hailmary as two connected planes:
    an event-driven kinematic simulator. It creates a new compiled trajectory
    only when an intervention changes a flight, then splices that trajectory
    into the affected branch without rewriting history.
+3. **The learning and deployment plane** runs common-root three-arm experiments,
+   updates a mutable rule population, and periodically publishes a detached,
+   certified rulebook. Training, rollout continuation, and deployment share a
+   hashed action vocabulary and realization runtime.
 
 ```mermaid
 flowchart LR
@@ -55,6 +60,16 @@ flowchart LR
         D --> R["Paired forked rollouts"]
         F --> R
         O --> R
+    end
+
+    subgraph Learning["Learning and deployment plane"]
+        R --> A3["Selected / rival / no-op evidence"]
+        F --> M2["Relational rule matching"]
+        A3 --> P2["Mutable rule population"]
+        M2 --> P2
+        P2 --> C2["Independent certification"]
+        C2 --> B2["Frozen deployed rulebook"]
+        B2 --> R
     end
 
     SIMAP["Public SIMAP APIs"] --> T
@@ -87,7 +102,10 @@ clustering -----> templates <----- adapters/SIMAP
               actions   features  evaluation
                    \       |        /
                     \      v       /
-                     paired rollouts
+                 counterfactual rollouts
+                           |
+                           v
+                 learning + rulebook
 ```
 
 The important boundaries are:
@@ -102,8 +120,13 @@ The important boundaries are:
 - `hailmary.simulator` owns dynamic state, time, events, lineage, and forks.
 - `hailmary.actions`, `features`, and `evaluation` query or transform simulator
   state through explicit contracts.
-- `hailmary.rollout` coordinates temporary branches but does not implement
-  aircraft motion or scoring itself.
+- `hailmary.runtime` binds the action vocabulary, catalog, physical realizers,
+  and an authenticated runtime-configuration hash.
+- `hailmary.rollout` coordinates temporary branches and frozen continuation
+  policies but does not implement aircraft motion or scoring itself.
+- `hailmary.learning` owns mutable hypotheses, evidence, evolution,
+  certification, immutable rulebooks, training artifacts, and Phase-0
+  experiment orchestration.
 
 Keeping these boundaries matters. In particular, adding mutable legacy objects
 to the scenario definition or calling an optimizer from feature extraction
@@ -179,6 +202,23 @@ Two identities intentionally coexist:
   experiment state; and
 - the **state ID** also includes provenance, so sibling forks remain distinct
   even when their initial content is identical.
+
+### 4.5 Action runtime and learning artifacts
+
+`ActionVocabulary` is the scenario-independent set of five supported action
+identities: no-op, three speed bands, and the path-stretch macro. Its canonical
+payload also records the physical speed reductions and availability limits.
+`ActionRuntime` binds that vocabulary to one `ActionCatalog`, one
+`PathStretchRealizer`, and one action applier. Its configuration hash is carried
+through simulator snapshots and must match on resume; opaque injected validators
+or selectors require an explicit fingerprint.
+
+The learning layer deliberately separates mutable and deployable state.
+`Population` contains evolving `MutableRule` hypotheses and online evidence.
+`EvaluationSnapshot` contains a detached `FrozenRulebookPolicy`, publication
+epoch, certification evidence, and the feature/action/configuration hashes used
+to authenticate decisions. `TrainingCheckpoint` and `EpochTrace` make trainer
+resume and individual experiments content-addressed and auditable.
 
 ## 5. Coordinate, station, and time conventions
 
@@ -336,6 +376,11 @@ state. Advancing the simulator, taking another action, or rebinding to a fork
 without updating provenance makes an old candidate stale. This prevents a
 controller from applying an action against conditions that no longer exist.
 
+For policy-driven runs, actions pass through the simulator's configured action
+applier. A non-null applier requires a runtime-configuration hash, and forks and
+snapshots preserve that binding so a rollout cannot silently change physical
+realization semantics.
+
 ## 9. Action realization
 
 ### 9.1 Speed actions
@@ -404,9 +449,11 @@ The evaluation layer has three related responsibilities:
 The semi-local score includes pair quality, downstream propagation,
 intervention cost, and throughput. The cohort and horizon are frozen from the
 parent so competing branches cannot improve their score by changing which
-aircraft are evaluated.
+aircraft are evaluated. A `SimulatorOutcomePlan` also freezes the root
+intervention summary; rollout scoring subtracts that baseline so historical
+actions do not count as costs of the current experiment.
 
-### 10.3 Exact forks and paired rollouts
+### 10.3 Exact forks and counterfactual rollouts
 
 `Simulator.fork` shares immutable definitions and trajectory arrays but copies
 branch-local dynamic state, event queue, RNG state, metrics, lineage, and logs.
@@ -416,10 +463,45 @@ tuple.
 `paired_simulator_rollout` creates selected and contender forks, rebinds the
 epoch-bound candidates to each branch's provenance ID, applies one initial
 action, runs both under the same frozen policy to the same horizon, and scores
-them with the same outcome plan. It verifies that neither the parent nor the
-policy changed. This is the primary counterfactual comparison contract.
+them with the same outcome plan. `three_arm_simulator_rollout` adds a mandatory
+root no-op arm and returns selected-versus-rival, selected-versus-no-op,
+rival-versus-no-op, and veto deltas. Held-out evaluation uses the separate
+`policy_vs_permanent_no_op_simulator_rollout`, whose control remains no-op at
+later epochs as well. All variants verify that the parent and policy remain
+unchanged.
 
-## 11. Reproducibility and failure behavior
+## 11. Learning, certification, and deployment
+
+At a decision epoch, the trainer builds an `AnchorContext` for each current
+leader/follower anchor. Rules match a role, feature-schema hash, action identity,
+and axis-aligned `RuleCondition`. `cover_missing_actions` creates matching
+hypotheses only for currently feasible actions, while
+`RegionExplorationScheduler` distributes experiments across coarse commitment,
+pressure, and error regions.
+
+`CausalTrainer` freezes the match set and current `EvaluationSnapshot`, chooses
+one root action and the strongest certified rival, and runs selected (A), rival
+(B), and no-op (C) forks under the same frozen deployed continuation policy.
+Only A's first action is committed to the real simulator. The resulting deltas
+update separate rival-grounded evolution and no-op-grounded deployment ledgers.
+Evolution is restricted to same-action niches and includes mutation, crossover,
+bounded-population deletion, and conservative subsumption.
+
+Certification is intentionally slower than population learning. Action rules
+must have sufficient independent no-op-grounded evidence and a positive lower
+confidence bound; no-op rules use rival-grounded evidence and publish as scoped
+vetoes. Passing rules are copied into `FrozenRulebookPolicy`, which contains no
+live reference to the population and performs no exploration or learning.
+
+`Phase0ExperimentRunner` applies this loop to balanced, materially disjoint
+training and held-out factorial batches. It compares causal and optional
+vanilla credit modes, tests seed and publication-interval robustness, evaluates
+the deployed policy against permanent no-op, runs the path-selector ablation,
+and returns a `Phase0AcceptanceReport`. The report is evidence, not a forced
+success: a completed run may correctly fail one or more scientific gates. See
+[the Phase-0 walkthrough](../phase0.md) for the experimental protocol.
+
+## 12. Reproducibility and failure behavior
 
 Reproducibility is enforced at several levels:
 
@@ -429,7 +511,11 @@ Reproducibility is enforced at several levels:
 - cluster labels and tie breaking are canonical;
 - named RNG state is stored in simulation snapshots;
 - exogenous uncertainty is materialized before paired branching; and
-- every action is bound to a precise decision epoch and records provenance.
+- every action is bound to a precise decision epoch and records provenance;
+- action vocabulary, physical realization, feature schema, outcome plan, and
+  continuation policy are hashed at experiment boundaries; and
+- published rulebooks and learning artifacts are detached, canonical, and
+  content checked when deserialized.
 
 Failures are intentionally typed and early. Invalid artifacts raise
 `ArtifactValidationError`, invalid settings raise `ConfigurationError`, stale
@@ -438,7 +524,7 @@ or infeasible actions raise action errors, invalid state transitions raise
 or feasibility errors. A maintainer should preserve these fail-closed semantics
 when adding a new data source, aircraft type, action lever, or feature.
 
-## 12. Integration surfaces
+## 13. Integration surfaces
 
 There are three supported command-line entry points:
 
@@ -458,7 +544,13 @@ those NPZ variants and writes a deterministic trace.
 `HailmaryScheduleView` is a read-only compatibility adapter for code that needs
 an arrival schedule. It must not become a back door for mutable legacy state.
 
-## 13. How to reason about changes
+Learning and Phase-0 orchestration are currently Python APIs rather than
+additional console scripts. Construct one `ActionRuntime` with
+`build_action_runtime`, use it consistently to create/resume simulators and the
+trainer, and persist learning artifacts through the typed helpers in
+`hailmary.learning.artifacts`.
+
+## 14. How to reason about changes
 
 When modifying the module, locate the change in the artifact chain:
 
@@ -475,8 +567,11 @@ When modifying the module, locate the change in the artifact chain:
   retraining.
 - An outcome-weight change alters comparison semantics but should not change
   physical branch evolution.
+- An action-vocabulary or runtime-realization change invalidates authenticated
+  snapshots, rulebooks, checkpoints, and evaluation evidence.
+- A credit, evolution, certification, or rule-arbitration change alters learned
+  and deployed behavior even when simulator physics is unchanged.
 
 The focused tests in `tests/hailmary` mirror these boundaries. Add the narrowest
 unit test at the changed layer and at least one end-to-end test whenever an
 artifact contract or runtime handoff changes.
-

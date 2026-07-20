@@ -15,12 +15,13 @@ and the simulator must remain usable without importing legacy manager code.
 
 | Component | Responsibility | Main consumers |
 | --- | --- | --- |
-| `config.py` | Frozen, validated defaults for clustering, templates, stretch geometry, scenarios, features, and outcomes | All pipeline and runtime layers |
+| `config.py` | Frozen, validated defaults for clustering, templates, stretch geometry, scenarios, features, outcomes, and learning | All pipeline, runtime, and learning layers |
 | `errors.py` | Typed package failures for artifacts, configuration, actions, simulation, correlation gates, and empty clustering results | All layers and callers |
 | `ids.py` | Canonical data conversion, JSON encoding, content hashes, stable IDs, and provenance-aware state IDs | Artifacts, actions, scenarios, rollouts |
 | `_arrays.py` | Defensive conversion to read-only numeric arrays plus length and monotonicity validation | Template and artifact models |
 
-`HailmaryConfig` groups the version-1 configuration. Code should accept a
+`HailmaryConfig` groups the version-1 configuration, including
+`LearningConfig`. Code should accept a
 specific sub-configuration when that is all it needs; this keeps dependencies
 and serialized provenance narrow.
 
@@ -225,17 +226,28 @@ behavior.
 `Simulator` owns event advancement, batching, lifecycle transitions,
 disturbance application, decision epochs, snapshots/resume, sampling, forks,
 policy-driven execution, branch-local variant installation, causal replacement,
-action recording, and metrics. Helper event construction maps a variant's
-station/time contract into absolute scenario events.
+action recording, and metrics. A configured action applier requires a
+runtime-configuration hash; both are retained by forks, and snapshot resume
+checks the hash. Helper event construction maps a variant's station/time
+contract into absolute scenario events.
 
 ## 10. `hailmary.actions`
 
 ### `models.py`
 
 `ActionLever` identifies no-op, speed, and path-stretch levers.
+`ActionIdentity` is the scenario-independent `(lever, band)` key used by the
+catalog and learned rules.
 `ActionCandidate` is bound to an epoch and validates freshness before use.
 `ActionRealization` is the audited outcome with variant ID, delay, magnitude,
 and diagnostic metadata.
+
+### `vocabulary.py`
+
+`ActionVocabulary` canonically serializes the exact five supported identities,
+their physical speed reductions, and action-availability limits. Its content
+hash is embedded in learning and runtime artifacts so a learned rule cannot be
+silently interpreted under different action semantics.
 
 ### `catalog.py`
 
@@ -309,17 +321,30 @@ then return normalized `ConflictRecord` and `ConflictSummary` objects.
 ### `outcome.py`
 
 `OutcomeCohort` freezes the pair and trailers. `SimulatorOutcomePlan` freezes
-baseline crossings and horizon. `score_semi_local_outcome` combines pair,
-propagation, intervention, and throughput terms; simulator helpers gather the
-branch-local inputs and intervention summary.
+baseline crossings, horizon, root content hash, root time, and the baseline
+intervention summary. `score_semi_local_outcome` combines pair, propagation,
+intervention, and throughput terms; simulator helpers gather branch-local inputs
+and subtract root interventions when scoring from a plan.
 
-## 13. `hailmary.rollout`
+## 13. `hailmary.runtime`
+
+### `runtime.py`
+
+`ActionRuntime` binds one action catalog, vocabulary, stretch realizer, and
+action applier. `build_action_runtime` is the normal construction boundary and
+validates that injected components use consistent template/stretch settings.
+`ConfiguredActionApplier` dispatches the shared physical realization path.
+Canonical runtime configuration includes the vocabulary and all inspectable
+settings; custom callables or validators require an explicit fingerprint.
+
+## 14. `hailmary.rollout`
 
 ### `policy.py`
 
 `FrozenPolicy` is the policy protocol. `NoOpPolicy` and
 `CallableFrozenPolicy` are standard implementations. `policy_fingerprint`
-supports mutation checks during counterfactual comparisons.
+content-hashes callable behavior and state for mutation checks during
+counterfactual comparisons.
 
 ### `paired.py`
 
@@ -328,7 +353,61 @@ supports mutation checks during counterfactual comparisons.
 `PairedArmTrace` records each branch; `PairedRolloutResult` carries both arms,
 their score delta, common policy fingerprint, parent hash, and horizon.
 
-## 14. `hailmary.cli`
+`three_arm_rollout` adds mandatory selected, rival, and no-op arms and four
+causal deltas. `policy_vs_permanent_no_op_rollout` is the held-out controller
+comparison whose control uses no-op for the root and all continuation epochs.
+Simulator-specific wrappers supply the configured action applier and frozen
+outcome plan.
+
+## 15. `hailmary.learning`
+
+### Rule representation and population
+
+- `conditions.py` implements validated numeric `Interval` predicates and
+  schema-bound `RuleCondition` matching.
+- `rules.py` defines scenario-independent `RuleAction` identities and
+  evidence-carrying `MutableRule` hypotheses.
+- `statistics.py` provides mergeable Welford `OnlineMoments` ledgers.
+- `population.py` owns indexed rules, numerosity, serialization, and the hard
+  population bound.
+- `matching.py` builds immutable, role-aware `MatchSet` values from
+  `AnchorContext`; `covering.py` adds advocates only for feasible missing
+  actions.
+
+### Experiment selection, credit, and evolution
+
+- `exploration.py` schedules action experiments by coarse state regions and
+  records visits separately from completed experiments.
+- `credit.py` implements causal selected/rival/no-op ledger updates and the
+  accuracy-based control mode.
+- `evolution.py` owns same-niche parent selection, condition mutation and
+  crossover, offspring evidence discounting, deletion, and subsumption.
+- `modes.py` validates the persisted causal and vanilla credit-mode identities.
+
+### Certification and deployment
+
+- `certification.py` converts independently supported population rules into
+  detached `FrozenActionRule` and `FrozenVetoRule` records using configured
+  sample and lower-confidence-bound gates.
+- `rulebook.py` implements `FrozenRulebookPolicy`, deterministic global action
+  arbitration, scoped vetoes, certified-rival ranking, and
+  `SimulatorRulebookPolicy`, which adapts decisions to live simulator batches.
+
+### Training, artifacts, and validation
+
+- `trainer.py` coordinates one common-root three-arm learning epoch, commits
+  only the selected root action, evolves the population, publishes on the
+  certification schedule, and supports checkpoint/resume.
+- `artifacts.py` defines content-checked `ExportedRulebook`,
+  `EvaluationSnapshot`, `TrainingCheckpoint`, `EpochTrace`, and atomic typed
+  JSON persistence helpers.
+- `phase0.py` runs the registered matrix across scenarios, seeds, refresh
+  intervals, causal/vanilla credit, held-out controls, and path ablations.
+- `validation.py` defines authenticated runtime/rollout evidence and evaluates
+  the Phase-0 vocabulary, certification, concept, held-out, ablation, seed, and
+  refresh gates.
+
+## 16. `hailmary.cli`
 
 | Command | Module | Input | Output |
 | --- | --- | --- | --- |
@@ -340,15 +419,16 @@ The CLI persistence helpers use deterministic JSON/NPZ forms and validate data
 again when reading. Python APIs expose richer results, especially raw ADS-B
 rejection audits and in-process factorial/rollout workflows.
 
-## 15. Tests and executable documentation
+## 17. Tests and executable documentation
 
 Focused tests live in `tests/hailmary` and are organized around the package
 boundaries above. The most important cross-layer suites cover architecture
 independence, raw ADS-B preparation, cluster artifact round trips, SIMAP replay,
 template gates, event ties, forks, actions, live splices, exogenous shifts,
-anchors, state vectors, conflicts, outcomes, and paired rollouts.
+anchors, state vectors, conflicts, outcomes, paired/three-arm rollouts, action
+runtime authentication, rule learning, checkpoint round trips, Phase-0
+orchestration, and acceptance validation.
 
 `notebooks/hailmary/01_clusters.ipynb` and
 `notebooks/hailmary/02_templates.ipynb` provide visual inspection of the two
 offline artifacts. They are validation aids, not alternate implementations.
-

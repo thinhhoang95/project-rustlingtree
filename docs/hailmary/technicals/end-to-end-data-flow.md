@@ -7,11 +7,14 @@ scored counterfactual rollout. It is written for maintainers diagnosing where a
 value came from, where it is transformed, and which downstream artifacts are
 affected by a change.
 
-Hailmary has two execution modes:
+Hailmary has three execution modes:
 
 - **offline preparation**, which produces cluster and trajectory artifacts;
 - **runtime simulation**, which produces event traces, actions, features,
-  conflicts, outcomes, and paired-rollout comparisons.
+  conflicts, outcomes, and paired/three-arm rollout comparisons; and
+- **learning and deployment**, which turns repeated counterfactual evidence into
+  a mutable rule population and periodically publishes an immutable certified
+  rulebook.
 
 ## 2. Artifact lineage at a glance
 
@@ -36,14 +39,22 @@ flowchart TD
     Child --> State
     State --> Vector["FeatureVector"]
     State --> Outcome["SemiLocalOutcome"]
-    Candidate --> Paired["PairedRolloutResult"]
+    Candidate --> Paired["Paired / three-arm rollout"]
     Vector --> Paired
     Outcome --> Paired
+    Paired --> Evidence["Selected / rival / no-op evidence"]
+    Vector --> Match["AnchorContext / MatchSet"]
+    Match --> Population["Mutable rule Population"]
+    Evidence --> Population
+    Population --> Snapshot["Certified EvaluationSnapshot"]
+    Snapshot --> Rulebook["FrozenRulebookPolicy"]
+    Rulebook --> Paired
 ```
 
-Every rectangular node is either immutable or a frozen snapshot. The mutable
-`Simulator` object only advances its reference from one `SimulationState` to
-the next.
+Artifact and runtime-state nodes are immutable or frozen snapshots. The two
+intentional mutable coordinators are the learning `Population` and the
+`Simulator`; the latter only advances its reference from one immutable
+`SimulationState` to the next.
 
 ## 3. Stage A: dataset discovery
 
@@ -194,8 +205,10 @@ values.
 
 ## 8. Stage F: simulator initialization
 
-`Simulator(ScenarioDefinition)` calls `make_initial_state` and creates one
-`FlightDynamic` per flight. It then materializes the event heap:
+For policy or learning runs, `ActionRuntime.create_simulator` constructs the
+`Simulator` with a fixed action applier and authenticated runtime-configuration
+hash. The simulator calls `make_initial_state`, creates one `FlightDynamic` per
+flight, and materializes the event heap:
 
 | Event | Meaning | Typical effect |
 | --- | --- | --- |
@@ -284,6 +297,11 @@ stretch candidate
 Only the selected child becomes part of the live branch. Oracle evaluation
 forks and failed candidates do not mutate the parent.
 
+The catalog exposes only identities from the canonical `ActionVocabulary`:
+no-op, light/medium/heavy speed reduction, and one learner-visible path-stretch
+macro. Runtime feasibility can remove an identity at a particular station, but
+cannot invent a new learner-visible action key.
+
 ## 11. Stage I: anchors and feature vectors
 
 `active_resource_predictions` queries each active flight's ETA to a resource.
@@ -315,7 +333,8 @@ thresholds are violated. Adjacent hits are normalized and merged into stable
 
 For tactical scoring, `simulator_outcome_plan` freezes the current adjacent
 leader/follower pair, up to three following trailers, their baseline crossing
-times, and a common horizon. `score_simulator_outcome` then computes:
+times, common horizon, root hash/time, and cumulative root intervention
+summary. `score_simulator_outcome` then computes:
 
 - spacing quality for the bound pair;
 - propagation quality across the frozen trailing edges;
@@ -343,7 +362,44 @@ The returned `PairedRolloutResult.delta` is selected score minus contender
 score. The function verifies that the parent and policy fingerprints remain
 unchanged, making branch contamination an immediate error.
 
-## 14. Operator entry points
+For causal training, `three_arm_simulator_rollout` performs the same procedure
+for selected (A), strongest certified rival (B), and mandatory root no-op (C).
+It returns four signals: `A-B`, `A-C`, `B-C`, and `C-max(A,B)`. All arms use the
+same frozen deployed continuation policy. This differs from held-out
+`policy_vs_permanent_no_op_simulator_rollout`, where the control also chooses
+no-op at every later decision.
+
+## 14. Stage L: rule learning and publication
+
+`CausalTrainer` turns one live decision into an audited learning epoch:
+
+1. build relational `AnchorContext` values and the canonical feature vector;
+2. freeze matching rules and cover feasible actions lacking advocates;
+3. select one root action through the published rulebook plus region-scheduled
+   exploration;
+4. select the strongest certified rival, falling back to no-op;
+5. run the common-root A/B/C experiment under the current `EvaluationSnapshot`;
+6. assign rival-grounded evolution evidence and no-op-grounded deployment
+   evidence only to frozen root co-advocates;
+7. evolve the relevant same-action niches when scheduled; and
+8. discard all temporary arms and commit only A's first action to the real
+   simulator.
+
+At certification ticks, independently supported rules are copied out of the
+population. Positive action rules become deployable actions; positive no-op
+rules become scoped vetoes. The resulting `FrozenRulebookPolicy` and its exact
+certification evidence are wrapped in a new content-addressed
+`EvaluationSnapshot`. Population mutations between ticks cannot change rollout
+continuation or deployment behavior.
+
+`Phase0ExperimentRunner` repeats this process over balanced training batches,
+then evaluates the selected published rulebook on a materially disjoint
+held-out batch. It retains traces, checkpoints, runtime manifests, causal and
+optional vanilla results, seed/refresh comparisons, path-selector ablations,
+and the final `Phase0AcceptanceReport`. See
+[the Phase-0 walkthrough](../phase0.md) for the scientific interpretation.
+
+## 15. Operator entry points
 
 ### Cluster artifact from prepared tracks
 
@@ -385,23 +441,30 @@ hailmary-simulate \
 The trace contains event batches, state identities, the final snapshot, and by
 default the compatibility arrival schedule.
 
-## 15. Diagnosing a value
+There is no separate learning CLI. Learning callers construct one
+`ActionRuntime`, pass it to `CausalTrainer` or `Phase0ExperimentRunner`, and use
+the typed atomic helpers in `hailmary.learning.artifacts` for rulebooks,
+evaluation snapshots, checkpoints, and epoch traces.
+
+## 16. Diagnosing a value
 
 When a result looks wrong, trace it backward in this order:
 
-1. **Outcome or feature:** inspect the frozen anchor/cohort, masks, schema, and
-   required spacing.
-2. **Predicted crossing:** inspect the live variant ID, trajectory-clock origin,
+1. **Learned/deployed decision:** inspect the evaluation-snapshot and rulebook
+   hashes, vetoes, matching rule IDs, action-vocabulary hash, runtime manifest,
+   and certification evidence.
+2. **Outcome or feature:** inspect the frozen anchor/cohort, root intervention
+   baseline, masks, schema, and required spacing.
+3. **Predicted crossing:** inspect the live variant ID, trajectory-clock origin,
    pending resource event, and exogenous log.
-3. **Action effect:** inspect action freshness, provenance, child diagnostics,
+4. **Action effect:** inspect action freshness, provenance, child diagnostics,
    station mapping, and splice audit.
-4. **Baseline motion:** inspect template replay diagnostics, envelope margins,
+5. **Baseline motion:** inspect template replay diagnostics, envelope margins,
    station/time conventions, and resource crossings.
-5. **Cluster identity:** inspect assignment probability, fallback/OOD reason,
+6. **Cluster identity:** inspect assignment probability, fallback/OOD reason,
    medoid distance, and acceptance radius.
-6. **Observation:** inspect catalog bounds, final inbound crossing, projection,
+7. **Observation:** inspect catalog bounds, final inbound crossing, projection,
    rejection audit, and raw sample timing.
 
 Following this chain avoids compensating for an upstream data or artifact issue
 inside downstream scoring code.
-
