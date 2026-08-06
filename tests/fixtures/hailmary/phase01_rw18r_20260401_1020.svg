@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 550" role="img" aria-labelledby="title desc">
+  <title id="title">Reviewed RW18R Phase 0/1 pairing fixture</title>
+  <desc id="desc">Five real medoid routes, reviewed shared segment membership, accepted segment pairs, and rejected threshold-only adjacency.</desc>
+  <rect width="760" height="550" fill="#0b1220"/>
+  <g fill="none" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+    <polyline stroke="#94a3b8" points="497.9,47.8 481.9,61.1 457.6,84.4 431.3,97.2 405.0,105.4 378.1,107.0 352.1,108.6 326.9,110.2 306.6,119.2 290.5,128.6 276.9,136.6 270.1,152.6 270.1,170.1 270.0,186.0 269.9,201.9 269.8,215.7 269.8,231.1 261.0,253.7"/>
+    <polyline stroke="#22c55e" points="38.5,476.8 62.3,472.1 97.6,456.0 124.2,425.4 150.3,395.2 175.7,365.7 201.0,336.8 223.2,311.2 227.0,280.6 227.4,251.5 227.5,223.1 227.8,190.7 228.0,160.8 234.8,138.0 252.9,136.2 261.0,150.8 261.4,167.1 261.3,185.2 261.2,201.8 261.2,217.9 261.1,233.0 261.0,253.7"/>
+    <polyline stroke="#38bdf8" points="491.8,39.4 487.5,44.7 466.8,71.1 444.9,92.2 417.5,102.3 390.3,106.2 363.8,107.9 338.1,109.5 312.6,111.5 290.0,121.8 272.5,136.9 263.3,156.5 261.3,177.5 261.3,197.4 261.2,215.4 261.1,229.4 261.0,253.7"/>
+    <polyline stroke="#f59e0b" points="30.6,38.9 39.1,43.3 73.1,61.2 98.8,79.3 122.6,98.5 146.2,111.8 171.5,113.5 206.5,121.8 232.0,130.5 254.3,142.8 260.7,165.9 261.2,184.7 261.2,203.0 261.2,219.7 261.1,233.8 261.0,253.7"/>
+    <polyline stroke="#e879f9" points="469.6,493.0 454.5,477.3 430.8,450.0 406.6,422.3 382.4,394.4 360.5,368.6 340.6,345.4 320.7,322.3 304.4,299.9 303.6,270.2 303.8,241.1 303.8,211.9 303.9,182.0 304.0,153.7 300.5,125.8 281.7,127.3 272.0,143.8 270.2,160.2 270.0,175.6 269.9,190.2 269.8,204.9 269.8,220.6 269.8,234.8 261.0,253.7"/>
+    <line x1="261" y1="150" x2="261" y2="254" stroke="#ffffff" stroke-width="9" opacity="0.45"/>
+  </g>
+  <circle cx="261" cy="254" r="7" fill="#ef4444"/>
+  <g font-family="ui-monospace, monospace" font-size="15" fill="#e2e8f0">
+    <text x="20" y="525">0 west</text><text x="95" y="525" fill="#22c55e">1 common</text>
+    <text x="205" y="525" fill="#38bdf8">2 common</text><text x="315" y="525" fill="#f59e0b">3 common</text>
+    <text x="425" y="525" fill="#e879f9">5 parallel</text>
+    <text x="545" y="45" font-size="18">Accepted segment pairs</text>
+    <text x="545" y="75">AAL2149 -> AAL2563</text><text x="545" y="98">AAL2563 -> NKS1673</text>
+    <text x="545" y="121">NKS1673 -> ENY4020</text><text x="545" y="144">JIA5113 -> JIA5463</text>
+    <text x="545" y="167">JIA5066 -> AAL1286</text>
+    <text x="545" y="215" fill="#fca5a5">Rejected threshold-only</text>
+    <text x="545" y="240" fill="#fca5a5">ENY4020 -/-> JIA5113</text>
+    <text x="545" y="263" fill="#fca5a5">JIA5463 -/-> JIA5066</text>
+    <text x="545" y="315">0.5 NM / 15 deg / 5 NM</text>
+    <text x="545" y="338">fixture v1; KDFW RW18R</text>
+  </g>
+</svg>

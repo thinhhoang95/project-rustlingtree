@@ -2,8 +2,11 @@
 
 To be referenced with `docs/hailmary/SEQD_Complete_Tutorial.md`.
 
-Status: implementation design, based on a repository scan on 2026-07-11 and
-clarified implementation decisions on 2026-07-12.
+Status: historical Phase-0 design, based on a repository scan on 2026-07-11.
+Its factorial and single-threshold assumptions were superseded by the ADS-B
+multi-runway Phase 0/1 design. For the implemented contract, use
+[`phase0.md`](phase0.md) and the technical architecture; do not implement the
+factorial sections below.
 
 The approved implementation scope covers all phases in Section 12. The
 end-to-end slice in Section 15 remains the first integration checkpoint, not
@@ -83,9 +86,8 @@ threshold time. Version 1 reconstructs it from the observed raw-track crossing
 of the 50 NM terminal boundary. If a track has samples on both sides of the
 boundary, interpolate the crossing time along the crossing segment. Reject the
 flight from observed-release replay if the crossing cannot be reconstructed;
-do not substitute the catalog threshold event. Factorial training scenarios
-retain this observed crossing as their baseline and apply seeded, controlled
-time shifts as described in Section 7.
+do not substitute the catalog threshold event. Traffic scenarios retain the
+observed crossing exactly at scale one and record explicit rejection counts.
 
 #### `data/adsb/catalogs/2026-04-01_fix_sequences.csv`
 
@@ -652,35 +654,13 @@ provenance rather than implicit defaults.
 
 ## 7. Scenario generation
 
-`ScenarioGenerator` turns cluster templates into an immutable `ScenarioDefinition`.
-
-Inputs should include:
-
-- cluster/template mixture;
-- number of arrivals or horizon;
-- entry/release rates per cluster;
-- entry-time jitter;
-- runway/resource assignment;
-- injected spacing error magnitude and location;
-- optional geometry perturbation family;
-- weather seed; and
-- master scenario seed.
-
-The SEQD tutorial requires the generator to decorrelate candidate concepts. Therefore generation parameters must support factorial sampling over at least:
-
-- error magnitude versus distance/time to final;
-- error magnitude versus demand pressure;
-- commitment versus pressure; and
-- commitment versus error magnitude.
-
-Generate all four quadrants for every registered pair and export a correlation audit. Training should stop before rollouts if a registered feature pair exceeds the configured absolute-correlation threshold (initially 0.3).
-
-Observed 50-NM crossing times form the baseline release schedule. For factorial
-training, apply seeded, recorded time shifts and resampling to that schedule to
-populate the registered quadrants. The generated definition stores both the
-observed release time and the applied offset. Unmodified observed replay is a
-validation mode; it is not allowed to bypass the decorrelation gate for
-training.
+`ScenarioGenerator` remains a generic immutable-definition primitive.
+`TrafficScenarioBuilder` is the experiment boundary. It creates independent
+one-hour ADS-B windows every 20 minutes, includes all valid runway arrivals,
+preserves the observed 50-NM entry schedule exactly at Phase-0 scale one, and
+uses one global scale in Phase 1. Route-graph segment traversals and gate
+resources are explicit in scenario schema v2. No factorial schedule mutation
+or correlation gate remains.
 
 All exogenous events—flight releases, weather changes, injected disturbances—
 come from named RNG streams and carry stable event identities. Whichever
@@ -1315,7 +1295,7 @@ Decisions made in this plan:
 
 - implementation covers all eight phases, with Section 15 as the first integration checkpoint;
 - package independence is enforced at imports and domain types;
-- observed 50-NM crossings define baseline release times and seeded perturbations create factorial training schedules;
+- observed 50-NM crossings define exact scale-one releases; Phase 1 scaling uses recorded seeded additions or thinning;
 - HDBSCAN uses a fixed scored sweep, with KMeans as a deterministic fallback;
 - every flight receives a final medoid assignment, with noise/OOD provenance retained;
 - medoid means an observed track minimizing unweighted 2-D pairwise station distance;

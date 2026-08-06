@@ -100,7 +100,11 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
         total_intervention_budget=3,
         live_nominal_etas_s=(99.0, 100.0, 699.999, 700.0),
         trailing_spacing_margins_s=(),
-        cluster_index=7,
+        airport="KATL",
+        runway="RW18R",
+        segment="segment-common",
+        leader_cluster="KATL:RW18R:1",
+        follower_cluster="KATL:RW18R:2",
     )
 
     vector = derive_leader_follower_state_vector(
@@ -109,7 +113,7 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
         scenario_config=ScenarioConfig(),
     )
 
-    assert vector.schema.schema_version == "hailmary.features.leader_follower.v1"
+    assert vector.schema.schema_version == "hailmary.features.leader_follower.v2"
     assert vector.schema_hash == leader_follower_feature_schema().schema_hash
     assert vector.values.dtype == np.float64
     assert np.isfinite(vector.values).all()
@@ -122,6 +126,13 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
     assert vector.value("required_delay_over_path_capacity") == 1.0
     assert vector.value("trailing_spacing_undefined_mask") == 1.0
     assert vector.diagnostics["pressure"]["count"] == 2
+    assert dict(vector.categories) == {
+        "airport": "KATL",
+        "runway": "RW18R",
+        "segment": "segment-common",
+        "leader_cluster": "KATL:RW18R:1",
+        "follower_cluster": "KATL:RW18R:2",
+    }
 
 
 def test_reachability_rejects_speedup_as_delay_capacity() -> None:

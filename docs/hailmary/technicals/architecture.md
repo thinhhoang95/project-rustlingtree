@@ -319,21 +319,12 @@ system does not relax these gates to force every cluster to compile.
 
 ## 7. Scenario construction
 
-`ScenarioGenerator` maps selected cluster templates to flight-generation
-specifications. It preserves observed release provenance and builds the
-schedule, action stations, resource crossings, and optional materialized
-disturbances.
-
-For factorial experiments, four conceptual factors are made operational:
-
-- **pressure** changes the release schedule;
-- **error magnitude** and **time to final** become explicit disturbance events;
-- **commitment** changes remaining station, budget, and final-gate freedom; and
-- the actual resulting commitment is measured in a provisional simulation
-  before correlation gates are evaluated.
-
-The generator fails infeasible combinations instead of merely labeling a
-scenario with factor values it did not realize.
+`ScenarioGenerator` remains the generic immutable-definition builder.
+`TrafficScenarioBuilder` owns the ADS-B schema-v2 boundary: half-open demand
+windows, exact terminal-entry provenance, one global scale, qualified
+airport/runway/cluster identities, and static `SegmentTraversalDefinition`
+records. `RouteGraphArtifact` contributes the segment entry/exit resources.
+There is no factorial generation or correlation gate.
 
 ## 8. Runtime event engine
 
@@ -493,13 +484,12 @@ confidence bound; no-op rules use rival-grounded evidence and publish as scoped
 vetoes. Passing rules are copied into `FrozenRulebookPolicy`, which contains no
 live reference to the population and performs no exploration or learning.
 
-`Phase0ExperimentRunner` applies this loop to balanced, materially disjoint
-training and held-out factorial batches. It compares causal and optional
-vanilla credit modes, tests seed and publication-interval robustness, evaluates
-the deployed policy against permanent no-op, runs the path-selector ablation,
-and returns a `Phase0AcceptanceReport`. The report is evidence, not a forced
-success: a completed run may correctly fail one or more scientific gates. See
-[the Phase-0 walkthrough](../phase0.md) for the experimental protocol.
+`Phase0ExperimentRunner` applies this loop to materially disjoint scale-one
+`TrafficScenarioBatch` inputs. Complete multi-runway snapshots are simulated,
+while outcome credit is restricted to the frozen bound pair. Windows without an
+actionable shared segment remain in fidelity audits and receive an explicit skip
+reason. Phase 1 uses the same traffic builder with one global scale and restores
+downstream-trailer credit. See [the Phase-0/1 walkthrough](../phase0.md).
 
 ## 12. Reproducibility and failure behavior
 
@@ -520,17 +510,20 @@ Reproducibility is enforced at several levels:
 Failures are intentionally typed and early. Invalid artifacts raise
 `ArtifactValidationError`, invalid settings raise `ConfigurationError`, stale
 or infeasible actions raise action errors, invalid state transitions raise
-`SimulationError`, and unachievable factorial designs raise explicit correlation
-or feasibility errors. A maintainer should preserve these fail-closed semantics
+`SimulationError`, and invalid traffic/topology contracts raise explicit
+validation or feasibility errors. A maintainer should preserve these fail-closed semantics
 when adding a new data source, aircraft type, action lever, or feature.
 
 ## 13. Integration surfaces
 
-There are three supported command-line entry points:
+The supported command-line entry points include:
 
 ```bash
 hailmary-build-clusters --help
 hailmary-build-templates --help
+hailmary-build-offline-corpus --help
+hailmary-build-route-graph --help
+hailmary-build-traffic-batch --help
 hailmary-simulate --help
 ```
 

@@ -433,23 +433,21 @@ def simulator_outcome_plan(
 
     from hailmary.errors import StaleActionError
     from hailmary.features.anchors import (
-        build_current_leader_follower_anchors,
+        build_current_segment_anchors,
         resource_eta_s,
     )
 
     cfg = OutcomeConfig() if config is None else config
-    anchors = build_current_leader_follower_anchors(
-        simulator,
-        resource_id=anchor.resource_id,
-    )
+    anchors = build_current_segment_anchors(simulator)
     if anchor.anchor_id not in {item.anchor_id for item in anchors.leader_follower}:
         raise StaleActionError(
             "outcome anchor is stale for the current threshold ordering"
         )
     resource = simulator.state.definition.resource(anchor.resource_id)
+    flow = anchors.flow_for_segment(anchor.segment_id)
     cohort = freeze_outcome_cohort(
         anchor,
-        anchors.flow.ordered_flight_ids,
+        flow.ordered_flight_ids,
         trailer_count=cfg.trailer_count,
         required_interval_s=float(resource.required_interval_s),
     )

@@ -332,15 +332,22 @@ Defaults to start: k = 3, H = the k-th trailer's threshold crossing plus one slo
 
 ### 13. Why generation is not the backdrop
 
-The interventional test can only separate two predicates if they **vary independently somewhere in the data**. If every situation that needs delay is also upstream of waypoint X, no method — interventional or not — can attribute the effect between the two predicates; the do-operator distinguishes causes from confounds only where the confound is broken. Naturalistic traffic is full of exactly such entanglements, because the entanglements are *why controllers formed the habits in the first place*. Therefore the generator must **actively decorrelate the features that controllers conflate**, and this is a first-class design requirement with a named failure mode, not a data-engineering afterthought.
+The implemented Phase 0 no longer manufactures a factorial distribution. The
+original proposal assumed that controlled schedule shifts would be a faithful
+experimental backdrop; the ADS-B-centered redesign rejects that premise.
+Instead, one-hour overlapping snapshots preserve reconstructed terminal-entry
+events, all represented runways, and the observed arrival-cluster mixture.
 
-The revision from the stress-test sharpens this from a generic principle into a protocol:
+This narrows the scientific statement. Common-root rollouts still compare an
+action, a rival, and no-op on identical naturalistic state, but they do not prove
+that arbitrary candidate predicates were deliberately decorrelated. A published
+result must therefore describe held-out benefit on the observed demand
+distribution, not claim factorial identification.
 
-**Pre-register per-heuristic confound pairs.** For each heuristic family you intend to rediscover, write down before training which predicate pairs the generator must break, then verify it broke them. For the two worked heuristics of Part VI: (error magnitude ⟂ distance-to-final) and (error magnitude ⟂ pressure) for the speed-versus-path rule; (commitment ⟂ pressure) and (commitment ⟂ error magnitude) for the freeze rule.
-
-**Generate factorially over those axes.** The generator's controllable parameters (arrival rates per entry fix, entry-time jitter, where and when spacing errors are injected, geometry variants) are sampled so the registered pairs get all four quadrants: late-detected *large* errors, early-detected *small* errors, high-commitment/low-pressure streams, low-commitment/high-pressure streams. These quadrants are rare in naturalistic traffic; that rarity is exactly why habitual and causal predicates are observationally indistinguishable to humans.
-
-**Audit.** After generation, compute the empirical correlation matrix over all Tier 2/3 features across the sampled situation distribution; flag any registered pair with |ρ| above ~0.3 as unresolvable and fix the generator before training. Publish the audit with the results — it is the reader's warrant that surviving predicates were genuinely tested.
+**Audit traffic and topology.** Phase 0 publishes scale-one count/timestamp
+fidelity, qualified runway-cluster counts, route-graph hashes, segment-pair
+validity, source partitions, and embargo evidence. Phase 1 changes only one
+batch-wide traffic scale and downstream-trailer credit.
 
 The situation *distribution* also carries a second duty from the original framing, unchanged: the learning objective is expected effect over the distribution, and that is what makes a surviving regularity a *heuristic* (a generalizable rule) rather than an overfitted reaction to one scenario.
 

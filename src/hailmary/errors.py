@@ -27,9 +27,9 @@ class SimulationError(HailmaryError, RuntimeError):
     """The event engine cannot safely advance the scenario."""
 
 
-class CorrelationGateError(HailmaryError, ValueError):
-    """A training scenario failed the registered feature-correlation gate."""
-
-
 class NoFeasibleClusterError(HailmaryError, ValueError):
     """No usable clustering configuration or fallback could be produced."""
+
+
+class NoEligibleArrivalsError(HailmaryError, ValueError):
+    """A runway partition contains no reconstructable terminal arrivals."""

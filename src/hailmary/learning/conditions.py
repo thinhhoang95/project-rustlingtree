@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -106,6 +106,7 @@ class RuleCondition:
     role_type: str
     schema_hash: str
     intervals: Mapping[str, Interval | Sequence[float | None]]
+    categories: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         role = str(self.role_type).strip()
@@ -127,6 +128,17 @@ class RuleCondition:
         object.__setattr__(
             self, "intervals", MappingProxyType(dict(sorted(normalized.items())))
         )
+        if not isinstance(self.categories, Mapping):
+            raise TypeError("condition categories must be a mapping")
+        categories = {
+            str(name).strip(): str(value).strip()
+            for name, value in self.categories.items()
+        }
+        if any(not name or not value for name, value in categories.items()):
+            raise ValueError("condition category names and values must be non-empty")
+        object.__setattr__(
+            self, "categories", MappingProxyType(dict(sorted(categories.items())))
+        )
 
     def matches(
         self,
@@ -134,6 +146,7 @@ class RuleCondition:
         *,
         role_type: str | None = None,
         schema_hash: str | None = None,
+        categories: Mapping[str, str] | None = None,
     ) -> bool:
         supplied_role = role_type
         if supplied_role is None:
@@ -155,6 +168,15 @@ class RuleCondition:
         for name, interval in self.intervals.items():
             if name not in named or not interval.matches(float(named[name])):
                 return False
+        supplied_categories = categories
+        if supplied_categories is None:
+            supplied_categories = getattr(values, "categories", None)
+        if self.categories:
+            if not isinstance(supplied_categories, Mapping):
+                return False
+            for name, expected in self.categories.items():
+                if str(supplied_categories.get(name, "")) != expected:
+                    return False
         return True
 
     def contains(self, other: "RuleCondition") -> bool:
@@ -165,6 +187,9 @@ class RuleCondition:
         for name, interval in self.intervals.items():
             candidate = other.intervals.get(name)
             if candidate is None or not interval.contains(candidate):
+                return False
+        for name, value in self.categories.items():
+            if other.categories.get(name) != value:
                 return False
         return True
 
@@ -178,12 +203,26 @@ class RuleCondition:
             raise ValueError("feature_name cannot be empty")
         updated = dict(self.intervals)
         updated[name] = Interval.coerce(interval)
-        return RuleCondition(self.role_type, self.schema_hash, updated)
+        return RuleCondition(self.role_type, self.schema_hash, updated, self.categories)
 
     def without_interval(self, feature_name: str) -> "RuleCondition":
         updated = dict(self.intervals)
         updated.pop(str(feature_name), None)
-        return RuleCondition(self.role_type, self.schema_hash, updated)
+        return RuleCondition(self.role_type, self.schema_hash, updated, self.categories)
+
+    def with_category(self, name: str, value: str) -> "RuleCondition":
+        normalized_name = str(name).strip()
+        normalized_value = str(value).strip()
+        if not normalized_name or not normalized_value:
+            raise ValueError("category name and value must be non-empty")
+        updated = dict(self.categories)
+        updated[normalized_name] = normalized_value
+        return RuleCondition(self.role_type, self.schema_hash, self.intervals, updated)
+
+    def without_category(self, name: str) -> "RuleCondition":
+        updated = dict(self.categories)
+        updated.pop(str(name), None)
+        return RuleCondition(self.role_type, self.schema_hash, self.intervals, updated)
 
     def shifted(self, feature_name: str, delta: float) -> "RuleCondition":
         try:
@@ -206,17 +245,18 @@ class RuleCondition:
             "intervals": {
                 name: interval.to_list() for name, interval in self.intervals.items()
             },
+            "categories": dict(self.categories),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RuleCondition":
         if not isinstance(payload, Mapping):
             raise TypeError("condition payload must be a mapping")
-        expected_fields = {"role_type", "schema_hash", "intervals"}
+        expected_fields = {"role_type", "schema_hash", "intervals", "categories"}
         if set(payload) != expected_fields:
             raise ValueError(
                 "condition payload fields must be exactly role_type, schema_hash, "
-                "and intervals"
+                "intervals, and categories"
             )
         role_type = payload["role_type"]
         schema_hash = payload["schema_hash"]
@@ -227,10 +267,14 @@ class RuleCondition:
         intervals = payload["intervals"]
         if not isinstance(intervals, Mapping):
             raise TypeError("serialized condition intervals must be a mapping")
+        categories = payload["categories"]
+        if not isinstance(categories, Mapping):
+            raise TypeError("serialized condition categories must be a mapping")
         return cls(
             role_type=role_type,
             schema_hash=schema_hash,
             intervals=intervals,
+            categories=categories,
         )
 
 

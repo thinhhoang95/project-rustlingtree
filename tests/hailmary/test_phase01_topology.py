@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from hailmary.features import build_current_segment_anchors
+from hailmary.geometry import LocalFrame
+from hailmary.scenario import (
+    FlightDefinition,
+    ResourceCrossingDefinition,
+    ResourceDefinition,
+    ScenarioDefinition,
+    SegmentTraversalDefinition,
+)
+from hailmary.simulator import Simulator
+from hailmary.templates import TrajectoryVariant
+from hailmary.topology import MedoidRoute, RouteGraphArtifact, build_route_graph
+
+
+def _route(cluster: str, points: tuple[tuple[float, float], ...]) -> MedoidRoute:
+    frame = LocalFrame(0.0, 0.0)
+    lat, lon = frame.unproject(
+        np.asarray([item[0] for item in points]),
+        np.asarray([item[1] for item in points]),
+    )
+    return MedoidRoute(
+        dataset_id="phase01-topology-test",
+        airport="KATL",
+        runway="RW18R",
+        cluster_id=cluster,
+        lat_deg=tuple(lat),
+        lon_deg=tuple(lon),
+    )
+
+
+def test_continuous_geometry_merges_converged_routes_but_not_parallel_final() -> None:
+    graph = build_route_graph(
+        (
+            _route("C1", ((-30_000.0, 10_000.0), (-16_000.0, 0.0), (0.0, 0.0))),
+            _route(
+                "C2",
+                (
+                    (30_000.0, 10_000.0),
+                    (-16_000.0, 0.0),
+                    (-8_000.0, 0.0),
+                    (0.0, 0.0),
+                ),
+            ),
+            _route(
+                "C3",
+                (
+                    (0.0, 30_000.0),
+                    (-16_000.0, 5_000.0),
+                    (-16_000.0, 0.0),
+                    (0.0, 0.0),
+                ),
+            ),
+            _route(
+                "P",
+                (
+                    (30_000.0, 4_000.0),
+                    (9_000.0, 4_000.0),
+                    (0.0, 4_000.0),
+                    (0.0, 0.0),
+                ),
+            ),
+        )
+    )
+    expected = ("KATL:RW18R:C1", "KATL:RW18R:C2", "KATL:RW18R:C3")
+    shared = [item for item in graph.segments if item.cluster_ids == expected]
+
+    assert len(shared) == 1
+    assert shared[0].length_m >= 5.0 * 1_852.0
+    assert all("KATL:RW18R:P" not in item.cluster_ids for item in shared)
+    assert any(item.cluster_ids == ("KATL:RW18R:P",) for item in graph.segments)
+    assert RouteGraphArtifact.from_dict(graph.to_dict()).to_dict() == graph.to_dict()
+
+    invalid = graph.to_dict()
+    invalid["schema_version"] = "hailmary.route_graph.v0"
+    invalid["artifact_content_hash"] = ""
+    with pytest.raises(ValueError, match="unsupported route-graph artifact schema"):
+        RouteGraphArtifact.from_dict(invalid)
+
+
+def _variant(cluster: str, speed_mps: float) -> TrajectoryVariant:
+    stations = np.asarray([0.0, 500.0, 1_500.0, 2_000.0])
+    speed = np.full(len(stations), speed_mps)
+    return TrajectoryVariant.from_kinematic_profile(
+        template_id=f"template:{cluster}:{speed_mps:g}",
+        cluster_id=cluster,
+        s_m=stations,
+        east_m=stations,
+        north_m=np.zeros(len(stations)),
+        altitude_m=stations,
+        cas_mps=speed,
+        lower_cas_mps=np.full(len(stations), 40.0),
+        upper_cas_mps=np.full(len(stations), 130.0),
+        threshold_resource_id="RWY",
+        resource_stations_m=(("S:entry", 1_500.0), ("S:exit", 500.0)),
+    )
+
+
+def test_segment_queue_uses_occupancy_then_entry_eta_and_reports_catch_up() -> None:
+    fast = _variant("FAST", 100.0)
+    slow = _variant("SLOW", 50.0)
+    resources = (
+        ResourceDefinition("S:entry", kind="segment_entry"),
+        ResourceDefinition("S:exit", kind="segment_exit"),
+    )
+    crossings = (
+        ResourceCrossingDefinition("S:entry", 1_500.0),
+        ResourceCrossingDefinition("S:exit", 500.0),
+    )
+    traversal = (
+        SegmentTraversalDefinition(0, "S", "S:entry", "S:exit", 1_500.0, 500.0),
+    )
+    definition = ScenarioDefinition(
+        scenario_id="segment-queue",
+        seed=5,
+        flights=(
+            # At t=0, A is physically downstream of Z, but its slower profile
+            # predicts a later exit. The queue must not reverse them.
+            FlightDefinition("A", -24.0, slow.variant_id, "SLOW", resource_crossings=crossings, segment_traversals=traversal),
+            FlightDefinition("Z", -10.0, fast.variant_id, "FAST", resource_crossings=crossings, segment_traversals=traversal),
+            FlightDefinition("B", 0.0, fast.variant_id, "FAST", resource_crossings=crossings, segment_traversals=traversal),
+            FlightDefinition("C", 0.0, fast.variant_id, "FAST", resource_crossings=crossings, segment_traversals=traversal),
+        ),
+        resources=resources,
+        variants=(fast, slow),
+        schema_version="hailmary.scenario.v2",
+    )
+    simulator = Simulator(definition).run_until(0.0)
+    anchors = build_current_segment_anchors(simulator)
+    flow = anchors.flow_for_segment("S")
+    by_pair = {
+        (item.leader_id, item.follower_id): item for item in anchors.leader_follower
+    }
+
+    assert flow.ordered_flight_ids == ("A", "Z", "B", "C")
+    assert set(by_pair) == {("A", "Z"), ("Z", "B"), ("B", "C")}
+    assert by_pair[("A", "Z")].ordering_basis == "physical_progress"
+    assert by_pair[("A", "Z")].predicted_exit_interval_s == -1.0
+    assert by_pair[("A", "Z")].catch_up is True

@@ -10,8 +10,8 @@ from hailmary.actions.models import ActionLever
 from hailmary.config import StretchConfig
 from hailmary.evaluation import simulator_intervention_summary, simulator_outcome_plan
 from hailmary.features import (
-    active_threshold_predictions,
-    build_current_leader_follower_anchors,
+    active_resource_predictions,
+    build_current_segment_anchors,
     simulator_state_vector,
 )
 from hailmary.rollout import (
@@ -27,6 +27,7 @@ from hailmary.scenario import (
     ResourceCrossingDefinition,
     ResourceDefinition,
     ScenarioDefinition,
+    SegmentTraversalDefinition,
 )
 from hailmary.simulator import EventKind, Simulator
 from hailmary.templates import TrajectoryVariant
@@ -58,7 +59,15 @@ def _baseline_variant() -> TrajectoryVariant:
 
 def _scenario() -> ScenarioDefinition:
     variant = _baseline_variant()
-    threshold = (ResourceCrossingDefinition(resource_id="RWY", s_m=0.0),)
+    crossings = (
+        ResourceCrossingDefinition(resource_id="FINAL:entry", s_m=15_000.0),
+        ResourceCrossingDefinition(resource_id="RWY", s_m=0.0),
+    )
+    traversals = (
+        SegmentTraversalDefinition(
+            0, "FINAL", "FINAL:entry", "RWY", 15_000.0, 0.0
+        ),
+    )
     return ScenarioDefinition(
         scenario_id="INTEGRATION_SLICE",
         seed=17,
@@ -68,7 +77,8 @@ def _scenario() -> ScenarioDefinition:
                 release_time_s=0.0,
                 baseline_variant_id=variant.variant_id,
                 cluster_id="SYNTHETIC_CLUSTER",
-                resource_crossings=threshold,
+                resource_crossings=crossings,
+                segment_traversals=traversals,
             ),
             FlightDefinition(
                 flight_id="FOLLOWER",
@@ -82,10 +92,14 @@ def _scenario() -> ScenarioDefinition:
                         station_type="speed",
                     ),
                 ),
-                resource_crossings=threshold,
+                resource_crossings=crossings,
+                segment_traversals=traversals,
             ),
         ),
-        resources=(ResourceDefinition(resource_id="RWY", required_interval_s=90.0),),
+        resources=(
+            ResourceDefinition(resource_id="RWY", required_interval_s=90.0),
+            ResourceDefinition(resource_id="FINAL:entry", kind="segment_entry"),
+        ),
         variants=(variant,),
     )
 
@@ -119,14 +133,14 @@ def test_real_leader_follower_vector_and_paired_action_slice() -> None:
             break
 
     parent_hash = parent.dynamic_content_hash
-    predictions = active_threshold_predictions(parent)
+    predictions = active_resource_predictions(parent, resource_id="RWY")
     assert [(item.flight_id, item.eta_s) for item in predictions] == [
         ("LEADER", 200.0),
         ("FOLLOWER", 260.0),
     ]
     assert predictions[1].sample.s_m == 10_000.0
 
-    resource_anchors = build_current_leader_follower_anchors(parent)
+    resource_anchors = build_current_segment_anchors(parent)
     anchor = resource_anchors.leader_follower[0]
     assert (anchor.leader_id, anchor.follower_id) == ("LEADER", "FOLLOWER")
     candidates = ActionCatalog().enumerate_for_batch(
@@ -134,6 +148,8 @@ def test_real_leader_follower_vector_and_paired_action_slice() -> None:
         batch,
         anchor_id=anchor.anchor_id,
         bound_flight_id=anchor.follower_id,
+        resource_id=anchor.resource_id,
+        segment_id=anchor.segment_id,
     )
     no_op = next(item for item in candidates if item.lever is ActionLever.NO_OP)
     heavy = next(
@@ -201,7 +217,7 @@ def test_identical_real_speed_arms_have_equal_content_and_zero_delta() -> None:
         assert batch is not None
         if batch.time_s == 160.0:
             break
-    anchor = build_current_leader_follower_anchors(parent).leader_follower[0]
+    anchor = build_current_segment_anchors(parent).leader_follower[0]
     heavy = next(
         item
         for item in ActionCatalog().enumerate_for_batch(
@@ -209,6 +225,8 @@ def test_identical_real_speed_arms_have_equal_content_and_zero_delta() -> None:
             batch,
             anchor_id=anchor.anchor_id,
             bound_flight_id=anchor.follower_id,
+            resource_id=anchor.resource_id,
+            segment_id=anchor.segment_id,
         )
         if item.lever is ActionLever.SPEED and item.band == "heavy"
     )
@@ -237,12 +255,14 @@ def test_native_three_arm_speed_rollout_uses_one_runtime_policy_and_parent() -> 
     runtime = build_action_runtime()
     parent = runtime.create_simulator(_scenario())
     batch = _advance_to_action_station(parent)
-    anchor = build_current_leader_follower_anchors(parent).leader_follower[0]
+    anchor = build_current_segment_anchors(parent).leader_follower[0]
     candidates = runtime.catalog.enumerate_for_batch(
         parent,
         batch,
         anchor_id=anchor.anchor_id,
         bound_flight_id=anchor.follower_id,
+        resource_id=anchor.resource_id,
+        segment_id=anchor.segment_id,
     )
     no_op = next(item for item in candidates if item.lever is ActionLever.NO_OP)
     heavy = next(
@@ -304,7 +324,7 @@ def test_native_three_arm_stretch_rollout_uses_real_runtime_realizer() -> None:
     batch = _advance_to_action_station(parent)
     anchor = next(
         item
-        for item in build_current_leader_follower_anchors(parent).leader_follower
+        for item in build_current_segment_anchors(parent).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     candidates = runtime.catalog.enumerate_for_batch(
@@ -312,6 +332,8 @@ def test_native_three_arm_stretch_rollout_uses_real_runtime_realizer() -> None:
         batch,
         anchor_id=anchor.anchor_id,
         bound_flight_id=anchor.follower_id,
+        resource_id=anchor.resource_id,
+        segment_id=anchor.segment_id,
     )
     no_op = next(item for item in candidates if item.lever is ActionLever.NO_OP)
     stretch = next(
@@ -373,7 +395,7 @@ def test_real_action_lineage_charges_only_post_root_interventions() -> None:
     first_batch = _advance_to_action_station(parent)
     first_anchor = next(
         item
-        for item in build_current_leader_follower_anchors(parent).leader_follower
+        for item in build_current_segment_anchors(parent).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     first_candidates = runtime.catalog.enumerate_for_batch(
@@ -381,6 +403,8 @@ def test_real_action_lineage_charges_only_post_root_interventions() -> None:
         first_batch,
         anchor_id=first_anchor.anchor_id,
         bound_flight_id=first_anchor.follower_id,
+        resource_id=first_anchor.resource_id,
+        segment_id=first_anchor.segment_id,
     )
     historical_action = next(
         item
@@ -396,7 +420,7 @@ def test_real_action_lineage_charges_only_post_root_interventions() -> None:
     second_batch = _advance_to_action_station(parent)
     second_anchor = next(
         item
-        for item in build_current_leader_follower_anchors(parent).leader_follower
+        for item in build_current_segment_anchors(parent).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     candidates = runtime.catalog.enumerate_for_batch(
@@ -404,6 +428,8 @@ def test_real_action_lineage_charges_only_post_root_interventions() -> None:
         second_batch,
         anchor_id=second_anchor.anchor_id,
         bound_flight_id=second_anchor.follower_id,
+        resource_id=second_anchor.resource_id,
+        segment_id=second_anchor.segment_id,
     )
     no_op = next(item for item in candidates if item.lever is ActionLever.NO_OP)
     post_root_action = next(
@@ -458,7 +484,7 @@ def test_continuation_policy_interventions_contribute_to_rollout_cost() -> None:
     first_batch = _advance_to_action_station(parent)
     first_anchor = next(
         item
-        for item in build_current_leader_follower_anchors(parent).leader_follower
+        for item in build_current_segment_anchors(parent).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     first_candidates = runtime.catalog.enumerate_for_batch(
@@ -466,6 +492,8 @@ def test_continuation_policy_interventions_contribute_to_rollout_cost() -> None:
         first_batch,
         anchor_id=first_anchor.anchor_id,
         bound_flight_id=first_anchor.follower_id,
+        resource_id=first_anchor.resource_id,
+        segment_id=first_anchor.segment_id,
     )
     no_op = next(item for item in first_candidates if item.lever is ActionLever.NO_OP)
     plan = simulator_outcome_plan(parent, first_anchor)
@@ -478,7 +506,7 @@ def test_continuation_policy_interventions_contribute_to_rollout_cost() -> None:
             later_anchor = next(
                 (
                     item
-                    for item in build_current_leader_follower_anchors(
+                    for item in build_current_segment_anchors(
                         context.simulator
                     ).leader_follower
                     if item.follower_id == "FOLLOWER"
@@ -492,6 +520,8 @@ def test_continuation_policy_interventions_contribute_to_rollout_cost() -> None:
                 context.event_batch,
                 anchor_id=later_anchor.anchor_id,
                 bound_flight_id=later_anchor.follower_id,
+                resource_id=later_anchor.resource_id,
+                segment_id=later_anchor.segment_id,
             )
             return next(
                 item

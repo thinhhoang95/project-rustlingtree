@@ -21,6 +21,7 @@ from hailmary.scenario import (
     ResourceCrossingDefinition,
     ResourceDefinition,
     ScenarioDefinition,
+    SegmentTraversalDefinition,
 )
 from hailmary.simulator import EventKind, MonotoneTrajectory, Simulator
 
@@ -46,12 +47,19 @@ def _live_action_simulator() -> Simulator:
                 resource_crossings=(
                     ResourceCrossingDefinition("RWY", 0.0),
                     ResourceCrossingDefinition("MERGE", 75_000.0, station_index=1),
+                    ResourceCrossingDefinition("FINAL:entry", 50_000.0),
+                ),
+                segment_traversals=(
+                    SegmentTraversalDefinition(
+                        0, "FINAL", "FINAL:entry", "RWY", 50_000.0, 0.0
+                    ),
                 ),
             ),
         ),
         resources=(
             ResourceDefinition("RWY"),
             ResourceDefinition("MERGE", kind="merge"),
+            ResourceDefinition("FINAL:entry", kind="segment_entry"),
         ),
         variants=(baseline,),
     )
@@ -105,6 +113,8 @@ def test_live_stretch_then_speed_preserves_splices_and_maps_future_events() -> N
             stretch_batch,
             anchor_id="STRETCH_ANCHOR",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         )
         if candidate.lever is ActionLever.PATH_STRETCH
     )
@@ -168,6 +178,8 @@ def test_live_stretch_then_speed_preserves_splices_and_maps_future_events() -> N
             speed_batch,
             anchor_id="SPEED_ANCHOR",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         )
         if candidate.lever is ActionLever.SPEED and candidate.band == "light"
     )
@@ -196,8 +208,10 @@ def test_replacement_rejects_a_splice_mapping_that_moves_the_live_aircraft() -> 
         for candidate in ActionCatalog().enumerate_for_batch(
             simulator,
             stretch_batch,
-            anchor_id="STRETCH_ANCHOR",
-            bound_flight_id="F1",
+                anchor_id="STRETCH_ANCHOR",
+                bound_flight_id="F1",
+                resource_id="RWY",
+                segment_id="FINAL",
         )
         if candidate.lever is ActionLever.PATH_STRETCH
     )
@@ -246,8 +260,10 @@ def test_active_time_shift_preserves_stretch_mapped_pending_stations() -> None:
         for candidate in ActionCatalog().enumerate_for_batch(
             simulator,
             stretch_batch,
-            anchor_id="STRETCH_ANCHOR",
-            bound_flight_id="F1",
+                anchor_id="STRETCH_ANCHOR",
+                bound_flight_id="F1",
+                resource_id="RWY",
+                segment_id="FINAL",
         )
         if candidate.lever is ActionLever.PATH_STRETCH
     )
@@ -308,11 +324,22 @@ def test_replay_compiled_stretch_preserves_the_live_simap_splice() -> None:
                     action_stations=(
                         ActionStationDefinition(0, 90_000.0, "path_stretch"),
                     ),
+                    resource_crossings=(
+                        ResourceCrossingDefinition("MERGE", 75_000.0),
+                        ResourceCrossingDefinition("FINAL:entry", 50_000.0),
+                        ResourceCrossingDefinition("RWY", 0.0),
+                    ),
+                    segment_traversals=(
+                        SegmentTraversalDefinition(
+                            0, "FINAL", "FINAL:entry", "RWY", 50_000.0, 0.0
+                        ),
+                    ),
                 ),
             ),
             resources=(
                 ResourceDefinition("RWY"),
                 ResourceDefinition("MERGE", kind="merge"),
+                ResourceDefinition("FINAL:entry", kind="segment_entry"),
             ),
             variants=(baseline,),
         )
@@ -326,6 +353,8 @@ def test_replay_compiled_stretch_preserves_the_live_simap_splice() -> None:
             batch,
             anchor_id="SIMAP_STRETCH",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         )
         if candidate.lever is ActionLever.PATH_STRETCH
     )
@@ -373,11 +402,22 @@ def test_replay_compiled_speed_action_preserves_the_live_physical_prefix() -> No
                     release_time_s=0.0,
                     baseline_variant_id=baseline.variant_id,
                     action_stations=(ActionStationDefinition(0, 80_000.0, "speed"),),
+                    resource_crossings=(
+                        ResourceCrossingDefinition("MERGE", 75_000.0),
+                        ResourceCrossingDefinition("FINAL:entry", 50_000.0),
+                        ResourceCrossingDefinition("RWY", 0.0),
+                    ),
+                    segment_traversals=(
+                        SegmentTraversalDefinition(
+                            0, "FINAL", "FINAL:entry", "RWY", 50_000.0, 0.0
+                        ),
+                    ),
                 ),
             ),
             resources=(
                 ResourceDefinition("RWY"),
                 ResourceDefinition("MERGE", kind="merge"),
+                ResourceDefinition("FINAL:entry", kind="segment_entry"),
             ),
             variants=(baseline,),
         )
@@ -391,6 +431,8 @@ def test_replay_compiled_speed_action_preserves_the_live_physical_prefix() -> No
             batch,
             anchor_id="SIMAP_SPEED",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         )
         if candidate.lever is ActionLever.SPEED and candidate.band == "light"
     )

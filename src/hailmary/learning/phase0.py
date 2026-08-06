@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, replace
-from itertools import product
 import json
+import math
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -16,7 +15,7 @@ from hailmary.config import (
     ScenarioConfig,
 )
 from hailmary.evaluation.outcome import simulator_outcome_plan
-from hailmary.features import build_current_leader_follower_anchors
+from hailmary.features import build_current_segment_anchors
 from hailmary.ids import canonical_data, canonical_json, content_hash
 from hailmary.learning.artifacts import EvaluationSnapshot
 from hailmary.learning.credit import (
@@ -55,15 +54,7 @@ from hailmary.learning.validation import (
 )
 from hailmary.rollout import policy_vs_permanent_no_op_simulator_rollout
 from hailmary.runtime import ActionRuntime
-from hailmary.scenario import FactorialScenario, FactorialScenarioBatch
-
-
-_REQUIRED_FACTORS = (
-    "commitment",
-    "error_magnitude",
-    "pressure",
-    "time_to_final",
-)
+from hailmary.scenario import TrafficScenario, TrafficScenarioBatch
 _ACTION_RUNTIME_HASH_NAMESPACE = "hailmary.action_runtime.v1"
 _OUTCOME_PLAN_HASH_NAMESPACE = "hailmary.phase0.outcome_plan.v1"
 _ORACLE_STRETCH_SELECTOR = "semi_local_outcome"
@@ -71,18 +62,9 @@ _GEOMETRY_ONLY_STRETCH_SELECTOR = "geometry_clearance"
 
 
 def _material_event_payload(event: Any) -> Any:
-    """Drop design-only identifiers from an otherwise physical event payload."""
+    """Return the physical materialized event payload."""
 
-    payload = canonical_data(event.payload_dict)
-    if not isinstance(payload, dict):
-        return payload
-    updates = payload.get("state_updates")
-    if isinstance(updates, dict) and "factorial_condition_id" in updates:
-        payload = dict(payload)
-        physical_updates = dict(updates)
-        physical_updates.pop("factorial_condition_id", None)
-        payload["state_updates"] = physical_updates
-    return payload
+    return canonical_data(event.payload_dict)
 
 
 def _replace_identifier_references(value: Any, labels: Mapping[str, str]) -> Any:
@@ -133,7 +115,7 @@ def _variant_identifier(variant: Any) -> str:
     raise ValueError("scenario variant has no identifier")
 
 
-def _material_scenario_fingerprint(scenario: FactorialScenario) -> str:
+def _material_scenario_fingerprint(scenario: TrafficScenario) -> str:
     """Hash a canonically relabeled, order-independent physical realization."""
 
     definition = scenario.definition
@@ -223,6 +205,10 @@ def _material_scenario_fingerprint(scenario: FactorialScenario) -> str:
                     canonical_data(flight.resource_crossings),
                     resource_labels,
                 ),
+                "segment_traversals": _replace_identifier_references(
+                    canonical_data(flight.segment_traversals),
+                    resource_labels,
+                ),
             }
         )
     flight_cluster_labels = _labels_from_physical_signatures(
@@ -245,6 +231,10 @@ def _material_scenario_fingerprint(scenario: FactorialScenario) -> str:
             "action_stations": canonical_data(flight.action_stations),
             "resource_crossings": _replace_identifier_references(
                 canonical_data(flight.resource_crossings),
+                resource_labels,
+            ),
+            "segment_traversals": _replace_identifier_references(
+                canonical_data(flight.segment_traversals),
                 resource_labels,
             ),
         }
@@ -579,7 +569,7 @@ class Phase0ExperimentConfig:
 
 @dataclass(frozen=True, slots=True)
 class Phase0TrainingRun:
-    """Detached summary of one real trainer run over the balanced batch."""
+    """Detached summary of one real trainer run over natural traffic windows."""
 
     seed: int
     refresh_interval_epochs: int
@@ -593,6 +583,7 @@ class Phase0TrainingRun:
     population_json: str
     rule_hyperrectangles: tuple[RuleHyperrectangle, ...] | Sequence[RuleHyperrectangle]
     certification_evidence: Mapping[str, ActionCertificationEvidence]
+    skipped_scenarios: Mapping[str, str]
 
     def __post_init__(self) -> None:
         if type(self.seed) is not int or self.seed < 0:
@@ -701,6 +692,12 @@ class Phase0TrainingRun:
             "certification_evidence",
             MappingProxyType(dict(sorted(evidence.items()))),
         )
+        skipped = {str(key): str(value) for key, value in self.skipped_scenarios.items()}
+        if any(not key or not value for key, value in skipped.items()):
+            raise ValueError("skipped scenario identities and reasons must be non-empty")
+        object.__setattr__(
+            self, "skipped_scenarios", MappingProxyType(dict(sorted(skipped.items())))
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -726,6 +723,7 @@ class Phase0TrainingRun:
                 }
                 for key, value in sorted(self.certification_evidence.items())
             },
+            "skipped_scenarios": dict(self.skipped_scenarios),
         }
 
 
@@ -738,8 +736,8 @@ class Phase0ExperimentResult:
     selected_causal_run: Phase0TrainingRun
     validation_inputs: Phase0ValidationInputs
     acceptance_report: Phase0AcceptanceReport
-    training_correlation_audit: Mapping[str, Any]
-    held_out_correlation_audit: Mapping[str, Any]
+    training_traffic_audit: Mapping[str, Any]
+    held_out_traffic_audit: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         causal = tuple(self.causal_runs)
@@ -768,13 +766,13 @@ class Phase0ExperimentResult:
         object.__setattr__(self, "vanilla_runs", vanilla)
         object.__setattr__(
             self,
-            "training_correlation_audit",
-            dict(self.training_correlation_audit),
+            "training_traffic_audit",
+            dict(self.training_traffic_audit),
         )
         object.__setattr__(
             self,
-            "held_out_correlation_audit",
-            dict(self.held_out_correlation_audit),
+            "held_out_traffic_audit",
+            dict(self.held_out_traffic_audit),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -845,8 +843,8 @@ class Phase0ExperimentResult:
                 },
             },
             "acceptance_report": self.acceptance_report.to_dict(),
-            "training_correlation_audit": dict(self.training_correlation_audit),
-            "held_out_correlation_audit": dict(self.held_out_correlation_audit),
+            "training_traffic_audit": dict(self.training_traffic_audit),
+            "held_out_traffic_audit": dict(self.held_out_traffic_audit),
         }
 
 
@@ -867,7 +865,7 @@ class _DecisionFixture:
 
 
 class Phase0ExperimentRunner:
-    """Run the plan's balanced causal/vanilla experiment on real simulators.
+    """Run naturalistic, scale-1 traffic windows on real simulators.
 
     This class intentionally does not synthesize successful evidence. Every
     trace comes from CausalTrainer.process_epoch, held-out scores come from
@@ -902,9 +900,11 @@ class Phase0ExperimentRunner:
         self.learning_config = (
             LearningConfig() if learning_config is None else learning_config
         )
-        self.outcome_config = (
-            OutcomeConfig() if outcome_config is None else outcome_config
-        )
+        supplied_outcome = OutcomeConfig() if outcome_config is None else outcome_config
+        # Phase 0 gives credit only to the frozen bound pair.  Complete traffic
+        # remains in every rollout so global conflict/runway safety gates still
+        # observe externalities.
+        self.outcome_config = replace(supplied_outcome, trailer_count=0)
         self.feature_config = (
             FeatureConfig() if feature_config is None else feature_config
         )
@@ -915,69 +915,38 @@ class Phase0ExperimentRunner:
 
     def _validate_batch(
         self,
-        batch: FactorialScenarioBatch,
+        batch: TrafficScenarioBatch,
         *,
         name: str,
-    ) -> tuple[FactorialScenario, ...]:
-        if not isinstance(batch, FactorialScenarioBatch):
-            raise TypeError(f"{name} must be FactorialScenarioBatch")
+    ) -> tuple[TrafficScenario, ...]:
+        if not isinstance(batch, TrafficScenarioBatch):
+            raise TypeError(f"{name} must be TrafficScenarioBatch")
+        if not math.isclose(batch.scale_config.global_scale, 1.0):
+            raise ValueError(f"{name} must use global scale 1.0 in Phase 0")
         scenarios = tuple(
-            sorted(batch.scenarios, key=lambda item: item.condition.condition_id)
+            sorted(batch.scenarios, key=lambda item: item.window.start_s)
         )
         if not scenarios:
             raise ValueError(f"{name} cannot be empty")
         for scenario in scenarios:
-            flights = tuple(
-                sorted(
-                    scenario.definition.flights,
-                    key=lambda flight: (flight.release_time_s, flight.flight_id),
-                )
-            )
-            if len(flights) != 2:
+            if scenario.scale != 1.0:
+                raise ValueError(f"{name} contains a non-unit-scale scenario")
+            if scenario.observed_cluster_counts != scenario.target_cluster_counts:
                 raise ValueError(
-                    f"{name} must contain exactly one leader-follower pair"
+                    f"{name} scale-1 counts must exactly preserve observed clusters"
                 )
-            if flights[0].release_time_s >= flights[1].release_time_s:
-                raise ValueError(f"{name} leader must release before its follower")
-            follower_station_types = {
-                station.station_type for station in flights[1].action_stations
-            }
-            if not {"speed", "path_stretch"} <= follower_station_types:
+            if any(
+                flight.observed_release_time_s != flight.release_time_s
+                for flight in scenario.definition.flights
+            ):
                 raise ValueError(
-                    f"{name} follower must expose speed and path-stretch actions "
-                    "in every factorial cell"
+                    f"{name} scale-1 terminal-entry timestamps must remain observed"
                 )
-        batch.correlation_audit.assert_passed()
-        audited_pairs = {
-            frozenset((record.first_feature, record.second_feature))
-            for record in batch.correlation_audit.records
-        }
-        required_pairs = {
-            frozenset(pair) for pair in self.scenario_config.registered_factor_pairs
-        }
-        if not required_pairs <= audited_pairs:
-            raise ValueError(f"{name} omits a registered factor-correlation audit")
-
-        rows = [scenario.realized_values_dict for scenario in scenarios]
-        if any(not set(_REQUIRED_FACTORS) <= set(row) for row in rows):
-            raise ValueError(f"{name} must realize all four Phase-0 factors")
-        levels = {
-            factor: tuple(sorted({row[factor] for row in rows}))
-            for factor in _REQUIRED_FACTORS
-        }
-        if any(len(values) != 2 for values in levels.values()):
-            raise ValueError(f"{name} factors must each have exactly low/high levels")
-        combinations = Counter(
-            tuple(row[factor] for factor in _REQUIRED_FACTORS) for row in rows
-        )
-        expected = set(product(*(levels[factor] for factor in _REQUIRED_FACTORS)))
-        if set(combinations) != expected or len(set(combinations.values())) != 1:
-            raise ValueError(f"{name} must be a balanced full-factorial design")
         return scenarios
 
     def _train_one(
         self,
-        scenarios: Sequence[FactorialScenario],
+        scenarios: Sequence[TrafficScenario],
         *,
         seed: int,
         refresh_interval: int,
@@ -1005,15 +974,22 @@ class Phase0ExperimentRunner:
         trace_hashes: list[str] = []
         publication_generations: list[int] = []
         committed = 0
+        skipped_scenarios: dict[str, str] = {}
         for _ in range(self.config.training_passes):
             for scenario in scenarios:
                 simulator = self.runtime.create_simulator(scenario.definition)
+                committed_before = committed
+                saw_segment_anchor = False
+                skip_reasons: list[str] = []
                 while True:
                     event_batch = simulator.advance_next()
                     if event_batch is None:
                         break
                     if event_batch.decision_epoch is None:
                         continue
+                    saw_segment_anchor = saw_segment_anchor or bool(
+                        build_current_segment_anchors(simulator).leader_follower
+                    )
                     result = trainer.process_epoch(simulator, event_batch)
                     trace_hashes.append(result.trace.content_hash)
                     publication_generations.extend(
@@ -1021,6 +997,14 @@ class Phase0ExperimentRunner:
                         for event in result.trace.certification_events
                     )
                     committed += int(result.committed)
+                    if result.skipped_reason is not None:
+                        skip_reasons.append(result.skipped_reason)
+                if committed == committed_before:
+                    skipped_scenarios[scenario.definition.scenario_id] = (
+                        "no_actionable_shared_segment_pair"
+                        if not saw_segment_anchor
+                        else skip_reasons[-1] if skip_reasons else "no_feasible_action_epoch"
+                    )
         if not trace_hashes:
             raise RuntimeError("Phase-0 training produced no decision epochs")
         if not committed:
@@ -1041,6 +1025,7 @@ class Phase0ExperimentRunner:
             population_json=canonical_json(trainer.population.to_dict()),
             rule_hyperrectangles=self._rule_hyperrectangles(rulebook),
             certification_evidence=self._certification_evidence(trainer),
+            skipped_scenarios=skipped_scenarios,
         )
         return _TrainingState(trainer=trainer, summary=summary)
 
@@ -1101,7 +1086,7 @@ class Phase0ExperimentRunner:
         self,
         runtime: ActionRuntime,
         rulebook: FrozenRulebookPolicy,
-        scenario: FactorialScenario,
+        scenario: TrafficScenario,
         decision_provider: Callable[[Any, Any], Any] | None = None,
     ) -> _DecisionFixture:
         simulator = runtime.create_simulator(scenario.definition)
@@ -1116,7 +1101,7 @@ class Phase0ExperimentRunner:
             event_batch = simulator.advance_next()
             if event_batch is None:
                 raise RuntimeError(
-                    f"held-out scenario {scenario.condition.condition_id!r} "
+                    f"held-out scenario {scenario.definition.scenario_id!r} "
                     "has no physical action epoch"
                 )
             if event_batch.decision_epoch is None:
@@ -1166,7 +1151,7 @@ class Phase0ExperimentRunner:
     def _anchor_for_fixture(fixture: _DecisionFixture) -> Any:
         return next(
             anchor
-            for anchor in build_current_leader_follower_anchors(
+            for anchor in build_current_segment_anchors(
                 fixture.simulator
             ).leader_follower
             if anchor.anchor_id == fixture.record.anchor_id
@@ -1175,7 +1160,7 @@ class Phase0ExperimentRunner:
     def _held_out_evidence(
         self,
         state: _TrainingState,
-        scenarios: Sequence[FactorialScenario],
+        scenarios: Sequence[TrafficScenario],
     ) -> tuple[
         tuple[TrainDeployDecision, ...],
         tuple[HeldOutComparison, ...],
@@ -1186,11 +1171,14 @@ class Phase0ExperimentRunner:
         oracle_path_scores: list[float] = []
         geometry_path_scores: list[float] = []
         for scenario in scenarios:
-            fixture = self._decision_fixture(
-                self.runtime,
-                state.summary.rulebook,
-                scenario,
-            )
+            try:
+                fixture = self._decision_fixture(
+                    self.runtime,
+                    state.summary.rulebook,
+                    scenario,
+                )
+            except RuntimeError:
+                continue
             deployment_action = RuleAction.from_candidate(fixture.selected_candidate)
             training_fixture = self._decision_fixture(
                 self.runtime,
@@ -1214,7 +1202,7 @@ class Phase0ExperimentRunner:
                 outcome_plan=plan,
                 outcome_config=self.outcome_config,
             )
-            scenario_id = scenario.condition.condition_id
+            scenario_id = scenario.definition.scenario_id
             decisions.append(
                 TrainDeployDecision(
                     scenario_id=scenario_id,
@@ -1295,15 +1283,18 @@ class Phase0ExperimentRunner:
     def _held_out_comparisons(
         self,
         state: _TrainingState,
-        scenarios: Sequence[FactorialScenario],
+        scenarios: Sequence[TrafficScenario],
     ) -> tuple[HeldOutComparison, ...]:
         comparisons: list[HeldOutComparison] = []
         for scenario in scenarios:
-            fixture = self._decision_fixture(
-                self.runtime,
-                state.summary.rulebook,
-                scenario,
-            )
+            try:
+                fixture = self._decision_fixture(
+                    self.runtime,
+                    state.summary.rulebook,
+                    scenario,
+                )
+            except RuntimeError:
+                continue
             plan = simulator_outcome_plan(
                 fixture.simulator,
                 self._anchor_for_fixture(fixture),
@@ -1319,7 +1310,7 @@ class Phase0ExperimentRunner:
             )
             comparisons.append(
                 HeldOutComparison(
-                    scenario_id=scenario.condition.condition_id,
+                    scenario_id=scenario.definition.scenario_id,
                     policy_score=rollout.policy_arm.score,
                     permanent_no_op_score=rollout.permanent_no_op.score,
                     provenance=_held_out_provenance(
@@ -1334,29 +1325,61 @@ class Phase0ExperimentRunner:
     def _qualitative_actions(
         self,
         state: _TrainingState,
-        scenarios: Sequence[FactorialScenario],
+        scenarios: Sequence[TrafficScenario],
     ) -> Mapping[str, RuleAction]:
         actions: dict[str, RuleAction] = {}
         for scenario in scenarios:
-            fixture = self._decision_fixture(
-                self.runtime,
-                state.summary.rulebook,
-                scenario,
-            )
-            actions[scenario.condition.condition_id] = RuleAction.from_candidate(
+            try:
+                fixture = self._decision_fixture(
+                    self.runtime,
+                    state.summary.rulebook,
+                    scenario,
+                )
+            except RuntimeError:
+                continue
+            actions[scenario.definition.scenario_id] = RuleAction.from_candidate(
                 fixture.selected_candidate
             )
         return actions
 
     def run(
         self,
-        training_batch: FactorialScenarioBatch,
-        held_out_batch: FactorialScenarioBatch,
+        training_batch: TrafficScenarioBatch,
+        held_out_batch: TrafficScenarioBatch,
     ) -> Phase0ExperimentResult:
-        """Execute balanced training and return evidence without forcing a pass."""
+        """Train on natural traffic windows and return evidence without forcing a pass."""
 
         training = self._validate_batch(training_batch, name="training_batch")
         held_out = self._validate_batch(held_out_batch, name="held_out_batch")
+        if (
+            training_batch.source_partition
+            and training_batch.source_partition == held_out_batch.source_partition
+        ):
+            raise ValueError("training and held-out source partitions must be distinct")
+        training_flight_ids = {
+            flight.flight_id for item in training for flight in item.definition.flights
+        }
+        held_out_flight_ids = {
+            flight.flight_id for item in held_out for flight in item.definition.flights
+        }
+        shared_flights = training_flight_ids & held_out_flight_ids
+        if shared_flights:
+            raise ValueError(
+                "training and held-out windows share ADS-B arrivals; apply a full-window embargo"
+            )
+        training_start = min(item.window.start_s for item in training)
+        training_end = max(item.window.end_s for item in training)
+        held_start = min(item.window.start_s for item in held_out)
+        held_end = max(item.window.end_s for item in held_out)
+        window_width = max(
+            *(item.window.end_s - item.window.start_s for item in training),
+            *(item.window.end_s - item.window.start_s for item in held_out),
+        )
+        temporal_gap = max(held_start - training_end, training_start - held_end)
+        if temporal_gap < window_width:
+            raise ValueError(
+                "training and held-out time blocks require an embargo of at least one full window"
+            )
         training_realizations = {
             _material_scenario_fingerprint(item) for item in training
         }
@@ -1453,8 +1476,8 @@ class Phase0ExperimentRunner:
             selected_causal_run=selected.summary,
             validation_inputs=inputs,
             acceptance_report=report,
-            training_correlation_audit=training_batch.correlation_audit.to_dict(),
-            held_out_correlation_audit=held_out_batch.correlation_audit.to_dict(),
+            training_traffic_audit=training_batch.audit,
+            held_out_traffic_audit=held_out_batch.audit,
         )
 
 

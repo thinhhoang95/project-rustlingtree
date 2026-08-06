@@ -17,9 +17,10 @@ Use the other documents when you need more detail:
   subpackage to its responsibilities, public concepts, dependencies, and
   consumers.
 
-The learning layer is included in all three references. For a tutorial-style
-walkthrough of the controlled two-aircraft experiment, see
-[Phase 0: mental model and end-to-end walkthrough](../phase0.md).
+The learning layer is included in all three references. For the current
+naturalistic multi-runway experiment and its Phase 0/Phase 1 distinction, see
+[Phase 0 and Phase 1](../phase0.md).
 
-The implementation is under `src/hailmary`. The executable validation examples
-are under `notebooks/hailmary`, and focused tests are under `tests/hailmary`.
+The implementation is under `src/hailmary`. Compact executable verification is
+under `examples/hailmary_phase01`, visual artifact checks are under
+`notebooks/hailmary`, and focused tests are under `tests/hailmary`.

@@ -16,8 +16,10 @@ from hailmary.errors import InfeasibleActionError, StaleActionError
 from hailmary.scenario import (
     ActionStationDefinition,
     FlightDefinition,
+    ResourceCrossingDefinition,
     ResourceDefinition,
     ScenarioDefinition,
+    SegmentTraversalDefinition,
 )
 from hailmary.simulator import EventKind, Simulator
 from hailmary.runtime import build_action_runtime
@@ -40,11 +42,21 @@ def _simulator_with_stations(
                 release_time_s=0.0,
                 baseline_variant_id=variant.variant_id,
                 action_stations=stations,
+                resource_crossings=(
+                    ResourceCrossingDefinition("FINAL:entry", 50_000.0),
+                    ResourceCrossingDefinition("RWY", 0.0),
+                ),
+                segment_traversals=(
+                    SegmentTraversalDefinition(
+                        0, "FINAL", "FINAL:entry", "RWY", 50_000.0, 0.0
+                    ),
+                ),
             ),
         ),
         resources=(
             ResourceDefinition(resource_id="RWY"),
             ResourceDefinition(resource_id="MERGE"),
+            ResourceDefinition(resource_id="FINAL:entry", kind="segment_entry"),
         ),
         variants=(variant,),
     )
@@ -90,6 +102,8 @@ def test_catalog_enumerates_noop_three_speed_bands_and_one_stretch_at_epoch() ->
         batch,
         anchor_id="ANCHOR",
         bound_flight_id="F1",
+        resource_id="RWY",
+        segment_id="FINAL",
     )
 
     assert [(item.lever, item.band) for item in candidates] == [
@@ -124,6 +138,8 @@ def test_runtime_factory_executes_real_speed_and_stretch_on_sibling_forks() -> N
         batch,
         anchor_id="ANCHOR",
         bound_flight_id="F1",
+        resource_id="RWY",
+        segment_id="FINAL",
     )
     speed = _candidate(candidates, ActionLever.SPEED, "light")
     stretch = _candidate(candidates, ActionLever.PATH_STRETCH)
@@ -173,9 +189,11 @@ def test_apply_action_rejects_forged_identity_outside_catalog_vocabulary(
     candidate = _candidate(
         ActionCatalog().enumerate_for_batch(
             simulator,
-            batch,
-            anchor_id="ANCHOR",
-            bound_flight_id="F1",
+                batch,
+                anchor_id="ANCHOR",
+                bound_flight_id="F1",
+                resource_id="RWY",
+                segment_id="FINAL",
         ),
         lever,
     )
@@ -202,6 +220,8 @@ def test_candidate_becomes_stale_after_any_state_transition() -> None:
             batch,
             anchor_id="ANCHOR",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         ),
         ActionLever.SPEED,
         "light",
@@ -225,7 +245,12 @@ def test_two_speed_actions_are_composed_and_third_station_offers_no_speed() -> N
     first_batch = _next_station_batch(simulator)
     first = _candidate(
         catalog.enumerate_for_batch(
-            simulator, first_batch, anchor_id="A1", bound_flight_id="F1"
+            simulator,
+            first_batch,
+            anchor_id="A1",
+            bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         ),
         ActionLever.SPEED,
         "light",
@@ -235,7 +260,12 @@ def test_two_speed_actions_are_composed_and_third_station_offers_no_speed() -> N
     second_batch = _next_station_batch(simulator)
     second = _candidate(
         catalog.enumerate_for_batch(
-            simulator, second_batch, anchor_id="A2", bound_flight_id="F1"
+            simulator,
+            second_batch,
+            anchor_id="A2",
+            bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         ),
         ActionLever.SPEED,
         "medium",
@@ -255,6 +285,8 @@ def test_two_speed_actions_are_composed_and_third_station_offers_no_speed() -> N
         third_batch,
         anchor_id="A3",
         bound_flight_id="F1",
+        resource_id="RWY",
+        segment_id="FINAL",
     )
     assert [(item.lever, item.band) for item in third_candidates] == [
         (ActionLever.NO_OP, "no_op")
@@ -277,6 +309,8 @@ def test_applied_speed_action_is_branch_local_and_parent_remains_byte_equivalent
             batch,
             anchor_id="CHILD",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         ),
         ActionLever.SPEED,
         "light",
@@ -310,6 +344,8 @@ def test_one_path_stretch_exhausts_later_path_stretch_candidates() -> None:
             first_batch,
             anchor_id="P1",
             bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
         ),
         ActionLever.PATH_STRETCH,
     )
@@ -328,5 +364,7 @@ def test_one_path_stretch_exhausts_later_path_stretch_candidates() -> None:
         second_batch,
         anchor_id="P2",
         bound_flight_id="F1",
+        resource_id="RWY",
+        segment_id="FINAL",
     )
     assert [(item.lever, item.band) for item in later] == [(ActionLever.NO_OP, "no_op")]

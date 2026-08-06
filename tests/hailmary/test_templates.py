@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from hailmary.config import M_PER_NM
+from hailmary.errors import ArtifactValidationError
 from hailmary.geometry.frame import LocalFrame
 from hailmary.templates import (
     ClusterTemplate,
@@ -177,3 +178,39 @@ def test_compiler_builds_analytic_straight_track_with_required_station_counts() 
     assert len(template.speed_action_stations) == 16
     assert len(template.path_stretch_stations) == 8
     assert template.baseline_variant.threshold_resource_id == "RWY"
+
+
+def test_adsb_corpus_compiler_records_poor_fit_without_dropping_geometry() -> None:
+    length_m = 50.0 * M_PER_NM
+    sample_count = 41
+    track = MedoidTrack(
+        flight_id="SLOW_OBSERVED_MEDOID",
+        time_s=np.linspace(0.0, length_m / 25.0, sample_count),
+        lat_deg=np.linspace(
+            length_m / 111_319.49079327357,
+            0.0,
+            sample_count,
+        ),
+        lon_deg=np.zeros(sample_count),
+        altitude_m=np.zeros(sample_count),
+    )
+    arguments = {
+        "cluster_id": "SLOW_CLUSTER",
+        "member_count": 1,
+        "dataset_id": "SYNTHETIC",
+        "airport_id": "TEST",
+        "runway_id": "RWY",
+        "threshold_resource_id": "RWY",
+    }
+
+    with pytest.raises(ArtifactValidationError):
+        TemplateCompiler(station_count=256).compile(track, **arguments)
+
+    template = TemplateCompiler(
+        station_count=256,
+        require_observed_profile_fit=False,
+    ).compile(track, **arguments)
+
+    assert template.baseline_variant.diagnostics.feasible
+    assert template.baseline_variant.diagnostics.absolute_timing_error_s > 30.0
+    assert dict(template.provenance)["require_observed_profile_fit"] is False

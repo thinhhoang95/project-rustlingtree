@@ -21,7 +21,7 @@ import numpy as np
 from hailmary.config import ClusteringConfig, M_PER_NM
 from hailmary.data.adsb import RawADSBTrack, TerminalEntry
 from hailmary.data.catalog import CatalogArrival, normalize_runway
-from hailmary.errors import ArtifactValidationError
+from hailmary.errors import ArtifactValidationError, NoEligibleArrivalsError
 from hailmary.geometry.frame import LocalFrame
 from hailmary.geometry.polyline import (
     orient_upstream_to_threshold,
@@ -359,6 +359,32 @@ class ADSBClusterBuildResult:
                 for medoid in self.library.medoids
             }
         )
+
+
+@dataclass(frozen=True)
+class ADSBMultiRunwayBuildResult:
+    """Complete eligible runway corpus with per-partition artifacts."""
+
+    dataset_id: str
+    airport: str
+    runway_results: tuple[ADSBClusterBuildResult, ...]
+    rejection_counts: tuple[tuple[str, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        results = tuple(sorted(self.runway_results, key=lambda item: item.library.runway))
+        runways = [item.library.runway for item in results]
+        if len(runways) != len(set(runways)):
+            raise ValueError("multi-runway build contains duplicate runway partitions")
+        object.__setattr__(self, "runway_results", results)
+        object.__setattr__(self, "rejection_counts", tuple(sorted(self.rejection_counts)))
+
+    @property
+    def libraries(self) -> tuple[ClusterLibrary, ...]:
+        return tuple(item.library for item in self.runway_results)
+
+    @property
+    def accepted_track_count(self) -> int:
+        return sum(len(item.preparation.prepared_tracks) for item in self.runway_results)
 
 
 def _coerce_pipeline_config(config: object | None) -> object:
@@ -830,7 +856,7 @@ def build_cluster_library_from_adsb(
     )
     if not preparation.prepared_tracks:
         reason_counts = Counter(item.reason.value for item in preparation.rejections)
-        raise ValueError(
+        raise NoEligibleArrivalsError(
             "no ADS-B arrivals were accepted for clustering; "
             f"rejection_counts={dict(sorted(reason_counts.items()))}"
         )
@@ -885,6 +911,59 @@ def build_cluster_library_from_adsb(
     )
 
 
+def build_all_runway_cluster_libraries_from_adsb(
+    catalog_arrivals: Iterable[CatalogArrival],
+    raw_adsb_tracks: Iterable[RawADSBTrack],
+    *,
+    dataset_id: str,
+    airport: str,
+    config: object | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> ADSBMultiRunwayBuildResult:
+    """Build every runway represented by reconstructable ADS-B arrivals.
+
+    The same immutable raw corpus is reused for each runway partition. Sparse
+    partitions, including a single accepted flight, flow through the existing
+    deterministic one-cluster KMeans fallback and therefore keep their medoid
+    instead of being excluded.
+    """
+
+    arrivals = tuple(catalog_arrivals)
+    tracks = tuple(raw_adsb_tracks)
+    runway_ids = tuple(sorted({normalize_runway(item.runway) for item in arrivals}))
+    results: list[ADSBClusterBuildResult] = []
+    rejected: Counter[str] = Counter()
+    for runway in runway_ids:
+        try:
+            result = build_cluster_library_from_adsb(
+                arrivals,
+                tracks,
+                dataset_id=dataset_id,
+                airport=airport,
+                runway=runway,
+                config=config,
+                metadata={
+                    **({} if metadata is None else dict(metadata)),
+                    "multi_runway_build": True,
+                },
+            )
+        except NoEligibleArrivalsError:
+            rejected[f"{runway}:no_reconstructable_terminal_entry"] += 1
+            continue
+        results.append(result)
+        rejected.update(
+            f"{runway}:{item.reason.value}" for item in result.preparation.rejections
+        )
+    if not results:
+        raise ValueError("no runway partition produced an eligible cluster library")
+    return ADSBMultiRunwayBuildResult(
+        dataset_id=dataset_id,
+        airport=str(airport).strip().upper(),
+        runway_results=tuple(results),
+        rejection_counts=tuple(sorted(rejected.items())),
+    )
+
+
 # Short aliases for callers that already established the clustering context.
 prepare_adsb_tracks = prepare_adsb_tracks_for_clustering
 prepare_adsb_clustering_inputs = prepare_adsb_tracks_for_clustering
@@ -892,6 +971,7 @@ prepare_adsb_clustering_inputs = prepare_adsb_tracks_for_clustering
 
 __all__ = [
     "ADSBClusterBuildResult",
+    "ADSBMultiRunwayBuildResult",
     "ADSBPreparationResult",
     "ADSBTrackRejection",
     "PreparedADSBTrack",
@@ -899,6 +979,7 @@ __all__ = [
     "TrackRejection",
     "TrackRejectionReason",
     "build_cluster_library_from_adsb",
+    "build_all_runway_cluster_libraries_from_adsb",
     "prepare_adsb_clustering_inputs",
     "prepare_adsb_tracks",
     "prepare_adsb_tracks_for_clustering",

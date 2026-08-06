@@ -1,0 +1,105 @@
+{
+  "after_speed_delay": {
+    "pairs": [
+      {
+        "catch_up": false,
+        "exit_interval_s": 108.744,
+        "follower": "B_C1_FUTURE",
+        "leader": "A_C3_OCCUPANT",
+        "ordering_basis": "mixed"
+      },
+      {
+        "catch_up": false,
+        "exit_interval_s": 29.392,
+        "follower": "D_C2_FUTURE",
+        "leader": "B_C1_FUTURE",
+        "ordering_basis": "entry_eta"
+      },
+      {
+        "catch_up": false,
+        "exit_interval_s": 86.657,
+        "follower": "C_C3_FUTURE",
+        "leader": "D_C2_FUTURE",
+        "ordering_basis": "entry_eta"
+      }
+    ],
+    "queue": [
+      "A_C3_OCCUPANT",
+      "B_C1_FUTURE",
+      "D_C2_FUTURE",
+      "C_C3_FUTURE"
+    ]
+  },
+  "at_time_s": 200.0,
+  "before_speed_delay": {
+    "pairs": [
+      {
+        "catch_up": false,
+        "exit_interval_s": 108.744,
+        "follower": "B_C1_FUTURE",
+        "leader": "A_C3_OCCUPANT",
+        "ordering_basis": "mixed"
+      },
+      {
+        "catch_up": false,
+        "exit_interval_s": 22.656,
+        "follower": "C_C3_FUTURE",
+        "leader": "B_C1_FUTURE",
+        "ordering_basis": "entry_eta"
+      },
+      {
+        "catch_up": false,
+        "exit_interval_s": 6.736,
+        "follower": "D_C2_FUTURE",
+        "leader": "C_C3_FUTURE",
+        "ordering_basis": "entry_eta"
+      }
+    ],
+    "queue": [
+      "A_C3_OCCUPANT",
+      "B_C1_FUTURE",
+      "C_C3_FUTURE",
+      "D_C2_FUTURE"
+    ]
+  },
+  "first_trainable_epoch": {
+    "candidate_actions": [
+      "no_op:no_op",
+      "speed:light",
+      "speed:medium",
+      "speed:heavy",
+      "path_stretch:oracle_short_medium_long"
+    ],
+    "follower": "D_C2_FUTURE",
+    "leader": "A_C3_OCCUPANT",
+    "segment_id": "segment_c378e643fa3bbe4099e28a7d9047",
+    "time_s": -183.3
+  },
+  "parallel_route": {
+    "appears_in_shared_segment": false,
+    "segment_ids": [
+      "segment_bab24be25ed21cb91d426e81149f"
+    ]
+  },
+  "registered_thresholds": {
+    "lateral_floor_nm": 0.5,
+    "minimum_common_length_nm": 5.0,
+    "tangent_tolerance_deg": 15.0
+  },
+  "route_graph_hash": "cae02a700c6a189c77304b4615b029d8d784938e2f4a238baa051396a974d2ef",
+  "segment_membership": [
+    "segment_c88058491f22524fa8a007bd2563",
+    "segment_c378e643fa3bbe4099e28a7d9047"
+  ],
+  "segment_membership_unchanged": true,
+  "shared_segment": {
+    "clusters": [
+      "KATL:RW18R:C1",
+      "KATL:RW18R:C2",
+      "KATL:RW18R:C3"
+    ],
+    "length_nm": 8.5,
+    "segment_id": "segment_c378e643fa3bbe4099e28a7d9047"
+  },
+  "variant_segment_crossings_complete": true
+}

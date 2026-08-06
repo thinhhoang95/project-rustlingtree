@@ -21,6 +21,11 @@ class LeaderFollowerAnchor:
     follower_id: str
     state_version: str
     epoch: int
+    segment_id: str = ""
+    entry_resource_id: str = ""
+    ordering_basis: str = "eta"
+    predicted_exit_interval_s: float | None = None
+    catch_up: bool = False
     anchor_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -30,6 +35,14 @@ class LeaderFollowerAnchor:
             raise ValueError("leader and follower must be distinct")
         if self.epoch < 0:
             raise ValueError("epoch cannot be negative")
+        if self.segment_id and not self.entry_resource_id:
+            raise ValueError("segment anchors require an entry resource")
+        if self.ordering_basis not in {"eta", "physical_progress", "entry_eta", "mixed"}:
+            raise ValueError("unknown leader/follower ordering basis")
+        if self.predicted_exit_interval_s is not None and not np.isfinite(
+            self.predicted_exit_interval_s
+        ):
+            raise ValueError("predicted exit interval must be finite when supplied")
         object.__setattr__(
             self,
             "anchor_id",
@@ -41,6 +54,9 @@ class LeaderFollowerAnchor:
                     "follower_id": self.follower_id,
                     "state_version": self.state_version,
                     "epoch": self.epoch,
+                    "segment_id": self.segment_id,
+                    "entry_resource_id": self.entry_resource_id,
+                    "ordering_basis": self.ordering_basis,
                 },
             ),
         )
@@ -80,6 +96,7 @@ class FlowAnchor:
     ordered_flight_ids: tuple[str, ...]
     state_version: str
     epoch: int
+    segment_id: str = ""
     anchor_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -99,6 +116,7 @@ class FlowAnchor:
                     "ordered_flight_ids": self.ordered_flight_ids,
                     "state_version": self.state_version,
                     "epoch": self.epoch,
+                    "segment_id": self.segment_id,
                 },
             ),
         )
@@ -109,6 +127,21 @@ class ResourceAnchors:
     flow: FlowAnchor
     leader_follower: tuple[LeaderFollowerAnchor, ...]
     aircraft_resource: tuple[AircraftResourceAnchor, ...]
+
+
+@dataclass(frozen=True)
+class SegmentAnchorSet:
+    """All canonical segment queues for one real simulator epoch."""
+
+    flows: tuple[FlowAnchor, ...]
+    leader_follower: tuple[LeaderFollowerAnchor, ...]
+    aircraft_resource: tuple[AircraftResourceAnchor, ...]
+
+    def flow_for_segment(self, segment_id: str) -> FlowAnchor:
+        for flow in self.flows:
+            if flow.segment_id == segment_id:
+                return flow
+        raise KeyError(segment_id)
 
 
 @dataclass(frozen=True)
@@ -195,29 +228,6 @@ def build_resource_anchors_from_query(
     )
 
 
-def threshold_resource_id(simulator: Any, resource_id: str | None = None) -> str:
-    """Resolve the sole configured runway-threshold resource when omitted."""
-
-    definition = getattr(simulator, "definition", getattr(getattr(simulator, "state", None), "definition", None))
-    if definition is None:
-        raise TypeError("simulator must expose a ScenarioDefinition")
-    if resource_id is not None:
-        resource = definition.resource(str(resource_id))
-        if str(resource.kind) != "runway_threshold":
-            raise ValueError(f"resource {resource_id!r} is not a runway threshold")
-        return str(resource.resource_id)
-    threshold_ids = tuple(
-        str(resource.resource_id)
-        for resource in definition.resources
-        if str(resource.kind) == "runway_threshold"
-    )
-    if len(threshold_ids) != 1:
-        raise ValueError(
-            "resource_id is required unless the scenario has exactly one runway-threshold resource"
-        )
-    return threshold_ids[0]
-
-
 def resource_station_m(simulator: Any, flight_id: str, resource_id: str) -> float:
     """Use the same flight-first resource-station precedence as the engine."""
 
@@ -276,7 +286,12 @@ def active_resource_predictions(
         variant = state.definition.variant(dynamic.current_variant_id)
         trajectory = MonotoneTrajectory.from_variant(variant)
         elapsed = float(state.sim_time_s - dynamic.trajectory_clock_origin_s)
-        station = resource_station_m(simulator, dynamic.flight_id, resource_id)
+        try:
+            station = resource_station_m(simulator, dynamic.flight_id, resource_id)
+        except KeyError:
+            # Multi-runway snapshots contain many active flights that do not
+            # traverse this explicitly scoped resource.
+            continue
         predictions.append(
             SimulatorFlightPrediction(
                 flight_id=dynamic.flight_id,
@@ -293,32 +308,136 @@ def active_resource_predictions(
     return tuple(sorted(predictions, key=lambda item: (item.eta_s, item.flight_id)))
 
 
-def active_threshold_predictions(
-    simulator: Any,
-    *,
-    resource_id: str | None = None,
-) -> tuple[SimulatorFlightPrediction, ...]:
-    resolved = threshold_resource_id(simulator, resource_id)
-    return active_resource_predictions(simulator, resource_id=resolved)
+def build_current_segment_anchors(simulator: Any) -> SegmentAnchorSet:
+    """Build queues from physical occupancy and committed entry-gate ETAs.
 
+    Occupants always precede future entrants.  Their established order comes
+    from current trajectory progress, while future entrants use entry ETA with
+    a stable flight-ID tie break.  Exit ETA is used only to evaluate spacing;
+    it never reverses an established physical order.
+    """
 
-def build_current_leader_follower_anchors(
-    simulator: Any,
-    *,
-    resource_id: str | None = None,
-) -> ResourceAnchors:
-    """Build the current threshold graph directly from immutable variants."""
+    from hailmary.simulator.interpolation import MonotoneTrajectory
 
-    resolved = threshold_resource_id(simulator, resource_id)
-    predictions = active_resource_predictions(simulator, resource_id=resolved)
     state = simulator.state
-    return build_resource_anchors(
-        resource_id=resolved,
-        eta_by_flight={item.flight_id: item.eta_s for item in predictions},
-        # Dynamic content, rather than lineage identity, keeps identical forks
-        # semantically identical while still invalidating diverged branches.
-        state_version=str(state.dynamic_content_hash),
-        epoch=int(state.decision_epoch_index),
+    definition = state.definition
+    traversals_by_segment: dict[str, list[tuple[Any, Any]]] = {}
+    for flight in definition.flights:
+        dynamic = state.flight(flight.flight_id)
+        if str(getattr(dynamic.lifecycle, "value", dynamic.lifecycle)) != "active":
+            continue
+        for traversal in flight.segment_traversals:
+            if traversal.exit_resource_id in dynamic.crossed_resource_ids:
+                continue
+            traversals_by_segment.setdefault(traversal.segment_id, []).append(
+                (flight, traversal)
+            )
+
+    flows: list[FlowAnchor] = []
+    aircraft: list[AircraftResourceAnchor] = []
+    candidates: list[tuple[tuple[str, str], int, LeaderFollowerAnchor]] = []
+    for segment_id, records in sorted(traversals_by_segment.items()):
+        occupants: list[tuple[float, str, Any]] = []
+        future: list[tuple[float, str, Any]] = []
+        exit_eta: dict[str, float] = {}
+        basis_by_flight: dict[str, str] = {}
+        for flight, traversal in records:
+            dynamic = state.flight(flight.flight_id)
+            variant = definition.variant(dynamic.current_variant_id)
+            trajectory = MonotoneTrajectory.from_variant(variant)
+            sample = trajectory.sample(
+                float(state.sim_time_s - dynamic.trajectory_clock_origin_s)
+            )
+            entry_station = resource_station_m(
+                simulator, flight.flight_id, traversal.entry_resource_id
+            )
+            exit_station = resource_station_m(
+                simulator, flight.flight_id, traversal.exit_resource_id
+            )
+            entry_eta = float(
+                dynamic.trajectory_clock_origin_s
+                + trajectory.elapsed_at_station(entry_station)
+            )
+            exit_eta[flight.flight_id] = float(
+                dynamic.trajectory_clock_origin_s
+                + trajectory.elapsed_at_station(exit_station)
+            )
+            is_occupant = (
+                traversal.entry_resource_id in dynamic.crossed_resource_ids
+                or float(sample.s_m) <= entry_station + 1.0e-6
+            )
+            if is_occupant:
+                denominator = max(entry_station - exit_station, 1.0e-9)
+                progress = (entry_station - float(sample.s_m)) / denominator
+                occupants.append((-progress, flight.flight_id, traversal))
+                basis_by_flight[flight.flight_id] = "physical_progress"
+            else:
+                future.append((entry_eta, flight.flight_id, traversal))
+                basis_by_flight[flight.flight_id] = "entry_eta"
+        occupants.sort(key=lambda item: (item[0], item[1]))
+        future.sort(key=lambda item: (item[0], item[1]))
+        ordered_records = (*occupants, *future)
+        ordered = tuple(item[1] for item in ordered_records)
+        if not ordered:
+            continue
+        exit_resource_id = records[0][1].exit_resource_id
+        entry_resource_id = records[0][1].entry_resource_id
+        flow = FlowAnchor(
+            exit_resource_id,
+            ordered,
+            str(state.dynamic_content_hash),
+            int(state.decision_epoch_index),
+            segment_id=segment_id,
+        )
+        flows.append(flow)
+        aircraft.extend(
+            AircraftResourceAnchor(
+                exit_resource_id,
+                flight_id,
+                str(state.dynamic_content_hash),
+                int(state.decision_epoch_index),
+            )
+            for flight_id in ordered
+        )
+        traversal_by_flight = {item[1]: item[2] for item in ordered_records}
+        for leader_id, follower_id in zip(ordered, ordered[1:], strict=False):
+            leader_basis = basis_by_flight[leader_id]
+            follower_basis = basis_by_flight[follower_id]
+            basis = leader_basis if leader_basis == follower_basis else "mixed"
+            interval = float(exit_eta[follower_id] - exit_eta[leader_id])
+            anchor = LeaderFollowerAnchor(
+                resource_id=exit_resource_id,
+                leader_id=leader_id,
+                follower_id=follower_id,
+                state_version=str(state.dynamic_content_hash),
+                epoch=int(state.decision_epoch_index),
+                segment_id=segment_id,
+                entry_resource_id=entry_resource_id,
+                ordering_basis=basis,
+                predicted_exit_interval_s=interval,
+                catch_up=bool(interval < 0.0),
+            )
+            first_ordinal = max(
+                traversal_by_flight[leader_id].ordinal,
+                traversal_by_flight[follower_id].ordinal,
+            )
+            candidates.append((tuple(sorted((leader_id, follower_id))), first_ordinal, anchor))
+
+    # One pair is bound to the earliest unpassed segment on its common suffix.
+    selected: dict[tuple[str, str], tuple[int, LeaderFollowerAnchor]] = {}
+    for pair, ordinal, anchor in candidates:
+        current = selected.get(pair)
+        if current is None or (ordinal, anchor.segment_id) < (
+            current[0],
+            current[1].segment_id,
+        ):
+            selected[pair] = (ordinal, anchor)
+    return SegmentAnchorSet(
+        flows=tuple(sorted(flows, key=lambda item: item.resource_id)),
+        leader_follower=tuple(
+            sorted((item[1] for item in selected.values()), key=lambda item: item.anchor_id)
+        ),
+        aircraft_resource=tuple(sorted(aircraft, key=lambda item: item.anchor_id)),
     )
 
 
@@ -329,13 +448,12 @@ __all__ = [
     "ResourceAnchors",
     "ResourceETAQuery",
     "SimulatorFlightPrediction",
+    "SegmentAnchorSet",
     "active_resource_predictions",
-    "active_threshold_predictions",
     "build_resource_anchors",
     "build_resource_anchors_from_query",
-    "build_current_leader_follower_anchors",
+    "build_current_segment_anchors",
     "order_flights_by_eta",
     "resource_eta_s",
     "resource_station_m",
-    "threshold_resource_id",
 ]

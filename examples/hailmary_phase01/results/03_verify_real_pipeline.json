@@ -1,0 +1,35 @@
+{
+  "catalog_arrivals": 1026,
+  "first_trainable_pair": {
+    "candidate_actions": [
+      "no_op:no_op",
+      "path_stretch:oracle_short_medium_long"
+    ],
+    "follower": "AAL2563M1aa1be0",
+    "leader": "AAL2149M1ad385f"
+  },
+  "real_1020_window_flight_count": 13,
+  "real_1020_window_runways": [
+    "RW17L",
+    "RW18R",
+    "RW31L"
+  ],
+  "reconstructable_arrivals": 539,
+  "route_graph_hash": "b4120b0af977c09751d02b67380b7ee3633b41d05f334ca30427caf7ed988539",
+  "route_segment_count": 25,
+  "runways": [
+    "RW13L",
+    "RW13R",
+    "RW17C",
+    "RW17L",
+    "RW18L",
+    "RW18R",
+    "RW31L",
+    "RW31R"
+  ],
+  "scale_1_counts_exact": true,
+  "scale_1_window_count": 70,
+  "template_count": 16,
+  "traffic_batch_hash": "ee03bc1473fc68098b8e1e876e730290c9f3b2388cd9ca45b6501b4ee2069efb",
+  "traffic_corpus_hash": "9071e7555ac489d4236993553d310bd3ca925a70f288492a840e384b5ed024b1"
+}

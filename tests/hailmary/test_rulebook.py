@@ -453,8 +453,10 @@ def test_simulator_wrapper_builds_records_and_diverged_contexts_choose_different
         *,
         anchor_id: str,
         bound_flight_id: str,
+        resource_id: str,
+        segment_id: str,
     ) -> tuple[RuleAction, ...]:
-        del self, batch, anchor_id, bound_flight_id
+        del self, batch, anchor_id, bound_flight_id, resource_id, segment_id
         return simulator.candidates  # type: ignore[attr-defined, no-any-return]
 
     def fake_vector(
@@ -467,12 +469,17 @@ def test_simulator_wrapper_builds_records_and_diverged_contexts_choose_different
         )
 
     monkeypatch.setattr(
-        feature_api, "build_current_leader_follower_anchors", fake_anchors
+        feature_api, "build_current_segment_anchors", fake_anchors
     )
     monkeypatch.setattr(feature_api, "simulator_state_vector", fake_vector)
     monkeypatch.setattr(ActionCatalog, "enumerate_for_batch", fake_candidates)
 
-    anchor = SimpleNamespace(anchor_id="A", follower_id="F")
+    anchor = SimpleNamespace(
+        anchor_id="A",
+        follower_id="F",
+        resource_id="S:exit",
+        segment_id="S",
+    )
     left_context = SimpleNamespace(
         simulator=SimpleNamespace(
             anchor=anchor,

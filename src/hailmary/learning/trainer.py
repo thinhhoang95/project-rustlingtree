@@ -21,7 +21,7 @@ from hailmary.config import (
 )
 from hailmary.evaluation.outcome import simulator_outcome_plan
 from hailmary.features import (
-    build_current_leader_follower_anchors,
+    build_current_segment_anchors,
     leader_follower_feature_schema,
     simulator_state_vector,
 )
@@ -588,7 +588,7 @@ class CausalTrainer:
         simulator: Any,
         event_batch: Any,
     ) -> tuple[tuple[Any, AnchorContext], ...]:
-        anchors = build_current_leader_follower_anchors(simulator)
+        anchors = build_current_segment_anchors(simulator)
         prepared: list[tuple[Any, AnchorContext]] = []
         for anchor in anchors.leader_follower:
             candidates = self.runtime.catalog.enumerate_for_batch(
@@ -596,6 +596,8 @@ class CausalTrainer:
                 event_batch,
                 anchor_id=anchor.anchor_id,
                 bound_flight_id=anchor.follower_id,
+                resource_id=anchor.resource_id,
+                segment_id=anchor.segment_id,
             )
             if not candidates:
                 continue

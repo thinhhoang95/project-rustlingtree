@@ -182,14 +182,21 @@ The output is a `ClusterTemplate`. `TemplateStore` provides in-memory lookup by
 template/cluster identity, while the template CLI writes a manifest and one NPZ
 baseline variant per compiled cluster.
 
+The ADS-B-centered all-runway command treats the historical clock/envelope
+deviation as recorded fidelity diagnostics rather than a reason to delete an
+otherwise reconstructable cluster. The default `TemplateCompiler` remains
+strict; the corpus command explicitly selects executable-feasibility mode.
+
 ## 7. Stage E: scenario generation
 
 Each `FlightGenerationSpec` chooses a template and supplies observed identity
-and release information. `ScenarioGenerator` produces:
+and release information. `ScenarioGenerator` remains the generic definition
+builder. For operational experiments, `TrafficScenarioBuilder` produces:
 
 - a `FlightDefinition` referencing the baseline variant;
 - action-station definitions copied from the template;
-- resource crossings, normally the runway threshold;
+- runway and route-segment entry/exit resource crossings;
+- ordered static segment traversals;
 - release timing and provenance; and
 - optional exogenous events and metadata.
 
@@ -198,10 +205,9 @@ one `ScenarioDefinition`. At this boundary arbitrary nested payloads and variant
 objects are defensively frozen. Referential integrity is checked: every flight
 must reference an included variant and every crossing an included resource.
 
-For factorial generation, requested abstract factors are not merely copied into
-metadata. They are realized in schedule and events, then measured through a
-provisional `Simulator`. The correlation audit operates on those realized
-values.
+Demand-window provenance, observed and target cluster counts, scale, replicate,
+synthetic donor identity, and route-graph hash are stored in scenario schema v2.
+Scaling is performed per airport/runway/cluster; runway totals are derived.
 
 ## 8. Stage F: simulator initialization
 
@@ -219,8 +225,9 @@ flight, and materializes the event heap:
 | `FLIGHT_COMPLETED` | End of modeled trajectory | Lifecycle becomes completed |
 
 Event IDs and insertion sequences make ordering stable. Predicted resource
-crossing times are cached in each dynamic flight record for anchors, features,
-and outcomes.
+crossing times are cached in each dynamic flight record. At a decision epoch,
+segment queues put physical occupants first and committed future entrants
+second; exit ETA evaluates spacing without reordering an established queue.
 
 ## 9. Stage G: one runtime cycle
 
@@ -304,9 +311,10 @@ cannot invent a new learner-visible action key.
 
 ## 11. Stage I: anchors and feature vectors
 
-`active_resource_predictions` queries each active flight's ETA to a resource.
-`build_current_leader_follower_anchors` orders those predictions and creates an
-anchor for every adjacent pair.
+`build_current_segment_anchors` creates one queue per directed route segment.
+Current occupants are ordered by physical progress; committed future entrants
+follow in entry-gate ETA order. Only adjacent flights are anchored, and exit ETA
+is reserved for spacing evaluation rather than established-order inference.
 
 For one anchor, `simulator_state_vector` gathers:
 
@@ -314,12 +322,13 @@ For one anchor, `simulator_state_vector` gathers:
 - follower earliest reachable ETA under currently available levers;
 - speed/path delay capacity and masks;
 - remaining action stations and intervention budget;
-- time-to-threshold and final-gate status;
+- time-to-segment-exit and intercept/final-gate status;
 - demand pressure in the configured half-open time window; and
 - trailing-flight spacing context.
 
-The values are encoded through a versioned `FeatureSchema`, producing a
-`FeatureVector` whose field order, masks, and schema identity are explicit.
+The values and exact airport/runway/segment/cluster categories are encoded
+through feature schema v2, producing a `FeatureVector` whose field order,
+masks, categorical scope, and schema identity are explicit.
 Commitment is a measured combination of time, remaining freedom, and final-gate
 status.
 

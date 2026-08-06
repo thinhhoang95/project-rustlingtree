@@ -7,13 +7,15 @@ import pytest
 from hailmary.actions import ActionCatalog, ActionLever, PathStretchRealizer, apply_action
 from hailmary.actions.catalog import _future_conflicts
 from hailmary.config import StretchConfig
-from hailmary.features import build_current_leader_follower_anchors
+from hailmary.features import build_current_segment_anchors
 from hailmary.scenario import (
     ActionStationDefinition,
     FlightDefinition,
     MaterializedExogenousEvent,
+    ResourceCrossingDefinition,
     ResourceDefinition,
     ScenarioDefinition,
+    SegmentTraversalDefinition,
 )
 from hailmary.simulator import EventKind, Simulator
 
@@ -22,6 +24,13 @@ from .test_templates import _straight_variant
 
 def _oracle_simulator() -> Simulator:
     variant = _straight_variant()
+    crossings = (
+        ResourceCrossingDefinition("MERGE", 50_000.0),
+        ResourceCrossingDefinition("RWY", 0.0),
+    )
+    traversals = (
+        SegmentTraversalDefinition(0, "FINAL", "MERGE", "RWY", 50_000.0, 0.0),
+    )
     definition = ScenarioDefinition(
         scenario_id="STRETCH_ORACLE",
         seed=29,
@@ -30,6 +39,8 @@ def _oracle_simulator() -> Simulator:
                 flight_id="LEADER",
                 release_time_s=0.0,
                 baseline_variant_id=variant.variant_id,
+                resource_crossings=crossings,
+                segment_traversals=traversals,
             ),
             FlightDefinition(
                 flight_id="FOLLOWER",
@@ -38,11 +49,15 @@ def _oracle_simulator() -> Simulator:
                 action_stations=(
                     ActionStationDefinition(0, 90_000.0, "path_stretch"),
                 ),
+                resource_crossings=crossings,
+                segment_traversals=traversals,
             ),
             FlightDefinition(
                 flight_id="TRAILER",
                 release_time_s=150.0,
                 baseline_variant_id=variant.variant_id,
+                resource_crossings=crossings,
+                segment_traversals=traversals,
             ),
         ),
         resources=(
@@ -92,7 +107,7 @@ def test_default_stretch_selector_runs_identical_no_later_action_rollouts() -> N
     parent_hash_at_epoch = simulator.dynamic_content_hash
     anchor = next(
         item
-        for item in build_current_leader_follower_anchors(simulator).leader_follower
+        for item in build_current_segment_anchors(simulator).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     action = next(
@@ -102,6 +117,8 @@ def test_default_stretch_selector_runs_identical_no_later_action_rollouts() -> N
             batch,
             anchor_id=anchor.anchor_id,
             bound_flight_id="FOLLOWER",
+            resource_id=anchor.resource_id,
+            segment_id=anchor.segment_id,
         )
         if item.lever is ActionLever.PATH_STRETCH
     )
@@ -171,7 +188,7 @@ def test_default_selector_accumulates_conflicts_before_a_future_time_shift() -> 
     decision_time_s = simulator.state.sim_time_s
     anchor = next(
         item
-        for item in build_current_leader_follower_anchors(simulator).leader_follower
+        for item in build_current_segment_anchors(simulator).leader_follower
         if item.follower_id == "FOLLOWER"
     )
     action = next(
@@ -181,6 +198,8 @@ def test_default_selector_accumulates_conflicts_before_a_future_time_shift() -> 
             batch,
             anchor_id=anchor.anchor_id,
             bound_flight_id="FOLLOWER",
+            resource_id=anchor.resource_id,
+            segment_id=anchor.segment_id,
         )
         if item.lever is ActionLever.PATH_STRETCH
     )

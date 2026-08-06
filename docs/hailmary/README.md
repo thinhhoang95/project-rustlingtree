@@ -69,6 +69,9 @@ For artifact-oriented workflows, the installed commands are:
 ```bash
 hailmary-build-clusters --help
 hailmary-build-templates --help
+hailmary-build-offline-corpus --help
+hailmary-build-route-graph --help
+hailmary-build-traffic-batch --help
 hailmary-simulate --help
 ```
 
@@ -94,15 +97,15 @@ exogenous events remain coupled; conflicts are accumulated interval-by-interval
 so a later disturbance cannot rewrite earlier history. The geometry-only
 clearance selector remains available as the required ablation.
 
-Factorial generation realizes pressure in the release schedule, error and
-time-to-final through materialized disturbances, and commitment through
-canonical station/budget/gate freedom. A provisional simulation measures the
-actual state-vector commitment before the correlation gate is evaluated;
-infeasible requested combinations fail explicitly.
+ADS-B traffic generation creates independent half-open one-hour snapshots every
+20 minutes. Phase 0 replays scale-one terminal-entry identities, timestamps,
+runways, and cluster counts exactly. Phase 1 applies one batch-wide scale, with
+half-up rounding per airport/runway/cluster and exact seeded additions or
+thinning.
 
 The canonical runtime helpers are:
 
-- `build_current_leader_follower_anchors(...)`;
+- `build_current_segment_anchors(...)`;
 - `simulator_state_vector(...)`;
 - `simulator_outcome_plan(...)`; and
 - `paired_simulator_rollout(...)`.
@@ -115,7 +118,7 @@ states; state IDs retain branch provenance.
 
 - OpenAP A320 with a 12,000 kg payload;
 - zero wind for historical ground-speed-to-CAS derivation;
-- homogeneous 90-second runway-threshold spacing;
+- segment-specific required intervals, initially 90 seconds;
 - 16 slowdown stations and 8 path-stretch locations outside the last 4 NM;
 - at most two slowdown actions and one path stretch per aircraft; and
 - materialized exogenous events for coupled paired rollouts.

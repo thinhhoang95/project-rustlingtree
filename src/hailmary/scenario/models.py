@@ -309,6 +309,34 @@ class ResourceCrossingDefinition:
             raise ValueError("resource-crossing s_m must be finite and non-negative")
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class SegmentTraversalDefinition:
+    """Static membership of a flight in one directed route segment.
+
+    Trajectory station values are remaining distance: the entry gate therefore
+    has the larger station and the exit gate has the smaller station.
+    """
+
+    ordinal: int
+    segment_id: str
+    entry_resource_id: str
+    exit_resource_id: str
+    entry_s_m: float
+    exit_s_m: float
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 0:
+            raise ValueError("segment traversal ordinal must be non-negative")
+        if not self.segment_id or not self.entry_resource_id or not self.exit_resource_id:
+            raise ValueError("segment traversal identities must be non-empty")
+        if self.entry_resource_id == self.exit_resource_id:
+            raise ValueError("segment entry and exit resources must be distinct")
+        if not math.isfinite(self.entry_s_m) or not math.isfinite(self.exit_s_m):
+            raise ValueError("segment traversal stations must be finite")
+        if self.exit_s_m < 0.0 or self.entry_s_m <= self.exit_s_m:
+            raise ValueError("segment traversal requires entry_s_m > exit_s_m >= 0")
+
+
 @dataclass(frozen=True, slots=True)
 class FlightDefinition:
     flight_id: str
@@ -322,6 +350,7 @@ class FlightDefinition:
     release_offset_s: float = 0.0
     action_stations: tuple[ActionStationDefinition, ...] = ()
     resource_crossings: tuple[ResourceCrossingDefinition, ...] = ()
+    segment_traversals: tuple[SegmentTraversalDefinition, ...] = ()
     metadata: FrozenPayload | Mapping[str, Any] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -337,6 +366,7 @@ class FlightDefinition:
             raise ValueError("release_offset_s must be finite")
         object.__setattr__(self, "action_stations", tuple(self.action_stations))
         object.__setattr__(self, "resource_crossings", tuple(self.resource_crossings))
+        object.__setattr__(self, "segment_traversals", tuple(self.segment_traversals))
         object.__setattr__(self, "metadata", freeze_payload(self.metadata))
 
         station_keys = [(item.station_type, item.station_index) for item in self.action_stations]
@@ -345,6 +375,26 @@ class FlightDefinition:
         resource_keys = [item.resource_id for item in self.resource_crossings]
         if len(resource_keys) != len(set(resource_keys)):
             raise ValueError(f"flight {self.flight_id!r} has duplicate resource crossings")
+        segment_ids = [item.segment_id for item in self.segment_traversals]
+        if len(segment_ids) != len(set(segment_ids)):
+            raise ValueError(f"flight {self.flight_id!r} has duplicate segment traversals")
+        ordinals = [item.ordinal for item in self.segment_traversals]
+        if ordinals != list(range(len(ordinals))):
+            raise ValueError(
+                f"flight {self.flight_id!r} segment traversal ordinals must be contiguous"
+            )
+        crossing_ids = set(resource_keys)
+        for traversal in self.segment_traversals:
+            if traversal.entry_resource_id not in crossing_ids:
+                raise ValueError(
+                    f"flight {self.flight_id!r} lacks segment entry crossing "
+                    f"{traversal.entry_resource_id!r}"
+                )
+            if traversal.exit_resource_id not in crossing_ids:
+                raise ValueError(
+                    f"flight {self.flight_id!r} lacks segment exit crossing "
+                    f"{traversal.exit_resource_id!r}"
+                )
 
     @property
     def metadata_dict(self) -> dict[str, Any]:
@@ -499,6 +549,7 @@ __all__ = [
     "MaterializedExogenousEvent",
     "ResourceCrossingDefinition",
     "ResourceDefinition",
+    "SegmentTraversalDefinition",
     "ScenarioDefinition",
     "freeze_payload",
     "freeze_variant",

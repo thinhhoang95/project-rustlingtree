@@ -38,6 +38,8 @@ class ActionIdentity:
 class ActionCandidate:
     anchor_id: str
     bound_flight_id: str
+    resource_id: str
+    segment_id: str
     lever: ActionLever | str
     band: str
     state_id: str
@@ -54,8 +56,14 @@ class ActionCandidate:
     def __post_init__(self) -> None:
         normalized_lever = ActionLever(self.lever)
         object.__setattr__(self, "lever", normalized_lever)
-        if not self.anchor_id or not self.bound_flight_id or not self.state_id:
-            raise ValueError("anchor, flight, and state identities cannot be empty")
+        if (
+            not self.anchor_id
+            or not self.bound_flight_id
+            or not self.resource_id
+            or not self.segment_id
+            or not self.state_id
+        ):
+            raise ValueError("anchor, flight, segment, resource, and state identities cannot be empty")
         if self.state_version < 0 or self.epoch_index < 1 or self.station_index < 0:
             raise ValueError("state, epoch, and station indices are invalid")
         if not np.isfinite(self.s_m) or self.s_m < 0.0:
@@ -67,6 +75,8 @@ class ActionCandidate:
             {
                 "anchor_id": self.anchor_id,
                 "bound_flight_id": self.bound_flight_id,
+                "resource_id": self.resource_id,
+                "segment_id": self.segment_id,
                 "lever": normalized_lever.value,
                 "band": self.band,
                 "bound_dynamic_content": self.dynamic_content_hash or self.state_id,

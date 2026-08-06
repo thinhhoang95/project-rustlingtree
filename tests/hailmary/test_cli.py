@@ -8,15 +8,30 @@ import tomllib
 import numpy as np
 import pytest
 
-from hailmary.cli import build_clusters, build_templates, simulate
+from hailmary.cli import (
+    build_clusters,
+    build_offline_corpus,
+    build_route_graph,
+    build_templates,
+    build_traffic_batch,
+    simulate,
+)
 from hailmary.clustering import ClusterLibrary
+from hailmary.topology import RouteGraphArtifact
 
 from .test_adapters import _variant
 
 
 @pytest.mark.parametrize(
     "entrypoint",
-    [build_clusters.main, build_templates.main, simulate.main],
+    [
+        build_clusters.main,
+        build_templates.main,
+        build_offline_corpus.main,
+        build_route_graph.main,
+        build_traffic_batch.main,
+        simulate.main,
+    ],
 )
 def test_cli_help_is_headless_and_successful(entrypoint, capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
@@ -32,6 +47,9 @@ def test_pyproject_registers_hailmary_console_scripts() -> None:
 
     assert scripts["hailmary-build-clusters"] == "hailmary.cli.build_clusters:main"
     assert scripts["hailmary-build-templates"] == "hailmary.cli.build_templates:main"
+    assert scripts["hailmary-build-offline-corpus"] == "hailmary.cli.build_offline_corpus:main"
+    assert scripts["hailmary-build-route-graph"] == "hailmary.cli.build_route_graph:main"
+    assert scripts["hailmary-build-traffic-batch"] == "hailmary.cli.build_traffic_batch:main"
     assert scripts["hailmary-simulate"] == "hailmary.cli.simulate:main"
 
 
@@ -71,6 +89,40 @@ def test_cluster_cli_builds_canonical_artifact_from_npz(tmp_path: Path, capsys) 
     assert result == 0
     assert len(artifact.assignments) == 6
     assert summary["artifact_content_hash"] == artifact.artifact_content_hash
+
+
+def test_route_graph_cli_builds_hashed_artifact(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "routes.json"
+    source.write_text(
+        json.dumps(
+            {
+                "dataset_id": "cli-route-test",
+                "routes": [
+                    {
+                        "airport": "KATL",
+                        "runway": "18R",
+                        "cluster_id": cluster,
+                        "lat_deg": [0.0, 0.0, 0.0],
+                        "lon_deg": [0.0, 0.1, 0.2],
+                    }
+                    for cluster in ("C1", "C2")
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "route_graph.json"
+
+    result = build_route_graph.main(
+        ["--input", str(source), "--output", str(output)]
+    )
+
+    artifact = RouteGraphArtifact.read(output)
+    summary = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert summary["artifact_content_hash"] == artifact.artifact_content_hash
+    assert summary["cluster_count"] == 2
+    assert artifact.traversals_for("KATL:RW18R:C1")
 
 
 def test_variant_npz_round_trip_is_content_exact_and_byte_deterministic(tmp_path: Path) -> None:
@@ -124,10 +176,8 @@ def test_simulate_cli_runs_json_npz_scenario_and_writes_trace(tmp_path: Path, ca
     assert summary["batch_count"] == len(trace["batches"])
 
 
-def test_requested_notebooks_are_valid_and_have_no_embedded_outputs() -> None:
+def test_requested_notebooks_are_valid() -> None:
     for name in ("01_clusters.ipynb", "02_templates.ipynb"):
         payload = json.loads((Path("notebooks/hailmary") / name).read_text(encoding="utf-8"))
         assert payload["nbformat"] == 4
-        assert all(not cell.get("outputs") for cell in payload["cells"] if cell["cell_type"] == "code")
         assert any("hailmary" in "".join(cell["source"]).lower() for cell in payload["cells"])
-

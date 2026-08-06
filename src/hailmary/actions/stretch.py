@@ -365,11 +365,17 @@ class PathStretchRealizer:
         current: TrajectoryVariant,
         *,
         anchor_s_m: float,
+        minimum_rejoin_station_m: float | None = None,
     ) -> tuple[StretchCandidateResult, ...]:
         geometry_source = _variant_with_exact_station(current, float(anchor_s_m))
         action_index = int(np.searchsorted(geometry_source.s_m, float(anchor_s_m)))
         base_points = np.column_stack((geometry_source.east_m, geometry_source.north_m))
         gate_m = self.template_config.commitment_gate_nm * M_PER_NM
+        if minimum_rejoin_station_m is not None:
+            requested_rejoin = float(minimum_rejoin_station_m)
+            if not np.isfinite(requested_rejoin) or requested_rejoin < 0.0:
+                raise ValueError("minimum_rejoin_station_m must be finite and non-negative")
+            gate_m = max(gate_m, requested_rejoin)
         results: list[StretchCandidateResult] = []
         for name, configured_span_nm, added_nm in zip(
             self.config.variant_names,
@@ -432,6 +438,7 @@ class PathStretchRealizer:
         current: TrajectoryVariant,
         *,
         anchor_s_m: float,
+        minimum_rejoin_station_m: float | None = None,
         outcome_evaluator: Callable[
             [TrajectoryVariant],
             float | StretchOutcomeEvaluation,
@@ -440,7 +447,11 @@ class PathStretchRealizer:
         selector: str | None = None,
     ) -> StretchRealization:
         selection = selector or self.config.selector
-        raw_candidates = self.candidates(current, anchor_s_m=anchor_s_m)
+        raw_candidates = self.candidates(
+            current,
+            anchor_s_m=anchor_s_m,
+            minimum_rejoin_station_m=minimum_rejoin_station_m,
+        )
         scored: list[StretchCandidateResult] = []
         for candidate in raw_candidates:
             if not candidate.feasible:

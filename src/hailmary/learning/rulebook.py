@@ -770,12 +770,12 @@ class SimulatorRulebookPolicy:
 
         from hailmary.actions import ActionCatalog
         from hailmary.features import (
-            build_current_leader_follower_anchors,
+            build_current_segment_anchors,
             simulator_state_vector,
         )
 
         catalog = ActionCatalog(self.template_config)
-        anchors = build_current_leader_follower_anchors(simulator)
+        anchors = build_current_segment_anchors(simulator)
         records: list[RulebookDecisionRecord] = []
         for anchor in anchors.leader_follower:
             candidates = catalog.enumerate_for_batch(
@@ -783,6 +783,8 @@ class SimulatorRulebookPolicy:
                 event_batch,
                 anchor_id=anchor.anchor_id,
                 bound_flight_id=anchor.follower_id,
+                resource_id=anchor.resource_id,
+                segment_id=anchor.segment_id,
             )
             if not candidates:
                 continue

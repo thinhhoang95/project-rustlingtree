@@ -16,7 +16,7 @@ and the simulator must remain usable without importing legacy manager code.
 | Component | Responsibility | Main consumers |
 | --- | --- | --- |
 | `config.py` | Frozen, validated defaults for clustering, templates, stretch geometry, scenarios, features, outcomes, and learning | All pipeline, runtime, and learning layers |
-| `errors.py` | Typed package failures for artifacts, configuration, actions, simulation, correlation gates, and empty clustering results | All layers and callers |
+| `errors.py` | Typed package failures for artifacts, configuration, actions, simulation, and empty clustering results | All layers and callers |
 | `ids.py` | Canonical data conversion, JSON encoding, content hashes, stable IDs, and provenance-aware state IDs | Artifacts, actions, scenarios, rollouts |
 | `_arrays.py` | Defensive conversion to read-only numeric arrays plus length and monotonicity validation | Template and artifact models |
 
@@ -179,7 +179,7 @@ not acquire simulation authority.
 ### `models.py`
 
 `ResourceDefinition`, `ActionStationDefinition`, `ResourceCrossingDefinition`,
-`FlightDefinition`, `MaterializedExogenousEvent`, and `ScenarioDefinition`
+`SegmentTraversalDefinition`, `FlightDefinition`, `MaterializedExogenousEvent`, and `ScenarioDefinition`
 define the immutable experiment input. `freeze_variant`, `freeze_weather`, and
 `freeze_payload` defensively snapshot caller-owned data. Referential integrity
 and the definition hash are established during construction.
@@ -187,9 +187,9 @@ and the definition hash are established during construction.
 ### `generator.py`
 
 `ScenarioGenerator` converts `FlightGenerationSpec` records and templates into
-a definition. The same module implements factorial conditions, physical factor
-realization, provisional commitment measurement, and correlation audits.
-`build_scenario_definition` is the functional convenience entry point.
+a generic definition. `build_scenario_definition` is the functional convenience
+entry point. `traffic.py` implements ADS-B demand windows, deterministic global
+scaling, donor provenance, `TrafficScenario`, and `TrafficScenarioBatch`.
 
 ## 9. `hailmary.simulator`
 
@@ -413,11 +413,14 @@ outcome plan.
 | --- | --- | --- | --- |
 | `hailmary-build-clusters` | `build_clusters.py` | Prepared NPZ/JSON XY tracks plus partition/projection | Canonical cluster-library JSON |
 | `hailmary-build-templates` | `build_templates.py` | Cluster JSON plus raw medoid profiles | Template manifest and variant NPZ files |
+| `hailmary-build-offline-corpus` | `build_offline_corpus.py` | Manifest, catalog, and raw ADS-B | All-runway clusters, templates, hashed terminal-entry corpus, route inputs, and rejection audit |
+| `hailmary-build-route-graph` | `build_route_graph.py` | Qualified medoid routes | Hashed route-graph artifact and audit |
+| `hailmary-build-traffic-batch` | `build_traffic_batch.py` | Terminal-entry corpus, templates, and route graph | Hashed scenario-batch audit |
 | `hailmary-simulate` | `simulate.py` | Scenario JSON referencing variant NPZ files | Deterministic simulation trace JSON |
 
 The CLI persistence helpers use deterministic JSON/NPZ forms and validate data
 again when reading. Python APIs expose richer results, especially raw ADS-B
-rejection audits and in-process factorial/rollout workflows.
+rejection audits and in-process traffic/rollout workflows.
 
 ## 17. Tests and executable documentation
 

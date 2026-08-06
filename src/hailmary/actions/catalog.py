@@ -187,12 +187,12 @@ def _default_stretch_outcome_evaluator(
         score_simulator_outcome,
         simulator_outcome_plan,
     )
-    from hailmary.features.anchors import build_current_leader_follower_anchors
+    from hailmary.features.anchors import build_current_segment_anchors
 
     parent_hash = str(getattr(simulator, "dynamic_content_hash"))
     state = getattr(simulator, "state")
     decision_time_s = float(state.sim_time_s)
-    anchors = build_current_leader_follower_anchors(simulator)
+    anchors = build_current_segment_anchors(simulator)
     try:
         anchor = next(
             item
@@ -300,6 +300,8 @@ class ActionCatalog:
         *,
         anchor_id: str,
         bound_flight_id: str,
+        resource_id: str,
+        segment_id: str,
     ) -> tuple[ActionCandidate, ...]:
         state = getattr(simulator, "state")
         decision = getattr(batch, "decision_epoch", None)
@@ -315,6 +317,21 @@ class ActionCatalog:
         dynamic = state.flight(bound_flight_id)
         if str(getattr(dynamic.lifecycle, "value", dynamic.lifecycle)) != "active":
             return ()
+        definition_flight = state.definition.flight(bound_flight_id)
+        try:
+            traversal = next(
+                item
+                for item in definition_flight.segment_traversals
+                if item.segment_id == segment_id
+            )
+        except StopIteration as exc:
+            raise InfeasibleActionError(
+                "action flight is not committed to the bound segment"
+            ) from exc
+        if traversal.exit_resource_id != resource_id:
+            raise InfeasibleActionError(
+                "action resource is not the bound segment exit gate"
+            )
         station_events = [
             event
             for event in getattr(batch, "events")
@@ -340,6 +357,8 @@ class ActionCatalog:
                 state,
                 anchor_id=anchor_id,
                 flight_id=bound_flight_id,
+                resource_id=resource_id,
+                segment_id=segment_id,
                 lever=no_op_identity.lever,
                 band=no_op_identity.band,
                 station_index=first.station_index,
@@ -393,6 +412,8 @@ class ActionCatalog:
                             state,
                             anchor_id=anchor_id,
                             flight_id=bound_flight_id,
+                            resource_id=resource_id,
+                            segment_id=segment_id,
                             lever=identity.lever,
                             band=identity.band,
                             station_index=event.station_index,
@@ -403,16 +424,20 @@ class ActionCatalog:
             if (
                 station_type == "path_stretch"
                 and dynamic.path_stretch_count < self.config.max_path_stretches
+                and station_s > traversal.entry_s_m + 1.0e-6
             ):
                 candidates.append(
                     self._candidate(
                         state,
                         anchor_id=anchor_id,
                         flight_id=bound_flight_id,
+                        resource_id=resource_id,
+                        segment_id=segment_id,
                         lever=stretch_identity.lever,
                         band=stretch_identity.band,
                         station_index=event.station_index,
                         s_m=station_s,
+                        metadata=(("segment_entry_s_m", traversal.entry_s_m),),
                     )
                 )
         return tuple(candidates)
@@ -423,6 +448,8 @@ class ActionCatalog:
         *,
         anchor_id: str,
         flight_id: str,
+        resource_id: str,
+        segment_id: str,
         lever: ActionLever,
         band: str,
         station_index: int,
@@ -432,6 +459,8 @@ class ActionCatalog:
         return ActionCandidate(
             anchor_id=anchor_id,
             bound_flight_id=flight_id,
+            resource_id=resource_id,
+            segment_id=segment_id,
             lever=lever,
             band=band,
             state_id=getattr(state, "state_id"),
@@ -523,6 +552,19 @@ def apply_action(
     action.assert_applicable(simulator)
     state = getattr(simulator, "state")
     dynamic = state.flight(action.bound_flight_id)
+    definition_flight = state.definition.flight(action.bound_flight_id)
+    try:
+        traversal = next(
+            item
+            for item in definition_flight.segment_traversals
+            if item.segment_id == action.segment_id
+        )
+    except StopIteration as exc:
+        raise InfeasibleActionError(
+            "action flight is no longer committed to the bound segment"
+        ) from exc
+    if traversal.exit_resource_id != action.resource_id:
+        raise InfeasibleActionError("action is bound to the wrong segment resource")
     current = state.definition.variant(dynamic.current_variant_id)
     if not isinstance(current, TrajectoryVariant):
         raise TypeError("Hailmary actions require TrajectoryVariant inputs")
@@ -547,6 +589,8 @@ def apply_action(
                 "action_id": action.action_id,
                 "anchor_id": action.anchor_id,
                 "flight_id": action.bound_flight_id,
+                "resource_id": action.resource_id,
+                "segment_id": action.segment_id,
                 "lever": action.lever.value,
                 "band": action.band,
                 "time_s": state.sim_time_s,
@@ -613,6 +657,7 @@ def apply_action(
         realized = stretch_realizer.realize(
             current,
             anchor_s_m=action.s_m,
+            minimum_rejoin_station_m=traversal.entry_s_m,
             outcome_evaluator=resolved_stretch_evaluator,
             selector=selected_stretch_selector,
         )

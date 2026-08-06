@@ -15,9 +15,9 @@ from .config import (
 from .errors import (
     ArtifactValidationError,
     ConfigurationError,
-    CorrelationGateError,
     HailmaryError,
     InfeasibleActionError,
+    NoEligibleArrivalsError,
     SimulationError,
     StaleActionError,
 )
@@ -33,7 +33,15 @@ from .actions import (
 )
 from .clustering import ClusterLibrary, build_cluster_library
 from .runtime import ActionRuntime, ConfiguredActionApplier, build_action_runtime
-from .scenario import FlightGenerationSpec, ScenarioDefinition, ScenarioGenerator
+from .scenario import (
+    DemandWindowConfig,
+    FlightGenerationSpec,
+    ScenarioDefinition,
+    ScenarioGenerator,
+    TrafficScaleConfig,
+    TrafficScenario,
+    TrafficScenarioBatch,
+)
 from .simulator import SimulationState, Simulator
 from .templates import (
     ClusterTemplate,
@@ -56,7 +64,6 @@ __all__ = [
     "ClusterTemplate",
     "ConfigurationError",
     "ConfiguredActionApplier",
-    "CorrelationGateError",
     "FeatureConfig",
     "FlightGenerationSpec",
     "HailmaryConfig",
@@ -64,10 +71,15 @@ __all__ = [
     "InfeasibleActionError",
     "LearningConfig",
     "MedoidTrack",
+    "NoEligibleArrivalsError",
     "OutcomeConfig",
     "ScenarioConfig",
     "ScenarioDefinition",
     "ScenarioGenerator",
+    "DemandWindowConfig",
+    "TrafficScaleConfig",
+    "TrafficScenario",
+    "TrafficScenarioBatch",
     "SimulationState",
     "SimulationError",
     "Simulator",

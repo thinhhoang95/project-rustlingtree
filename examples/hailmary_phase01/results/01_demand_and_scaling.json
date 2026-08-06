@@ -1,0 +1,58 @@
+{
+  "demand_windows": {
+    "[0,3600)": [
+      0.0,
+      1199.999,
+      1200.0,
+      3599.999
+    ],
+    "[1200,4800)": [
+      1200.0,
+      3599.999,
+      3600.0,
+      4799.999
+    ]
+  },
+  "half_up_examples": {
+    "34_x_1.05": 36,
+    "independent_runway_rounding_for_2_x_1.5": 3,
+    "two_cluster_1_x_1.5_each": 4,
+    "zero_x_3": 0
+  },
+  "scale_1": {
+    "cluster_counts": {
+      "KATL:RW18R:C1": 34,
+      "KATL:RW18R:C2": 3
+    },
+    "timestamps_exact": true
+  },
+  "scale_1_05": {
+    "derived_runway_total": 39,
+    "joint_donor_profiles_match": true,
+    "observed_cluster_counts": {
+      "KATL:RW18R:C1": 34,
+      "KATL:RW18R:C2": 3
+    },
+    "synthetic_addition_count": 2,
+    "synthetic_provenance": [
+      {
+        "altitude_m": 1320.0,
+        "cluster": "KATL:RW18R:C1",
+        "donor_flight_id": "OBS032",
+        "flight_id": "synthetic_flight_7b5304331bee39249a88811c12d4",
+        "ground_speed_mps": 122.0
+      },
+      {
+        "altitude_m": 1190.0,
+        "cluster": "KATL:RW18R:C1",
+        "donor_flight_id": "OBS019",
+        "flight_id": "synthetic_flight_d0c1c1715bf9168bdb01eb1debec",
+        "ground_speed_mps": 109.0
+      }
+    ],
+    "target_cluster_counts": {
+      "KATL:RW18R:C1": 36,
+      "KATL:RW18R:C2": 3
+    }
+  }
+}

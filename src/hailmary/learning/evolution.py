@@ -385,8 +385,8 @@ def crossover_conditions(
             (first if bool(generator.integers(0, 2)) else second)[name] = right_interval
 
     children = (
-        RuleCondition(left.role_type, left.schema_hash, first),
-        RuleCondition(left.role_type, left.schema_hash, second),
+        RuleCondition(left.role_type, left.schema_hash, first, left.categories),
+        RuleCondition(left.role_type, left.schema_hash, second, right.categories),
     )
     if current is not None and not all(
         child.matches(

@@ -153,6 +153,7 @@ class TemplateCompiler:
     station_count: int = 512
     aircraft_config: object | None = None
     validator: VariantValidator | None = None
+    require_observed_profile_fit: bool = True
 
     def compile(
         self,
@@ -166,6 +167,8 @@ class TemplateCompiler:
         dispersion_m: float = 0.0,
         threshold_resource_id: str | None = None,
     ) -> ClusterTemplate:
+        if type(self.require_observed_profile_fit) is not bool:
+            raise TypeError("require_observed_profile_fit must be bool")
         if self.station_count < self.config.speed_action_count + self.config.path_stretch_count + 2:
             raise ArtifactValidationError("compiler station grid is too small for action locations")
         east, north = _project_track(track)
@@ -221,8 +224,16 @@ class TemplateCompiler:
             isotonic_cas,
             lower,
             upper,
-            max_excursion_kts=self.config.max_historical_clamp_kts,
-            max_clamped_fraction=self.config.max_clamped_fraction,
+            max_excursion_kts=(
+                self.config.max_historical_clamp_kts
+                if self.require_observed_profile_fit
+                else float("inf")
+            ),
+            max_clamped_fraction=(
+                self.config.max_clamped_fraction
+                if self.require_observed_profile_fit
+                else 1.0
+            ),
         )
         if np.any(np.diff(command) < -1e-8):
             raise ArtifactValidationError(
@@ -235,7 +246,7 @@ class TemplateCompiler:
         compiled_duration = float(elapsed[0])
         signed_error = compiled_duration - observed_duration
         absolute_error = abs(signed_error)
-        if self.validator is None and (
+        if self.require_observed_profile_fit and self.validator is None and (
             absolute_error > self.config.max_timing_error_s + 1e-9
             or absolute_error > self.config.max_timing_error_fraction * observed_duration + 1e-9
         ):
@@ -325,7 +336,7 @@ class TemplateCompiler:
                 raise ArtifactValidationError(f"SIMAP validation failed: {validated.message}")
             baseline = compiled
             validated_duration = validated.compiled_duration_s
-            if validated_duration is not None:
+            if self.require_observed_profile_fit and validated_duration is not None:
                 validated_error = abs(float(validated_duration) - observed_duration)
                 if (
                     validated_error > self.config.max_timing_error_s + 1e-9
@@ -369,6 +380,7 @@ class TemplateCompiler:
                 ("cas_derivation", "ground_speed_as_tas_then_openap"),
                 ("aircraft_typecode", self.config.aircraft_typecode),
                 ("payload_kg", self.config.payload_kg),
+                ("require_observed_profile_fit", self.require_observed_profile_fit),
             ),
         )
 

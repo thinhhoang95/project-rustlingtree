@@ -118,6 +118,7 @@ def cover_missing_actions(
             role_type=match_set.role_type,
             schema_hash=match_set.schema_hash,
             intervals=intervals,
+            categories=vector.categories,
         )
         rule = MutableRule(
             condition=condition,

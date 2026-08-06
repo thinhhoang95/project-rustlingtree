@@ -259,15 +259,8 @@ class StretchConfig:
 class ScenarioConfig:
     separation_s: float = 90.0
     pressure_window_s: float = 600.0
-    feature_correlation_limit: float = 0.30
     exogenous_coupling: str = "materialized_events"
     intervention_ordering: str = "any_chronological_order"
-    registered_factor_pairs: tuple[tuple[str, str], ...] = (
-        ("error_magnitude", "time_to_final"),
-        ("error_magnitude", "pressure"),
-        ("commitment", "pressure"),
-        ("commitment", "error_magnitude"),
-    )
 
     def __post_init__(self) -> None:
         if (
@@ -277,11 +270,6 @@ class ScenarioConfig:
             or self.pressure_window_s <= 0.0
         ):
             raise ConfigurationError("separation and pressure window must be positive")
-        if (
-            not _finite_number(self.feature_correlation_limit)
-            or not 0.0 <= self.feature_correlation_limit < 1.0
-        ):
-            raise ConfigurationError("feature_correlation_limit must be in [0, 1)")
         if self.exogenous_coupling != "materialized_events":
             raise ConfigurationError("version 1 requires materialized exogenous events")
         if self.intervention_ordering != "any_chronological_order":
@@ -292,7 +280,7 @@ class ScenarioConfig:
 
 @dataclass(frozen=True)
 class FeatureConfig:
-    schema_version: str = "hailmary.features.leader_follower.v1"
+    schema_version: str = "hailmary.features.leader_follower.v2"
     ratio_capacity_floor_s: float = 1.0
     ratio_clip_max: float = 10.0
     commitment_time_scale_s: float = 1_200.0
@@ -303,7 +291,7 @@ class FeatureConfig:
     budget_freedom_weight: float = 0.5
 
     def __post_init__(self) -> None:
-        if self.schema_version != "hailmary.features.leader_follower.v1":
+        if self.schema_version != "hailmary.features.leader_follower.v2":
             raise ConfigurationError(
                 "unsupported leader-follower feature schema version"
             )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
@@ -113,7 +113,11 @@ class LeaderFollowerFeatureInputs:
     total_intervention_budget: int
     live_nominal_etas_s: tuple[float, ...]
     trailing_spacing_margins_s: tuple[float, ...] = ()
-    cluster_index: int = 0
+    airport: str = "UNKNOWN"
+    runway: str = "UNKNOWN"
+    segment: str = "UNKNOWN"
+    leader_cluster: str = "unassigned"
+    follower_cluster: str = "unassigned"
     effective_remaining_action_station_fraction: float | None = None
     effective_remaining_intervention_budget_fraction: float | None = None
 
@@ -143,8 +147,15 @@ class LeaderFollowerFeatureInputs:
             raise ValueError("remaining action-station count is out of range")
         if not 0 <= self.remaining_intervention_budget <= self.total_intervention_budget:
             raise ValueError("remaining intervention budget is out of range")
-        if self.cluster_index < 0:
-            raise ValueError("cluster_index cannot be negative")
+        categories = (
+            self.airport,
+            self.runway,
+            self.segment,
+            self.leader_cluster,
+            self.follower_cluster,
+        )
+        if any(not str(value).strip() for value in categories):
+            raise ValueError("categorical feature scopes must be non-empty")
         if not all(np.isfinite(value) for value in self.live_nominal_etas_s):
             raise ValueError("live nominal ETAs must be finite")
         if not all(np.isfinite(value) for value in self.trailing_spacing_margins_s):
@@ -261,7 +272,6 @@ def derive_leader_follower_state_vector(
         "local_flow_count": float(len(inputs.live_nominal_etas_s)),
         "pressure_ratio": pressure_ratio,
         "trailing_min_spacing_margin_s": trailing_margin,
-        "cluster_index": float(inputs.cluster_index),
         "speed_capacity_undefined_mask": speed_mask,
         "path_capacity_undefined_mask": path_mask,
         "trailing_spacing_undefined_mask": trailing_mask,
@@ -295,7 +305,17 @@ def derive_leader_follower_state_vector(
         },
         "reachability": inputs.reachability,
     }
-    return active_schema.encode(named, diagnostics=diagnostics)
+    return active_schema.encode(
+        named,
+        categories={
+            "airport": inputs.airport,
+            "runway": inputs.runway,
+            "segment": inputs.segment,
+            "leader_cluster": inputs.leader_cluster,
+            "follower_cluster": inputs.follower_cluster,
+        },
+        diagnostics=diagnostics,
+    )
 
 
 @runtime_checkable
@@ -328,7 +348,9 @@ class LeaderFollowerStateQuery(Protocol):
         anchor: LeaderFollowerAnchor,
     ) -> Iterable[float]: ...
 
-    def cluster_index(self, state: Any, flight_id: str) -> int: ...
+    def categorical_scope(
+        self, state: Any, anchor: LeaderFollowerAnchor
+    ) -> Mapping[str, str]: ...
 
 
 def state_vector_from_query(
@@ -348,6 +370,7 @@ def state_vector_from_query(
         float(query.nominal_eta_s(state, flight_id, anchor.resource_id))
         for flight_id in live_ids
     )
+    scope = dict(query.categorical_scope(state, anchor))
     inputs = LeaderFollowerFeatureInputs(
         sim_time_s=query.simulation_time_s(state),
         leader_eta_s=query.nominal_eta_s(state, anchor.leader_id, anchor.resource_id),
@@ -369,7 +392,11 @@ def state_vector_from_query(
         total_intervention_budget=total_budget,
         live_nominal_etas_s=live_etas,
         trailing_spacing_margins_s=tuple(query.trailing_spacing_margins_s(state, anchor)),
-        cluster_index=query.cluster_index(state, anchor.follower_id),
+        airport=scope["airport"],
+        runway=scope["runway"],
+        segment=scope["segment"],
+        leader_cluster=scope["leader_cluster"],
+        follower_cluster=scope["follower_cluster"],
     )
     return derive_leader_follower_state_vector(
         inputs,
@@ -439,9 +466,15 @@ def simulator_state_vector(
         template_config=template_cfg,
     )
 
-    ordered = tuple(item.flight_id for item in predictions)
+    from hailmary.features.anchors import build_current_segment_anchors
+
+    ordered = build_current_segment_anchors(simulator).flow_for_segment(
+        anchor.segment_id
+    ).ordered_flight_ids
     follower_index = ordered.index(anchor.follower_id)
-    trailing = predictions[follower_index + 1 : follower_index + 4]
+    trailing = tuple(
+        by_flight[flight_id] for flight_id in ordered[follower_index + 1 : follower_index + 4]
+    )
     trailing_margins: list[float] = []
     previous_eta = follower.eta_s
     for trailer in trailing:
@@ -456,8 +489,7 @@ def simulator_state_vector(
         variant = state.definition.variant(dynamic.current_variant_id)
         return str(getattr(variant, "cluster_id", "unassigned") or "unassigned")
 
-    cluster_labels = sorted({cluster_label(flight.flight_id) for flight in state.definition.flights})
-    follower_cluster_index = cluster_labels.index(cluster_label(anchor.follower_id))
+    resource_metadata = resource.metadata_dict
     reachability = simulator_reachability_map(
         simulator,
         flight_id=anchor.follower_id,
@@ -466,7 +498,7 @@ def simulator_state_vector(
         action_applier=action_applier,
         cache_namespace=reachability_cache_namespace,
     )
-    live_etas = tuple(item.eta_s for item in predictions)
+    live_etas = tuple(by_flight[flight_id].eta_s for flight_id in ordered)
     follower_distance = max(0.0, float(follower.sample.s_m - follower.resource_s_m))
     leader_distance = max(0.0, float(leader.sample.s_m - leader.resource_s_m))
     inputs = LeaderFollowerFeatureInputs(
@@ -489,7 +521,11 @@ def simulator_state_vector(
         total_intervention_budget=total_budget,
         live_nominal_etas_s=live_etas,
         trailing_spacing_margins_s=tuple(trailing_margins),
-        cluster_index=follower_cluster_index,
+        airport=str(resource_metadata.get("airport", "UNKNOWN")),
+        runway=str(resource_metadata.get("runway", "UNKNOWN")),
+        segment=anchor.segment_id or str(resource_metadata.get("segment_id", "UNKNOWN")),
+        leader_cluster=cluster_label(anchor.leader_id),
+        follower_cluster=cluster_label(anchor.follower_id),
         effective_remaining_action_station_fraction=effective_station_fraction,
         effective_remaining_intervention_budget_fraction=effective_budget_fraction,
     )
@@ -550,7 +586,7 @@ def _scenario_feature_config(
     if explicit is not None:
         return explicit
     metadata = simulator.state.definition.metadata_dict
-    payload = metadata.get("factorial_feature_config")
+    payload = metadata.get("feature_config")
     if isinstance(payload, dict):
         return FeatureConfig(**payload)
     return FeatureConfig()
@@ -563,7 +599,7 @@ def _scenario_template_config(
     if explicit is not None:
         return explicit
     metadata = simulator.state.definition.metadata_dict
-    payload = metadata.get("factorial_template_config")
+    payload = metadata.get("template_config")
     if isinstance(payload, dict):
         return TemplateConfig(**payload)
     return TemplateConfig()
@@ -573,17 +609,18 @@ def simulator_flight_commitment_components(
     simulator: Any,
     flight_id: str,
     *,
-    resource_id: str | None = None,
+    resource_id: str,
     feature_config: FeatureConfig | None = None,
     template_config: TemplateConfig | None = None,
 ) -> CommitmentComponents:
     """Compute the canonical commitment primitive for one active flight."""
 
-    from hailmary.features.anchors import active_resource_predictions, threshold_resource_id
+    from hailmary.features.anchors import active_resource_predictions
 
     feature_cfg = _scenario_feature_config(simulator, feature_config)
     template_cfg = _scenario_template_config(simulator, template_config)
-    resolved_resource = threshold_resource_id(simulator, resource_id)
+    resolved_resource = str(resource_id)
+    simulator.state.definition.resource(resolved_resource)
     predictions = active_resource_predictions(simulator, resource_id=resolved_resource)
     try:
         prediction = next(item for item in predictions if item.flight_id == flight_id)

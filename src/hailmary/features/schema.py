@@ -49,6 +49,7 @@ class FeatureSchema:
 
     schema_version: str
     fields: tuple[FeatureField, ...]
+    category_names: tuple[str, ...] = ()
     schema_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -59,6 +60,12 @@ class FeatureSchema:
         names = self.names
         if len(names) != len(set(names)):
             raise ValueError("feature names must be unique")
+        categories = tuple(str(name).strip() for name in self.category_names)
+        if any(not name for name in categories) or len(categories) != len(set(categories)):
+            raise ValueError("categorical feature names must be non-empty and unique")
+        if set(categories).intersection(names):
+            raise ValueError("continuous and categorical feature names must be disjoint")
+        object.__setattr__(self, "category_names", categories)
         name_set = set(names)
         for feature in self.fields:
             if feature.missingness_mask is not None and feature.missingness_mask not in name_set:
@@ -72,6 +79,7 @@ class FeatureSchema:
                 {
                     "schema_version": self.schema_version,
                     "fields": self.fields,
+                    "category_names": self.category_names,
                 },
                 namespace="hailmary.feature_schema",
             ),
@@ -85,6 +93,7 @@ class FeatureSchema:
         self,
         named_values: Mapping[str, float],
         *,
+        categories: Mapping[str, str] | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "FeatureVector":
         missing = [name for name in self.names if name not in named_values]
@@ -106,11 +115,21 @@ class FeatureSchema:
             if feature.upper_bound is not None and value > feature.upper_bound + tolerance:
                 raise ValueError(f"{feature.name}={value} is above {feature.upper_bound}")
 
+        supplied_categories = {} if categories is None else dict(categories)
+        missing_categories = [
+            name for name in self.category_names if name not in supplied_categories
+        ]
+        if missing_categories:
+            raise ValueError(f"missing categorical feature values: {missing_categories}")
+        extra_categories = sorted(set(supplied_categories) - set(self.category_names))
+        if extra_categories:
+            raise ValueError(f"unknown categorical feature values: {extra_categories}")
         return FeatureVector(
             schema=self,
             values=values,
             named=named_values,
             diagnostics={} if diagnostics is None else diagnostics,
+            categories=supplied_categories,
         )
 
 
@@ -122,6 +141,7 @@ class FeatureVector:
     values: np.ndarray
     named: Mapping[str, float]
     diagnostics: Mapping[str, Any]
+    categories: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         values = readonly_float64(self.values, name="feature vector")
@@ -135,6 +155,10 @@ class FeatureVector:
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "named", MappingProxyType(named))
         object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
+        categories = {name: str(self.categories[name]) for name in self.schema.category_names}
+        if any(not value for value in categories.values()):
+            raise ValueError("categorical feature values must be non-empty")
+        object.__setattr__(self, "categories", MappingProxyType(categories))
 
     @property
     def schema_hash(self) -> str:
@@ -145,9 +169,12 @@ class FeatureVector:
 
 
 def leader_follower_feature_schema(
-    schema_version: str = "hailmary.features.leader_follower.v1",
+    schema_version: str = "hailmary.features.leader_follower.v2",
 ) -> FeatureSchema:
-    """Return the version-1 leader/follower learning-vector contract."""
+    """Return the segment-scoped leader/follower learning-vector contract."""
+
+    if schema_version != "hailmary.features.leader_follower.v2":
+        raise ValueError("unsupported leader/follower feature schema")
 
     nonnegative = 0.0
     unit_interval = (0.0, 1.0)
@@ -200,12 +227,21 @@ def leader_follower_feature_schema(
             "s",
             missingness_mask="trailing_spacing_undefined_mask",
         ),
-        FeatureField("cluster_index", "category_index", lower_bound=nonnegative),
         FeatureField("speed_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
         FeatureField("path_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
         FeatureField("trailing_spacing_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
     )
-    return FeatureSchema(schema_version=schema_version, fields=fields)
+    return FeatureSchema(
+        schema_version=schema_version,
+        fields=fields,
+        category_names=(
+            "airport",
+            "runway",
+            "segment",
+            "leader_cluster",
+            "follower_cluster",
+        ),
+    )
 
 
 __all__ = [

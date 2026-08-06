@@ -35,7 +35,7 @@ from hailmary.actions.models import ActionLever
 from hailmary.config import LearningConfig, StretchConfig
 from hailmary.evaluation import simulator_outcome_plan
 from hailmary.features import (
-    build_current_leader_follower_anchors,
+    build_current_segment_anchors,
     leader_follower_feature_schema,
     simulator_state_vector,
 )
@@ -54,8 +54,10 @@ from hailmary.runtime import ActionRuntime, build_action_runtime
 from hailmary.scenario import (
     ActionStationDefinition,
     FlightDefinition,
+    ResourceCrossingDefinition,
     ResourceDefinition,
     ScenarioDefinition,
+    SegmentTraversalDefinition,
 )
 from hailmary.templates import TrajectoryVariant
 
@@ -296,6 +298,15 @@ def _representative_definition(flight_count: int) -> ScenarioDefinition:
         ActionStationDefinition(0, 90_000.0, "speed"),
         ActionStationDefinition(0, 90_000.0, "path_stretch"),
     )
+    crossings = (
+        ResourceCrossingDefinition("FINAL:entry", 50_000.0),
+        ResourceCrossingDefinition("RWY", 0.0),
+    )
+    traversals = (
+        SegmentTraversalDefinition(
+            0, "FINAL", "FINAL:entry", "RWY", 50_000.0, 0.0
+        ),
+    )
     flights = tuple(
         FlightDefinition(
             flight_id=f"F{index:03d}",
@@ -303,6 +314,8 @@ def _representative_definition(flight_count: int) -> ScenarioDefinition:
             baseline_variant_id=variant.variant_id,
             cluster_id="BENCHMARK_CLUSTER",
             action_stations=target_stations if index == 1 else (),
+            resource_crossings=crossings,
+            segment_traversals=traversals,
         )
         for index in range(flight_count)
     )
@@ -310,7 +323,10 @@ def _representative_definition(flight_count: int) -> ScenarioDefinition:
         scenario_id=f"LEARNING_BENCHMARK_{flight_count}",
         seed=17,
         flights=flights,
-        resources=(ResourceDefinition("RWY", required_interval_s=90.0),),
+        resources=(
+            ResourceDefinition("RWY", required_interval_s=90.0),
+            ResourceDefinition("FINAL:entry", kind="segment_entry"),
+        ),
         variants=(variant,),
     )
 
@@ -357,7 +373,7 @@ def _simulator_fixture(
         )
     anchor = next(
         item
-        for item in build_current_leader_follower_anchors(simulator).leader_follower
+        for item in build_current_segment_anchors(simulator).leader_follower
         if item.follower_id == "F001"
     )
     candidates = runtime.catalog.enumerate_for_batch(
@@ -365,6 +381,8 @@ def _simulator_fixture(
         event_batch,
         anchor_id=anchor.anchor_id,
         bound_flight_id=anchor.follower_id,
+        resource_id=anchor.resource_id,
+        segment_id=anchor.segment_id,
     )
     identities = tuple((item.lever.value, item.band) for item in candidates)
     expected = (

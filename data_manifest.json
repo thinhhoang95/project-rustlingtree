@@ -6,6 +6,7 @@
     "simap_arrival_artifact_manifest": "data/artifacts/manifest.json",
     "adsb_compressed_trajectories": "data/adsb/compressed/adsb_compressed_flights.jsonl",
     "adsb_compressed_metadata": "data/adsb/compressed/metadata.json",
+    "raw_adsb": "data/adsb/raw/2026-04-01",
     "default": true
   }
 }
