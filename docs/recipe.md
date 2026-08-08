@@ -44,3 +44,10 @@ OUT=data/artifacts/hailmary/corpus
 ./.venv/bin/python -m hailmary.cli.build_offline_corpus \
   --manifest data_manifest.json --airport KDFW --output-dir "$OUT"
 ```
+
+Then we can visualize the corpus by running the script:
+```bash
+./.venv/bin/python src/hailmary/cli/visualize_offline_corpus.py \
+  --corpus-dir data/artifacts/hailmary/corpus \
+  --manifest data_manifest.json
+```

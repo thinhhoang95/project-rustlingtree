@@ -7,6 +7,8 @@ from collections import Counter
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import shlex
+import sys
 from typing import Sequence
 
 import numpy as np
@@ -162,6 +164,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(json.dumps(audit, sort_keys=True, separators=(",", ":")))
+    visualize_command = shlex.join(
+        [
+            "./.venv/bin/python",
+            "src/hailmary/cli/visualize_offline_corpus.py",
+            "--corpus-dir",
+            str(args.output_dir),
+            "--manifest",
+            str(args.manifest),
+            "--dataset-id",
+            dataset.dataset_id,
+        ]
+    )
+    print(
+        f"Visualize the built corpus with:\n  {visualize_command}",
+        file=sys.stderr,
+    )
     return 0
 
 

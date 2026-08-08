@@ -37,6 +37,7 @@ dependencies = [
     "statsmodels>=0.14.0",
     "tqdm>=4.67.3",
     "uvicorn>=0.35.0",
+    "black>=26.5.1",
 ]
 
 [project.scripts]
