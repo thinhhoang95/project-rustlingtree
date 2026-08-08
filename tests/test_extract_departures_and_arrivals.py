@@ -122,7 +122,7 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(classification, "arrival")
         assert event is not None
         self.assertEqual(event["runway"], "17C")
-        self.assertEqual(event["event_time"], 240)
+        self.assertEqual(event["event_time"], 300)
         self.assertLess(float(event["altitude_delta_m"]), 0.0)
 
     def test_classify_flight_track_uses_heading_to_choose_runway_end(self) -> None:
@@ -196,8 +196,55 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
 
         self.assertEqual(classification, "arrival")
         assert event is not None
-        self.assertEqual(event["event_time"], 60)
+        self.assertEqual(event["event_time"], 120)
         self.assertLess(float(event["distance_delta_m"]), 0.0)
+
+    def test_arrival_event_uses_closest_ground_relevant_threshold_sample(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "abc126", "lat": 33.10, "lon": -97.0260, "heading": 180.0, "callsign": "AAL103", "geoaltitude": 1_500.0},
+                {"time": 60, "icao24": "abc126", "lat": 32.9550, "lon": -97.0260, "heading": 180.0, "callsign": "AAL103", "geoaltitude": 700.0},
+                {"time": 120, "icao24": "abc126", "lat": 32.9200, "lon": -97.0260, "heading": 180.0, "callsign": "AAL103", "geoaltitude": 220.0},
+            ]
+        )
+
+        classification, event = classify_flight_track(
+            flight=flight,
+            thresholds=THRESHOLDS,
+            runway_radius_m=5_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification, "arrival")
+        assert event is not None
+        self.assertEqual(event["event_time"], 120)
+        self.assertLess(float(event["threshold_distance_m"]), 2.0 * 1_852.0)
+
+    def test_event_selection_does_not_jump_to_a_later_runway_encounter(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "abc127", "lat": 33.10, "lon": -97.0260, "heading": 180.0, "callsign": "AAL104", "geoaltitude": 1_500.0},
+                {"time": 60, "icao24": "abc127", "lat": 32.9500, "lon": -97.0260, "heading": 180.0, "callsign": "AAL104", "geoaltitude": 600.0},
+                {"time": 120, "icao24": "abc127", "lat": 32.9200, "lon": -97.0260, "heading": 180.0, "callsign": "AAL104", "geoaltitude": 220.0},
+                {"time": 1_000, "icao24": "abc127", "lat": 32.9158, "lon": -97.0260, "heading": 0.0, "callsign": "AAL104", "geoaltitude": 180.0},
+                {"time": 1_060, "icao24": "abc127", "lat": 33.00, "lon": -97.0260, "heading": 0.0, "callsign": "AAL104", "geoaltitude": 900.0},
+            ]
+        )
+
+        classification, event = classify_flight_track(
+            flight=flight,
+            thresholds=THRESHOLDS,
+            runway_radius_m=5_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification, "arrival")
+        assert event is not None
+        self.assertEqual(event["event_time"], 120)
 
     def test_classify_flight_track_returns_overflight_when_not_ground_relevant(self) -> None:
         flight = make_flight(

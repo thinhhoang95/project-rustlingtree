@@ -33,3 +33,14 @@ This step writes the derived landings/departures catalog, the fix-sequence catal
 python src/scenario/trajectory_compressor/cli.py --landings-departures-catalog
 
 This writes the full ADS-B compressed trajectory file used for departures at `data/adsb/compressed/adsb_compressed_flights.jsonl`. SIMAP arrival artifacts are written separately by `scenario-manager-precompute-artifact` to `data/artifacts/simap_arrival_flights.jsonl`.
+
+# Hail Mary
+## 1. Building ADS-B trajectory corpus 
+A trajectory corpus is a set of observed ADS-B trajectories that will be used to scale traffic demand in Hail Mary scenarios. The corpus only contains trajectories that are considered to be valid, such as terminating "properly" at the runway threshold (the exact definition is quite nuanced to account for edge cases like flight number and icao24 are designated for both arrival and imminent departure) For example: if a window `00:20-01:20` has 30 traffic counts, then a scale of 1.1 will create 3 additional traffic counts. That means that 3 flights will be pulled from the corpus for the corresponding (runway arrival) cluster.
+
+To build the trajectory corpus, run the following command:
+```bash
+OUT=data/artifacts/hailmary/corpus
+./.venv/bin/python -m hailmary.cli.build_offline_corpus \
+  --manifest data_manifest.json --airport KDFW --output-dir "$OUT"
+```

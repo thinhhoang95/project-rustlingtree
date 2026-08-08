@@ -159,7 +159,7 @@ def classify_flight_track(
     date_label: str,
     min_proximity_distance_change_m: float = DEFAULT_MIN_PROXIMITY_DISTANCE_CHANGE_M,
 ) -> tuple[str, ThresholdEventRecord | None]:
-    _ = (lookaround_seconds, min_altitude_change_m)
+    _ = min_altitude_change_m
     positions = flight.loc[
         flight["time"].notna()
         & flight["lat"].notna()
@@ -174,6 +174,7 @@ def classify_flight_track(
     altitudes = np.asarray(pd.to_numeric(positions["geoaltitude"], errors="coerce"), dtype=float)
 
     best_candidate: ThresholdCandidate | None = None
+    best_event_candidate: ThresholdCandidate | None = None
     best_threshold_row: RunwayThresholdRecord | None = None
     saw_proximity_threshold = False
 
@@ -192,7 +193,8 @@ def classify_flight_track(
 
         saw_proximity_threshold = True
         matching_indices = np.flatnonzero(proximity_indices)
-        event_index = int(matching_indices[0])
+        first_matching_index = int(matching_indices[0])
+        event_index = first_matching_index
         heading_index = int(matching_indices[np.argmin(distances[matching_indices])])
         event_distance = float(distances[event_index])
         approach_evidence_m = float(distances[0] - event_distance)
@@ -233,16 +235,56 @@ def classify_flight_track(
             best_candidate = candidate
             best_threshold_row = threshold_row
 
+            # Refine only an arrival's event representation; runway/operation
+            # ranking and departure timestamps retain their established
+            # first-proximity semantics above.  The arrival event represents
+            # the best observed threshold approach within the first encounter,
+            # not entry into the broad classification radius.  The bounded
+            # window keeps a later takeoff by the same transponder and callsign
+            # from replacing the arrival event.
+            refined_index = event_index
+            if operation == "arrival":
+                first_matching_time = float(positions.iloc[first_matching_index]["time"])
+                encounter_indices = matching_indices[
+                    positions.iloc[matching_indices]["time"].to_numpy(dtype=float)
+                    <= first_matching_time + float(lookaround_seconds)
+                ]
+                refined_index = int(
+                    encounter_indices[np.argmin(distances[encounter_indices])]
+                )
+            refined_distance = float(distances[refined_index])
+            if operation == "arrival":
+                refined_distance_delta = -(float(distances[0]) - refined_distance)
+                refined_altitude_delta = float(
+                    altitudes[refined_index] - altitudes[comparison_index]
+                )
+            else:
+                refined_distance_delta = float(distances[-1]) - refined_distance
+                refined_altitude_delta = float(
+                    altitudes[comparison_index] - altitudes[refined_index]
+                )
+            best_event_candidate = ThresholdCandidate(
+                operation=operation,
+                runway=str(threshold_row["runway"]),
+                event_index=refined_index,
+                comparison_index=comparison_index,
+                event_distance_m=refined_distance,
+                altitude_delta_m=refined_altitude_delta,
+                distance_delta_m=refined_distance_delta,
+                heading_error_deg=heading_error,
+            )
+
     if best_candidate is None:
         if saw_proximity_threshold:
             return "unclassified", None
         return "overflight", None
 
     assert best_threshold_row is not None
-    return best_candidate.operation, build_event_record(
+    assert best_event_candidate is not None
+    return best_event_candidate.operation, build_event_record(
         positions,
-        best_candidate.operation,
-        best_candidate,
+        best_event_candidate.operation,
+        best_event_candidate,
         best_threshold_row,
         date_label,
     )
