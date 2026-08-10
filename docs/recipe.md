@@ -21,11 +21,13 @@ Then you can run the script `src/scenario/demand_opensky/extract_departures_and_
 Generate the arrival, departure catalogs, and compress data for the rustlingleaves client.
 
 ### Arrival and Departure Catalog
+```bash 
 python src/scenario/demand_opensky/extract_departures_and_arrivals.py \
   --from-datetime "2025-04-01T00:00:00" \
   --to-datetime "2025-04-01T23:59:59" \
   --timezone "America/Chicago" \
   --split-gap-seconds 1500
+```
 
 This step writes the derived landings/departures catalog, the fix-sequence catalog, and the authoritative departures/arrivals catalog into `data/adsb/catalogs`. You might want to check that the derived departure/arrival catalog should not miss too many flights (possibly less than 1-2%) of the OpenSky's authoritative catalog in the console output.
 
@@ -35,7 +37,104 @@ python src/scenario/trajectory_compressor/cli.py --landings-departures-catalog
 This writes the full ADS-B compressed trajectory file used for departures at `data/adsb/compressed/adsb_compressed_flights.jsonl`. SIMAP arrival artifacts are written separately by `scenario-manager-precompute-artifact` to `data/artifacts/simap_arrival_flights.jsonl`.
 
 # Hail Mary
-## 1. Building ADS-B trajectory corpus 
+
+After finishing the catalog generation above, just go straight to the `build_offline_corpus` step below. In the following sections, we will only detail the algorithms, but the bash command needed to be run is only related to build_offline_corpus. 
+
+## 1. Runway Attribution 
+File: `/Volumes/CrucialX/project-rustlingtree/src/scenario/demand_opensky/adsb_catalog_processing.py`
+
+Example: `ENY3938M1a379dd`, approaching southbound near KDFW.
+
+1. Find eligible points  
+   Keep ADS-B samples within 5 km of a threshold and below 10,000 ft.
+
+2. Apply the direction gate  
+   Its final heading is about `181°`.
+
+
+The heading error is the smallest circular difference:
+
+```text
+error = abs(((aircraft_heading - runway_heading + 180) % 360) - 180)
+```
+
+It ranges from `0°` to `180°`:
+
+- `0°`: perfectly aligned
+- `45°`: passes
+- `90°`: passes at the boundary
+- `120°`: rejected
+- `180°`: reciprocal direction, rejected
+
+3. Define one encounter  
+   Starting from the first direction-compatible sample, inspect the next 300 seconds.
+
+4. Find the closest point for each candidate  
+   At the best arrival sample:
+
+5. Choose by distance  
+   `18R` wins. Approach strength and heading error are only tie-breakers.
+
+6. Record the event  
+   The flight is stored as an arrival on `18R`, using that 8.7 m sample as its arrival event.
+
+
+For the final southbound sample:
+
+| Runway | Runway heading | Error | Distance |
+|---|---:|---:|---:|
+| `18R` | 180.245° | 0.734° | 8.7 m |
+| `18L` | 180.248° | 0.732° | 363 m |
+| `17R` | 180.257° | 0.722° | 2,309 m |
+| `17C` | 180.257° | 0.722° | 2,674 m |
+| `13R` | 139.188° | 41.791° | 2,748 m |
+
+All pass the heading gate. `18R` wins because distance is the primary ranking criterion.
+
+Some reciprocal ends also produce candidates from an earlier part of the track. For example, an earlier `305.6°` vector is only `54.7°` from runway heading `0°`, so it passes the gate for several northbound ends. Those candidates remain over 1.6 km away and therefore lose to `18R`.
+
+So the distinction is:
+
+```text
+±90° heading gate → eliminates clearly incompatible motion
+closest distance   → actually selects the runway
+```
+
+The tolerance is intentionally a reciprocal-direction veto, not a precise final-alignment test. Tightening it to roughly `30–45°` would exclude more vectoring candidates, but could reject legitimate turning approaches with sparse ADS-B sampling.
+
+
+
+## 2. Clustering
+The data is first partitioned by runway, then individual flight trajectories are clustered independently inside each runway partition.
+The flow is:
+
+1. The multi-runway builder enumerates runway IDs and processes each runway separately in [pipeline.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/pipeline.py:914).
+2. `_partition_arrivals()` filters catalogued flights by airport and runway in [pipeline.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/pipeline.py:572).
+3. Each accepted flight track is aligned to that runway threshold and resampled in [pipeline.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/pipeline.py:601).
+4. The mapping of individual `flight_id → resampled trajectory` is passed into `build_cluster_library()` in [pipeline.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/pipeline.py:891).
+5. Every trajectory becomes one flattened, standardized feature row in [features.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/features.py:141).
+6. HDBSCAN clusters those flight-level rows in [artifact.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/artifact.py:290) and [hdbscan_runner.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/hdbscan_runner.py:359).
+7. Cluster medoids are calculated only after HDBSCAN has produced its labels in [artifact.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/clustering/artifact.py:305).
+
+So conceptually:
+
+```text
+All arrivals
+  ├── RW18R flights ── HDBSCAN ── clusters 0, 1, 2...
+  ├── RW17C flights ── HDBSCAN ── clusters 0, 1...
+  └── RW36L flights ── HDBSCAN ── clusters 0, 1, 2...
+```
+
+There is no subsequent HDBSCAN across the resulting runway clusters or their medoids. The final cluster identity is therefore qualified as `(airport, runway, cluster_id)`, such as `KDFW:RW18R:2`.
+
+In order to visualize the clustering results, use the following script:
+```bash
+./.venv/bin/python -m hailmary.clustering.visualization \
+  --corpus-dir data/artifacts/hailmary/corpus \
+  --manifest data_manifest.json
+```
+
+## 3. Building ADS-B trajectory corpus and visualize the results
 A trajectory corpus is a set of observed ADS-B trajectories that will be used to scale traffic demand in Hail Mary scenarios. The corpus only contains trajectories that are considered to be valid, such as terminating "properly" at the runway threshold (the exact definition is quite nuanced to account for edge cases like flight number and icao24 are designated for both arrival and imminent departure) For example: if a window `00:20-01:20` has 30 traffic counts, then a scale of 1.1 will create 3 additional traffic counts. That means that 3 flights will be pulled from the corpus for the corresponding (runway arrival) cluster.
 
 To build the trajectory corpus, run the following command:

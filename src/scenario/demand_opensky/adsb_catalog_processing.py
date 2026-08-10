@@ -46,6 +46,9 @@ class RunwayThresholdRecord(TypedDict):
     threshold_lon: float
 
 
+MAX_RECIPROCAL_HEADING_ERROR_DEG = 90.0
+
+
 def build_event_record(
     flight: pd.DataFrame,
     classification: str,
@@ -91,14 +94,14 @@ def is_better_candidate(candidate: ThresholdCandidate, current_best: ThresholdCa
         360.0 if current_best.heading_error_deg is None else float(current_best.heading_error_deg)
     )
     candidate_score = (
-        -candidate_heading_error,
         -candidate.event_distance_m,
         abs(candidate.distance_delta_m),
+        -candidate_heading_error,
     )
     current_score = (
-        -current_heading_error,
         -current_best.event_distance_m,
         abs(current_best.distance_delta_m),
+        -current_heading_error,
     )
     return candidate_score > current_score
 
@@ -193,9 +196,42 @@ def classify_flight_track(
 
         saw_proximity_threshold = True
         matching_indices = np.flatnonzero(proximity_indices)
-        first_matching_index = int(matching_indices[0])
-        event_index = first_matching_index
-        heading_index = int(matching_indices[np.argmin(distances[matching_indices])])
+        runway_heading = runway_heading_deg.get(str(threshold_row["runway"]))
+        heading_by_index = {
+            int(index): _nearest_valid_heading(positions, int(index))
+            for index in matching_indices
+        }
+        directional_indices = np.asarray(
+            [
+                int(index)
+                for index in matching_indices
+                if runway_heading is None
+                or heading_by_index[int(index)] is None
+                or _wrap_heading_error_deg(
+                    float(heading_by_index[int(index)]),
+                    runway_heading,
+                )
+                <= MAX_RECIPROCAL_HEADING_ERROR_DEG
+            ],
+            dtype=int,
+        )
+        if len(directional_indices) == 0:
+            continue
+
+        # A broad airport-proximity circle can be crossed while an aircraft is
+        # still being vectored across parallel finals.  Start the encounter at
+        # the first sample whose heading is compatible with this runway end,
+        # then use the closest point inside the same bounded encounter for both
+        # runway distance and heading.  This prevents a cross-airport sample
+        # from defining the distance while a much later landing defines the
+        # heading.
+        first_matching_index = int(directional_indices[0])
+        first_matching_time = float(positions.iloc[first_matching_index]["time"])
+        encounter_indices = directional_indices[
+            positions.iloc[directional_indices]["time"].to_numpy(dtype=float)
+            <= first_matching_time + float(lookaround_seconds)
+        ]
+        event_index = int(encounter_indices[np.argmin(distances[encounter_indices])])
         event_distance = float(distances[event_index])
         approach_evidence_m = float(distances[0] - event_distance)
         departure_evidence_m = float(distances[-1] - event_distance)
@@ -213,8 +249,7 @@ def classify_flight_track(
             comparison_index = len(positions) - 1
             distance_delta = departure_evidence_m
             altitude_delta = float(altitudes[comparison_index] - altitudes[event_index])
-        heading = _nearest_valid_heading(positions, heading_index)
-        runway_heading = runway_heading_deg.get(str(threshold_row["runway"]))
+        heading = heading_by_index[event_index]
         heading_error = (
             None
             if heading is None or runway_heading is None
@@ -235,24 +270,10 @@ def classify_flight_track(
             best_candidate = candidate
             best_threshold_row = threshold_row
 
-            # Refine only an arrival's event representation; runway/operation
-            # ranking and departure timestamps retain their established
-            # first-proximity semantics above.  The arrival event represents
-            # the best observed threshold approach within the first encounter,
-            # not entry into the broad classification radius.  The bounded
-            # window keeps a later takeoff by the same transponder and callsign
-            # from replacing the arrival event.
+            # The event point already is the closest point in the bounded,
+            # direction-compatible encounter used to rank the runway.
             refined_index = event_index
-            if operation == "arrival":
-                first_matching_time = float(positions.iloc[first_matching_index]["time"])
-                encounter_indices = matching_indices[
-                    positions.iloc[matching_indices]["time"].to_numpy(dtype=float)
-                    <= first_matching_time + float(lookaround_seconds)
-                ]
-                refined_index = int(
-                    encounter_indices[np.argmin(distances[encounter_indices])]
-                )
-            refined_distance = float(distances[refined_index])
+            refined_distance = event_distance
             if operation == "arrival":
                 refined_distance_delta = -(float(distances[0]) - refined_distance)
                 refined_altitude_delta = float(

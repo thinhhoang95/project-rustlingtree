@@ -16,6 +16,7 @@ from hailmary.scenario import (
     TrafficScaleConfig,
     TrafficScenarioBuilder,
     iter_demand_windows,
+    materialize_arrival_variant,
 )
 from hailmary.templates import ActionStation, ClusterTemplate, TrajectoryVariant
 
@@ -158,6 +159,24 @@ def test_scale_one_replays_ids_timestamps_and_cluster_counts_exactly() -> None:
         key_1.qualified_id: 34,
         key_2.qualified_id: 3,
     }
+
+
+def test_arrival_materialization_blends_vertical_state_on_medoid_geometry() -> None:
+    key = ArrivalClusterKey("KATL", "RW18R", "C1")
+    template = _template(key)
+    arrival = _arrival(0, key, 100.0)
+
+    variant = materialize_arrival_variant(template, arrival)
+
+    np.testing.assert_array_equal(variant.lat_deg, template.baseline_variant.lat_deg)
+    np.testing.assert_array_equal(variant.lon_deg, template.baseline_variant.lon_deg)
+    assert variant.altitude_m[-1] == pytest.approx(arrival.terminal_entry_altitude_m)
+    assert variant.altitude_m[0] == pytest.approx(
+        template.baseline_variant.altitude_m[0]
+    )
+    assert variant.ground_speed_mps[-1] == pytest.approx(
+        arrival.terminal_entry_ground_speed_mps
+    )
 
 
 def test_scaling_is_deterministic_input_order_independent_and_jointly_donated() -> None:

@@ -283,13 +283,19 @@ def _named_rng(seed: int, stream_name: str) -> np.random.Generator:
     return np.random.default_rng(int.from_bytes(digest[:16], "big"))
 
 
-def _materialize_arrival_variant(
+def materialize_arrival_variant(
     template: ClusterTemplate,
     arrival: ObservedArrival,
     *,
     route_traversals: Sequence[Any] = (),
 ) -> TrajectoryVariant:
-    """Bind one jointly observed terminal-entry state to the medoid geometry."""
+    """Bind one observed terminal-entry state to its compiled medoid template.
+
+    Lateral geometry remains exactly the medoid path. Altitude and speed start
+    at the arrival's observed terminal-entry state and blend into the medoid
+    profiles downstream, with speed constrained by the template CAS envelope.
+    This is the production materialization used by ``TrafficScenarioBuilder``.
+    """
 
     baseline = template.baseline_variant
     normalized_station = baseline.s_m / float(baseline.s_m[-1])
@@ -630,7 +636,7 @@ class TrafficScenarioBuilder:
                 if self.route_graph is None
                 else self.route_graph.traversals_for(arrival.cluster_id)
             )
-            variant = _materialize_arrival_variant(
+            variant = materialize_arrival_variant(
                 template,
                 arrival,
                 route_traversals=route_traversals,
@@ -977,4 +983,5 @@ __all__ = [
     "TrafficScenarioBuilder",
     "build_terminal_entry_corpus",
     "iter_demand_windows",
+    "materialize_arrival_variant",
 ]

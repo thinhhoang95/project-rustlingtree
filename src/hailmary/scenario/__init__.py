@@ -28,6 +28,7 @@ from .traffic import (
     TrafficScenarioBuilder,
     build_terminal_entry_corpus,
     iter_demand_windows,
+    materialize_arrival_variant,
 )
 
 __all__ = [
@@ -60,4 +61,5 @@ __all__ = [
     "thaw_payload",
     "trajectory_variant_id",
     "iter_demand_windows",
+    "materialize_arrival_variant",
 ]

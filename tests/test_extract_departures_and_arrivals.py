@@ -59,6 +59,36 @@ PARALLEL_END_THRESHOLDS = pd.DataFrame(
 )
 
 
+SAME_DIRECTION_PARALLEL_THRESHOLDS = pd.DataFrame(
+    [
+        {
+            "runway": "17C",
+            "runway_pair": "17C/35C",
+            "threshold_lat": 32.915706694444445,
+            "threshold_lon": -97.02597491666667,
+        },
+        {
+            "runway": "35C",
+            "runway_pair": "17C/35C",
+            "threshold_lat": 32.87887877777778,
+            "threshold_lon": -97.02617166666668,
+        },
+        {
+            "runway": "18R",
+            "runway_pair": "18R/36L",
+            "threshold_lat": 32.915813194444446,
+            "threshold_lon": -97.05464552777778,
+        },
+        {
+            "runway": "36L",
+            "runway_pair": "18R/36L",
+            "threshold_lat": 32.878985916666664,
+            "threshold_lon": -97.05483341666667,
+        },
+    ]
+)
+
+
 def make_flight(rows: list[dict[str, object]]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     frame["callsign"] = frame["callsign"].map(normalize_callsign)
@@ -146,6 +176,33 @@ class ExtractDeparturesAndArrivalsTests(unittest.TestCase):
         self.assertEqual(classification, "arrival")
         assert event is not None
         self.assertEqual(event["runway"], "17C")
+
+    def test_parallel_runway_assignment_uses_closest_aligned_arrival_point(self) -> None:
+        flight = make_flight(
+            [
+                {"time": 0, "icao24": "abc128", "lat": 33.10, "lon": -97.15, "heading": 315.0, "callsign": "AAL105", "geoaltitude": 2_800.0},
+                # An early cross-airport point is within the broad 18R radius,
+                # but its heading is incompatible with a southbound final.
+                {"time": 60, "icao24": "abc128", "lat": 32.93, "lon": -97.09, "heading": 305.0, "callsign": "AAL105", "geoaltitude": 2_500.0},
+                {"time": 480, "icao24": "abc128", "lat": 32.945, "lon": -97.0546, "heading": 181.0, "callsign": "AAL105", "geoaltitude": 500.0},
+                {"time": 540, "icao24": "abc128", "lat": 32.9158, "lon": -97.0546, "heading": 181.0, "callsign": "AAL105", "geoaltitude": 170.0},
+            ]
+        )
+
+        classification, event = classify_flight_track(
+            flight=flight,
+            thresholds=SAME_DIRECTION_PARALLEL_THRESHOLDS,
+            runway_radius_m=5_000.0,
+            lookaround_seconds=300,
+            min_altitude_change_m=75.0,
+            date_label="2025-04-01",
+        )
+
+        self.assertEqual(classification, "arrival")
+        assert event is not None
+        self.assertEqual(event["runway"], "18R")
+        self.assertEqual(event["event_time"], 540)
+        self.assertLess(float(event["threshold_distance_m"]), 10.0)
 
     def test_classify_flight_track_detects_departure(self) -> None:
         flight = make_flight(

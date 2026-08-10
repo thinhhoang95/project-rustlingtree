@@ -12,7 +12,12 @@ import numpy as np
 from pyproj import Geod
 
 from hailmary.data import RawADSBTrack, load_catalog_raw_adsb_tracks, load_manifest
-from hailmary.scenario import ObservedArrival, TerminalEntryCorpus
+from hailmary.scenario import (
+    ObservedArrival,
+    TerminalEntryCorpus,
+    materialize_arrival_variant,
+)
+from hailmary.templates import ClusterTemplate, TemplateStore, TrajectoryVariant
 
 
 METERS_PER_FOOT = 0.3048
@@ -25,6 +30,7 @@ class CorpusSample:
 
     arrival: ObservedArrival
     track: RawADSBTrack
+    template: ClusterTemplate
 
     @property
     def cluster_key(self) -> tuple[str, str]:
@@ -68,7 +74,8 @@ def load_samples(
     """Join accepted corpus arrivals to their source ADS-B tracks.
 
     The returned integer is the number of corpus arrivals whose source track
-    could not be found. Those arrivals are omitted from the GUI choices.
+    or cluster template could not be found. Those arrivals are omitted from
+    the GUI choices.
     """
 
     corpus = TerminalEntryCorpus.read(Path(corpus_dir) / "traffic_corpus.json")
@@ -79,15 +86,25 @@ def load_samples(
             f"{corpus.dataset_id!r}"
         )
     dataset = load_manifest(manifest_path).select(requested_dataset)
+    template_store = TemplateStore.read(Path(corpus_dir) / "hailmary_templates.json")
+    template_by_cluster = {
+        f"{template.airport_id}:{template.runway_id}:{template.cluster_id}": template
+        for template in template_store.templates
+    }
     flight_ids = {arrival.flight_id for arrival in corpus.arrivals}
     tracks = load_catalog_raw_adsb_tracks(
         dataset.require("raw_adsb"), flight_ids=flight_ids
     )
     track_by_flight = {track.flight_id: track for track in tracks}
     samples = tuple(
-        CorpusSample(arrival=arrival, track=track_by_flight[arrival.flight_id])
+        CorpusSample(
+            arrival=arrival,
+            track=track_by_flight[arrival.flight_id],
+            template=template_by_cluster[arrival.key.qualified_id],
+        )
         for arrival in corpus.arrivals
         if arrival.flight_id in track_by_flight
+        and arrival.key.qualified_id in template_by_cluster
     )
     missing_count = len(corpus.arrivals) - len(samples)
     if not samples:
@@ -95,7 +112,7 @@ def load_samples(
     return samples, missing_count
 
 
-def make_display_profile(sample: CorpusSample) -> DisplayProfile:
+def make_observed_display_profile(sample: CorpusSample) -> DisplayProfile:
     """Clip a raw track at terminal entry and estimate TAS under zero wind."""
 
     track = sample.track
@@ -142,6 +159,26 @@ def make_display_profile(sample: CorpusSample) -> DisplayProfile:
         altitude_ft=altitude_m / METERS_PER_FOOT,
         speed_elapsed_minutes=speed_elapsed_minutes,
         tas_kts=tas_kts,
+    )
+
+
+def make_blended_display_profile(sample: CorpusSample) -> DisplayProfile:
+    """Materialize the production medoid/observed blend for one arrival."""
+
+    variant = materialize_arrival_variant(sample.template, sample.arrival)
+    return display_profile_from_variant(variant)
+
+
+def display_profile_from_variant(variant: TrajectoryVariant) -> DisplayProfile:
+    """Convert a threshold-to-upstream variant into flight display order."""
+
+    return DisplayProfile(
+        elapsed_minutes=variant.elapsed_time_s[::-1] / 60.0,
+        lat_deg=variant.lat_deg[::-1],
+        lon_deg=variant.lon_deg[::-1],
+        altitude_ft=variant.altitude_m[::-1] / METERS_PER_FOOT,
+        speed_elapsed_minutes=variant.elapsed_time_s[::-1] / 60.0,
+        tas_kts=variant.tas_mps[::-1] / METERS_PER_SECOND_PER_KNOT,
     )
 
 
@@ -202,6 +239,22 @@ def run_gui(
     randomize = ttk.Button(controls, text="Randomize")
     randomize.pack(side=tk.LEFT)
 
+    selected_mode = tk.StringVar(value="observed")
+    observed_mode_button = ttk.Radiobutton(
+        controls,
+        text="Observed track",
+        value="observed",
+        variable=selected_mode,
+    )
+    observed_mode_button.pack(side=tk.LEFT, padx=(24, 4))
+    blended_mode_button = ttk.Radiobutton(
+        controls,
+        text="Blend to Medoid",
+        value="blended",
+        variable=selected_mode,
+    )
+    blended_mode_button.pack(side=tk.LEFT, padx=4)
+
     flight_text = tk.StringVar()
     ttk.Label(root, textvariable=flight_text, padding=(10, 3)).pack(fill=tk.X)
     if missing_count:
@@ -223,10 +276,19 @@ def run_gui(
     toolbar.update()
     toolbar.pack(fill=tk.X)
 
-    def show_random_sample(*_event: object) -> None:
-        sample = rng.choice(grouped[display_to_key[selected_cluster.get()]])
+    current_sample: CorpusSample | None = None
+
+    def redraw_current_sample() -> None:
+        if current_sample is None:
+            return
+        sample = current_sample
         try:
-            profile = make_display_profile(sample)
+            if selected_mode.get() == "blended":
+                profile = make_blended_display_profile(sample)
+                mode_text = "Blend to Medoid"
+            else:
+                profile = make_observed_display_profile(sample)
+                mode_text = "Observed track"
         except ValueError as exc:
             messagebox.showerror("Cannot display flight", str(exc), parent=root)
             return
@@ -235,7 +297,8 @@ def run_gui(
         identity = arrival.callsign or sample.track.callsign or "unknown callsign"
         flight_text.set(
             f"Flight: {arrival.flight_id}  |  Callsign: {identity}  |  "
-            f"Runway: {arrival.key.runway}  |  Cluster: {arrival.key.cluster}"
+            f"Runway: {arrival.key.runway}  |  Cluster: {arrival.key.cluster}  |  "
+            f"Mode: {mode_text}"
         )
 
         lateral_axis.clear()
@@ -248,7 +311,10 @@ def run_gui(
         lateral_axis.scatter(
             profile.lon_deg[-1], profile.lat_deg[-1], color="#242424", s=24, zorder=3
         )
-        lateral_axis.set_title("Lateral flight path")
+        lateral_title = "Lateral flight path"
+        if selected_mode.get() == "blended":
+            lateral_title += f" — medoid {sample.template.medoid_flight_id}"
+        lateral_axis.set_title(lateral_title)
         lateral_axis.set_xlabel("Longitude (deg)")
         lateral_axis.set_ylabel("Latitude (deg)")
         mean_latitude = float(np.mean(profile.lat_deg))
@@ -267,12 +333,19 @@ def run_gui(
             profile.speed_elapsed_minutes, profile.tas_kts, color="#a23b72", linewidth=1.4
         )
         tas_axis.set_xlabel("Time since terminal entry (min)")
-        tas_axis.set_ylabel("TAS (kt)\nzero-wind estimate")
+        tas_axis.set_ylabel("TAS (kt)\nzero-wind model")
         tas_axis.grid(alpha=0.25)
         canvas.draw_idle()
 
+    def show_random_sample(*_event: object) -> None:
+        nonlocal current_sample
+        current_sample = rng.choice(grouped[display_to_key[selected_cluster.get()]])
+        redraw_current_sample()
+
     randomize.configure(command=show_random_sample)
     cluster_select.bind("<<ComboboxSelected>>", show_random_sample)
+    observed_mode_button.configure(command=redraw_current_sample)
+    blended_mode_button.configure(command=redraw_current_sample)
     show_random_sample()
     root.mainloop()
 
@@ -294,8 +367,10 @@ __all__ = [
     "CorpusSample",
     "DisplayProfile",
     "build_parser",
+    "display_profile_from_variant",
     "load_samples",
     "main",
-    "make_display_profile",
+    "make_blended_display_profile",
+    "make_observed_display_profile",
     "run_gui",
 ]

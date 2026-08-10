@@ -15,6 +15,7 @@ from hailmary.cli import (
     build_templates,
     build_traffic_batch,
     simulate,
+    visualize_offline_corpus,
 )
 from hailmary.clustering import ClusterLibrary
 from hailmary.topology import RouteGraphArtifact
@@ -31,6 +32,7 @@ from .test_adapters import _variant
         build_route_graph.main,
         build_traffic_batch.main,
         simulate.main,
+        visualize_offline_corpus.main,
     ],
 )
 def test_cli_help_is_headless_and_successful(entrypoint, capsys) -> None:
@@ -48,6 +50,10 @@ def test_pyproject_registers_hailmary_console_scripts() -> None:
     assert scripts["hailmary-build-clusters"] == "hailmary.cli.build_clusters:main"
     assert scripts["hailmary-build-templates"] == "hailmary.cli.build_templates:main"
     assert scripts["hailmary-build-offline-corpus"] == "hailmary.cli.build_offline_corpus:main"
+    assert (
+        scripts["hailmary-visualize-clusters"]
+        == "hailmary.clustering.visualization:main"
+    )
     assert scripts["hailmary-build-route-graph"] == "hailmary.cli.build_route_graph:main"
     assert scripts["hailmary-build-traffic-batch"] == "hailmary.cli.build_traffic_batch:main"
     assert scripts["hailmary-simulate"] == "hailmary.cli.simulate:main"
