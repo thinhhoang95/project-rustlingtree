@@ -207,6 +207,23 @@ class ClusterLibrary:
     def resample_station_count(self) -> int:
         return self.feature_transform.station_count
 
+    @property
+    def hdbscan_outlier_assignments(self) -> tuple[FlightAssignment, ...]:
+        """Assignments whose original density-clustering label was ``-1``."""
+
+        return tuple(item for item in self.assignments if item.was_hdbscan_noise)
+
+    @property
+    def corpus_assignments(self) -> tuple[FlightAssignment, ...]:
+        """Observed-flight assignments eligible for corpus construction.
+
+        Cluster artifacts retain nearest-medoid fallback assignments for
+        prediction provenance.  Corpus construction has a stricter contract:
+        an HDBSCAN noise label is a rejected observation, not a route member.
+        """
+
+        return tuple(item for item in self.assignments if not item.was_hdbscan_noise)
+
     def to_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "schema_version": self.schema_version,
@@ -291,7 +308,11 @@ def build_cluster_library(
     configured_station_count = getattr(original_config, "n_resample", None)
     if configured_station_count is not None and int(configured_station_count) != features.n_resample:
         raise ValueError("resampled track station count does not match ClusteringConfig.n_resample")
-    clustering = run_hdbscan_sweep(features.standardized, runner_config)
+    clustering = run_hdbscan_sweep(
+        features.standardized,
+        runner_config,
+        tracks_m=features.tracks_m,
+    )
     resolved_quantile = float(
         getattr(original_config, "acceptance_quantile", 0.95)
         if acceptance_quantile is None
@@ -319,7 +340,33 @@ def build_cluster_library(
         [label_mapping.get(int(label), -1) for label in clustering.labels],
         dtype=np.int64,
     )
-    clustering = replace(clustering, labels=canonical_labels)
+    canonical_diagnostics = tuple(
+        replace(item, cluster_id=label_mapping[item.cluster_id])
+        for item in clustering.cluster_diagnostics
+    )
+    candidates = tuple(
+        (
+            replace(
+                candidate,
+                cluster_diagnostics=tuple(
+                    replace(item, cluster_id=label_mapping[item.cluster_id])
+                    for item in candidate.cluster_diagnostics
+                ),
+            )
+            if candidate.algorithm == clustering.algorithm
+            and candidate.parameters == clustering.selected_parameters
+            else candidate
+        )
+        for candidate in clustering.candidates
+    )
+    clustering = replace(
+        clustering,
+        labels=canonical_labels,
+        cluster_diagnostics=tuple(
+            sorted(canonical_diagnostics, key=lambda item: item.cluster_id)
+        ),
+        candidates=candidates,
+    )
     medoids = tuple(
         sorted(
             (

@@ -127,7 +127,89 @@ All arrivals
 
 There is no subsequent HDBSCAN across the resulting runway clusters or their medoids. The final cluster identity is therefore qualified as `(airport, runway, cluster_id)`, such as `KDFW:RW18R:2`.
 
-In order to visualize the clustering results, use the following script:
+## 2.1 HDBSCAN Details
+
+#### 1. Trajectory preparation
+
+For each runway:
+
+1. Retain the final inbound trajectory from the 50 NM terminal boundary to landing.
+2. Project latitude/longitude into runway-centered local east/north coordinates.
+3. Align every trajectory to the runway threshold.
+4. Resample each path to 128 equally spaced geometric stations.
+5. Flatten the station coordinates and standardize every feature across the runway cohort.
+
+#### 2. Global HDBSCAN sweep
+
+Every runway evaluates the same 40 candidates:
+
+- `min_cluster_size ∈ {4, 8, 12, 16, 24}`
+- `min_samples ∈ {None, 3, 5, 8}`
+- selection method ∈ `{EOM, leaf}`
+
+#### 3. Candidate diagnostics
+
+Each candidate is evaluated using:
+
+- **Silhouette:** separation between clusters, excluding noise.
+- **Mean persistence:** density stability of HDBSCAN clusters.
+- **Coverage:** fraction of trajectories receiving a non-noise label.
+- **Fragmentation:** cluster count divided by clustered trajectory count.
+- **Physical dispersion:** 90th-percentile physical distance from each cluster’s mean trajectory, normalized by terminal-entry radius. The worst cluster is used.
+- **Entry-bearing span:** shortest circular arc containing 90% of a cluster’s terminal-entry bearings.
+
+Per-cluster membership, dispersion, and entry-bearing diagnostics are persisted and printed during corpus construction.
+
+#### 4. Candidate rejection
+
+A candidate is rejected if it has:
+
+- fewer than 2 clusters;
+- more than 60% noise;
+- fragmentation above 0.25; or
+- a cluster whose 90% entry-bearing span exceeds 60°.
+
+The bearing constraint prevents arrivals from materially different approach directions from being merged.
+
+#### 5. Candidate scoring
+
+Accepted candidates receive:
+
+```text
+score =
+  0.35 × silhouette
++ 0.15 × mean persistence
++ 0.35 × coverage
+- 0.15 × fragmentation
+- 0.10 × worst physical dispersion
+```
+
+Higher scores are better. Exact ties are resolved deterministically using serialized parameter order.
+
+The weighting favors well-separated clusters that cover repeatable approach patterns while penalizing unstable over-fragmentation and physically broad clusters.
+
+#### 6. Fallback and finalization
+
+If no HDBSCAN candidate is accepted, deterministic KMeans models are compared using silhouette score.
+
+For the selected model:
+
+- one observed trajectory medoid is chosen per cluster;
+- HDBSCAN `-1` trajectories are retained in the cluster artifact for provenance;
+- those `-1` trajectories are rejected from the operational traffic corpus;
+- consequently, rejected outliers do not appear in corpus visualization or scenario generation.
+
+This produces runway-specific results from a shared global search policy while preserving deterministic and auditable model selection.
+
+### How to use
+In order to visualize the clustering results, use the following script (but before running it, you should run the build_offline_corpus code first (see section 3) to generate the corpus of good trajectories that `hailmary` will be able to replay when scaling demand).
+To build the trajectory corpus, run the following command:
+```bash
+OUT=data/artifacts/hailmary/corpus
+./.venv/bin/python -m hailmary.cli.build_offline_corpus \
+  --manifest data_manifest.json --airport KDFW --output-dir "$OUT"
+```
+then to visualize:
 ```bash
 ./.venv/bin/python -m hailmary.clustering.visualization \
   --corpus-dir data/artifacts/hailmary/corpus \

@@ -74,7 +74,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "artifact_content_hash": artifact.artifact_content_hash,
                 "assignment_count": len(artifact.assignments),
+                "hdbscan_outlier_count": len(artifact.hdbscan_outlier_assignments),
                 "cluster_count": len(artifact.medoids),
+                "cluster_diagnostics": [
+                    item.to_dict() for item in artifact.clustering.cluster_diagnostics
+                ],
+                "selected_parameters": artifact.clustering.parameter_dict,
                 "output": args.output.resolve().as_posix(),
                 "used_fallback": artifact.clustering.used_fallback,
             }

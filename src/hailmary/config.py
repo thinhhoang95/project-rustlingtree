@@ -31,13 +31,26 @@ def _positive(values: tuple[float, ...], *, name: str) -> None:
 
 @dataclass(frozen=True)
 class HDBSCANScoreConfig:
+    """Global runway-independent HDBSCAN candidate policy.
+
+    Coverage receives more weight than mean persistence because a small but
+    repeatable approach stream must not be discarded merely to make a larger
+    parent cluster more persistent. Physical dispersion and the robust entry-
+    bearing limit guard against the opposite failure: merging distinct route
+    families into one broad cluster. These defaults were validated together
+    over every reconstructable KDFW runway; there is intentionally no runway-
+    specific parameter table.
+    """
+
     silhouette_weight: float = 0.35
-    persistence_weight: float = 0.25
-    coverage_weight: float = 0.25
+    persistence_weight: float = 0.15
+    coverage_weight: float = 0.35
     fragmentation_weight: float = 0.15
+    dispersion_weight: float = 0.10
     max_noise_fraction: float = 0.60
     max_cluster_fraction: float = 0.25
     min_clusters: int = 2
+    max_entry_bearing_span_deg: float = 60.0
 
     def __post_init__(self) -> None:
         weights = (
@@ -45,6 +58,7 @@ class HDBSCANScoreConfig:
             self.persistence_weight,
             self.coverage_weight,
             self.fragmentation_weight,
+            self.dispersion_weight,
         )
         if any(weight < 0.0 for weight in weights) or sum(weights) <= 0.0:
             raise ConfigurationError(
@@ -56,6 +70,8 @@ class HDBSCANScoreConfig:
             raise ConfigurationError("max_cluster_fraction must be in (0, 1]")
         if self.min_clusters < 1:
             raise ConfigurationError("min_clusters must be positive")
+        if not 0.0 < self.max_entry_bearing_span_deg <= 360.0:
+            raise ConfigurationError("max_entry_bearing_span_deg must be in (0, 360]")
 
 
 @dataclass(frozen=True)

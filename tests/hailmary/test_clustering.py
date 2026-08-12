@@ -13,6 +13,7 @@ from hailmary.clustering import (
     assign_all_flights,
     assign_new_flights,
     build_cluster_library,
+    compute_cluster_diagnostics,
     fit_shape_features,
     run_hdbscan_sweep,
     select_medoid,
@@ -140,6 +141,37 @@ def test_noise_is_assigned_to_nearest_medoid_with_ood_provenance_and_stable_tie(
     assert not assignments[0].included_in_template_training
 
 
+def test_cluster_diagnostics_report_physical_dispersion_and_robust_bearing_span() -> None:
+    bearings_deg = np.asarray([10.0, 11.0, 12.0, 13.0, 14.0, 180.0])
+    radius_m = 10_000.0
+    starts = np.column_stack(
+        (
+            radius_m * np.sin(np.deg2rad(bearings_deg)),
+            radius_m * np.cos(np.deg2rad(bearings_deg)),
+        )
+    )
+    tracks = np.stack(
+        [np.vstack((start, np.zeros(2))) for start in starts],
+        axis=0,
+    )
+
+    diagnostics = compute_cluster_diagnostics(
+        np.zeros(len(tracks), dtype=np.int64),
+        np.linspace(0.5, 1.0, len(tracks)),
+        tracks,
+    )
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.member_count == 6
+    # Ninety percent of six members retains all six, so the remote bearing is
+    # intentionally visible. Larger operational clusters may ignore their
+    # weakest ten-percent tail.
+    assert diagnostic.entry_bearing_p90_span_deg == pytest.approx(170.0)
+    assert diagnostic.centroid_distance_p90_m > 0.0
+    assert diagnostic.membership_probability_median == pytest.approx(0.75)
+
+
 def test_rejected_hdbscan_sweep_uses_deterministic_kmeans_fallback() -> None:
     features = fit_shape_features(_two_cloud_tracks())
     config = _forced_fallback_config()
@@ -199,8 +231,42 @@ def test_cluster_library_is_canonical_round_trippable_and_assigns_every_flight()
     assert restored.to_json() == first.to_json()
     assert len(first.assignments) == len(tracks)
     assert all(item.cluster_id >= 0 for item in first.assignments)
+    assert first.corpus_assignments == first.assignments
+    assert not first.hdbscan_outlier_assignments
     assert all(item.medoid_flight_id in item.member_flight_ids for item in first.medoids)
     assert json.loads(first.to_json())["artifact_content_hash"] == first.artifact_content_hash
+
+
+def test_cluster_library_excludes_hdbscan_noise_from_corpus_assignments() -> None:
+    station = np.linspace(10_000.0, 0.0, 16)
+    tracks: dict[str, np.ndarray] = {}
+    for prefix, base in (("A", -5_000.0), ("B", 5_000.0)):
+        for index, offset in enumerate((-50.0, 0.0, 50.0, 100.0)):
+            tracks[f"{prefix}{index}"] = np.column_stack(
+                (np.full_like(station, base + offset), station)
+            )
+    tracks["NOISE"] = np.column_stack((np.linspace(30_000.0, 0.0, 16), station))
+    config = HDBSCANSelectionConfig(
+        min_cluster_sizes=(3,),
+        min_samples_values=(2,),
+        cluster_selection_methods=("eom",),
+        max_noise_fraction=1.0,
+        max_fragmentation=1.0,
+        max_entry_bearing_span_deg=360.0,
+    )
+
+    library = build_cluster_library(
+        tracks,
+        dataset_id="synthetic-noise",
+        airport="KDFW",
+        runway="35C",
+        projection=LocalFrame(32.9, -97.0).to_dict(),
+        config=config,
+    )
+
+    assert [item.flight_id for item in library.hdbscan_outlier_assignments] == ["NOISE"]
+    assert "NOISE" not in {item.flight_id for item in library.corpus_assignments}
+    assert len(library.corpus_assignments) == len(tracks) - 1
 
 
 def test_cluster_library_detects_hash_tampering() -> None:

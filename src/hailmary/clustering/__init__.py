@@ -27,8 +27,10 @@ from .features import (
 )
 from .hdbscan_runner import (
     CandidateMetrics,
+    ClusterDiagnostics,
     ClusteringSelection,
     HDBSCANSelectionConfig,
+    compute_cluster_diagnostics,
     run_candidate_hdbscan,
     run_hdbscan_sweep,
 )
@@ -64,6 +66,7 @@ __all__ = [
     "ADSBPreparationResult",
     "ADSBTrackRejection",
     "CandidateMetrics",
+    "ClusterDiagnostics",
     "ClusterLibrary",
     "ClusteringSelection",
     "FeatureSet",
@@ -90,6 +93,7 @@ __all__ = [
     "canonical_content_hash",
     "canonical_json_dumps",
     "compute_cluster_medoids",
+    "compute_cluster_diagnostics",
     "compute_medoids",
     "fit_shape_features",
     "load_cluster_library",

@@ -50,8 +50,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     template_by_cluster: dict[str, ClusterTemplate] = {}
     traffic_arrivals: list[ObservedArrival] = []
     rejection_counts = Counter(dict(result.rejection_counts))
+    hdbscan_outlier_rejections_by_runway: dict[str, int] = {}
+    cluster_diagnostics_by_runway: dict[str, list[dict[str, object]]] = {}
+    selected_clustering_by_runway: dict[str, dict[str, object]] = {}
     for runway_result in result.runway_results:
         library = runway_result.library
+        cluster_diagnostics_by_runway[library.runway] = [
+            item.to_dict() for item in library.clustering.cluster_diagnostics
+        ]
+        selected_clustering_by_runway[library.runway] = {
+            "algorithm": library.clustering.algorithm,
+            "parameters": library.clustering.parameter_dict,
+            "cluster_count": len(library.medoids),
+        }
         library.write(args.output_dir / f"clusters_{library.runway}.json")
         medoid_tracks = runway_result.template_medoid_tracks
         for medoid in library.medoids:
@@ -87,10 +98,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
         assignment_by_flight = {
-            item.flight_id: item for item in library.assignments
+            item.flight_id: item for item in library.corpus_assignments
         }
         for prepared in runway_result.preparation.prepared_tracks:
-            assignment = assignment_by_flight[prepared.flight_id]
+            assignment = assignment_by_flight.get(prepared.flight_id)
+            if assignment is None:
+                # Nearest-medoid assignment remains in the portable cluster
+                # artifact as explicit provenance, but an HDBSCAN -1 label is
+                # a rejection for the observed traffic corpus.  Keeping the
+                # fallback identity out of the corpus also keeps it out of all
+                # corpus-based visualizations and scenario generation.
+                hdbscan_outlier_rejections_by_runway[library.runway] = (
+                    hdbscan_outlier_rejections_by_runway.get(library.runway, 0) + 1
+                )
+                rejection_counts[f"{library.runway}:hdbscan_outlier"] += 1
+                continue
             qualified_cluster = (
                 f"{library.airport}:{library.runway}:{assignment.cluster_id}"
             )
@@ -129,6 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ).date().isoformat(),
                 )
             )
+        hdbscan_outlier_rejections_by_runway.setdefault(library.runway, 0)
     store.write(args.output_dir / "hailmary_templates.json")
     route_input = {
         "dataset_id": dataset.dataset_id,
@@ -158,12 +181,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         "traffic_corpus_hash": corpus.corpus_content_hash,
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "template_rejections": template_rejections,
+        "hdbscan_outlier_rejections_by_runway": dict(
+            sorted(hdbscan_outlier_rejections_by_runway.items())
+        ),
+        "selected_clustering_by_runway": dict(
+            sorted(selected_clustering_by_runway.items())
+        ),
+        "cluster_diagnostics_by_runway": dict(
+            sorted(cluster_diagnostics_by_runway.items())
+        ),
     }
     (args.output_dir / "audit.json").write_text(
         json.dumps(audit, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     print(json.dumps(audit, sort_keys=True, separators=(",", ":")))
+    for runway in sorted(selected_clustering_by_runway):
+        selection = selected_clustering_by_runway[runway]
+        print(
+            f"{runway}: HDBSCAN outliers rejected from corpus="
+            f"{hdbscan_outlier_rejections_by_runway[runway]}; "
+            f"selected={selection['algorithm']} {selection['parameters']}; "
+            f"clusters={selection['cluster_count']}",
+            file=sys.stderr,
+        )
+        for diagnostic in cluster_diagnostics_by_runway[runway]:
+            probability = diagnostic["membership_probability"]
+            distance = diagnostic["centroid_distance_m"]
+            bearing = diagnostic["entry_bearing_deg"]
+            assert isinstance(probability, dict)
+            assert isinstance(distance, dict)
+            assert isinstance(bearing, dict)
+            print(
+                f"  cluster={diagnostic['cluster_id']} "
+                f"members={diagnostic['member_count']} "
+                f"membership_median={float(probability['median']):.3f} "
+                f"centroid_p90_km={float(distance['p90']) / 1000.0:.2f} "
+                f"entry_bearing_mean_deg={float(bearing['circular_mean']):.1f} "
+                f"entry_bearing_p90_span_deg={float(bearing['p90_span']):.1f}",
+                file=sys.stderr,
+            )
     visualize_command = shlex.join(
         [
             "./.venv/bin/python",
