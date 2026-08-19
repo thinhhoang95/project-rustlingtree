@@ -232,3 +232,315 @@ Then we can visualize the corpus by running the script:
   --corpus-dir data/artifacts/hailmary/corpus \
   --manifest data_manifest.json
 ```
+
+## 4. Demand scaling algorithm 
+
+The idea is that it will try to "inject" more flights into the current schedule according to the `scale` parameter given. For example: a scale of 2.0 would mean **all sliding windows of 60 minutes will observe the total flight counts equal two times their previous values accordingly.**
+
+Here is a concrete run using the current KDFW offline corpus, scale `2.0`, seed `17`, and UTC times.
+
+| Period | W0: 09:00–10:00 | W1: 09:20–10:20 |
+|---|---:|---:|
+| 09:00–09:20, W0-exclusive | 1 observed + 2 synthetic | — |
+| 09:20–10:00, common | 6 observed + 5 synthetic | 6 observed + 7 synthetic |
+| 10:00–10:20, W1-exclusive | — | 9 observed + 8 synthetic |
+| Whole-window total | 7 → 14 | 15 → 30 |
+
+### W0: 09:00–10:00
+
+The builder found 7 observed flights and targeted 14.
+
+It generated:
+
+- 2 synthetic flights in the exclusive 09:00–09:20 period, at approximately `09:05:41` and `09:13:23`.
+- 5 synthetic flights in the common 09:20–10:00 period.
+
+Therefore:
+
+```text
+W0 = 1 observed exclusive
+   + 6 observed common
+   + 2 synthetic exclusive
+   + 5 synthetic common
+   = 14 flights
+```
+
+### W1: 09:20–10:20
+
+The builder independently found 15 observed flights and targeted 30.
+
+It generated:
+
+- 7 synthetic flights in the common 09:20–10:00 period.
+- 8 synthetic flights in the exclusive 10:00–10:20 period.
+
+Therefore:
+
+```text
+W1 = 6 observed common
+   + 9 observed exclusive
+   + 7 synthetic common
+   + 8 synthetic exclusive
+   = 30 flights
+```
+
+### What happened to the common period
+
+The six real flights in 09:20–10:00 were included in both scenarios. They retained the same observed IDs:
+
+```text
+AAL1005M1a07522
+AAL2159M1a3661f
+ATN762M1a37245
+FDX1471M1a304d8
+FDX1723M1a0bd33
+FFT1650M1a3d7dc
+```
+
+But the synthetic flights were generated separately:
+
+```text
+shared observed IDs between W0 and W1: 6
+shared synthetic IDs between W0 and W1: 0
+```
+
+Even inside the common period, W0’s five synthetic flights and W1’s seven synthetic flights are different scenario-specific flights.
+
+### Why the two common-period synthetic counts differ
+
+The code does not scale each 20- or 40-minute subperiod separately. Its effective process is:
+
+```python
+W0_baseline = all arrivals where 09:00 <= time < 10:00
+W1_baseline = all arrivals where 09:20 <= time < 10:20
+
+for each window independently:
+    for each runway-cluster:
+        target = round_half_up(scale * observed_count)
+        generate target - observed_count additions
+        sample each addition's time anywhere inside that window
+```
+
+The filtering happens in [`build_scenario()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:601), while synthetic times are sampled in [`_sample_time()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:510).
+
+So the code does not explicitly reason about:
+
+```text
+previous-window-exclusive
+common
+current-window-exclusive
+```
+
+Those categories only emerge afterward from where the independently sampled timestamps happen to fall. The two windows are complete, independent simulation snapshots—not sections of a single coherent scaled timeline.
+
+No code was changed for this example. 
+
+The “intensity pool” is the historical set of arrivals used only to decide plausible times of day for synthetic flights. It does not determine how many flights are added—the scale calculation fixes that count first.
+
+### 1. Count first, time second
+
+Suppose window W1 is `[09:20, 10:20)` and cluster `KDFW:RW17C:1` contains three observed flights:
+
+```text
+09:28
+09:44
+10:12
+```
+
+With scale `2.0`:
+
+```text
+observed = 3
+target   = round_half_up(3 × 2.0) = 6
+additions required = 6 − 3 = 3
+```
+
+The code must therefore produce exactly three synthetic flights. It then samples a timestamp separately for each addition.
+
+### 2. Selecting the intensity pool
+
+For the cluster being scaled, [`_intensity_pool()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:492) uses this fallback hierarchy:
+
+```text
+same airport + same runway + same cluster
+             ↓ if fewer than 4 historical arrivals
+same airport + same runway, all clusters
+             ↓ if fewer than 4 historical arrivals
+same airport, all runways and clusters
+```
+
+The default minimum is four arrivals:
+
+```python
+sparse_cluster_min_count = 4
+```
+
+For example, suppose the training corpus contains:
+
+| Airport | Runway | Cluster | Historical terminal-entry times |
+|---|---|---|---|
+| KDFW | RW17C | C1 | 08:55, 09:30, 09:50, 10:10, 13:00, 18:00 |
+| KDFW | RW17C | C2 | 09:40, 10:02, 14:20 |
+| KDFW | RW18R | C3 | 09:35, 10:05 |
+
+For `KDFW:RW17C:C1`, there are six historical arrivals, so the exact cluster pool is used:
+
+```text
+pool = [08:55, 09:30, 09:50, 10:10, 13:00, 18:00]
+scope = "cluster"
+```
+
+If C1 had only two historical arrivals, but RW17C had at least four total arrivals, the pool would become:
+
+```text
+pool = all RW17C arrivals
+scope = "runway"
+```
+
+If RW17C were also sparse, it would use every KDFW arrival and record:
+
+```text
+scope = "airport"
+```
+
+The selected scope is saved in each synthetic flight’s `intensity_scope` metadata.
+
+By default, `training_arrivals` is the complete corpus supplied to the builder. A caller can provide a separate training-only corpus through [`TrafficScenarioBuilder(..., training_arrivals=...)`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:398). The current traffic-batch CLI does not provide one, so it uses the complete input corpus.
+
+### 3. Sampling one synthetic time
+
+For each addition, [`_sample_time()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:510) repeats the following:
+
+```text
+1. Uniformly choose one arrival from the intensity pool.
+2. Take that arrival’s UTC time of day.
+3. Add Gaussian noise with standard deviation 1,200 seconds.
+4. Wrap the result around midnight if necessary.
+5. Accept it if it falls inside the current one-hour window.
+6. Otherwise try again, up to 256 attempts.
+```
+
+The default bandwidth is 1,200 seconds, or 20 minutes:
+
+```python
+intensity_bandwidth_s = 1200.0
+```
+
+This is equivalent to placing a 20-minute-wide bell curve around every historical arrival time and sampling from the combined curves.
+
+Conceptually, the time density resembles:
+
+```text
+historical arrivals
+       ↓
+08:55       09:30   09:50   10:10               13:00       18:00
+  /\          /\      /\      /\
+ /  \        /  \    /  \    /  \
+```
+
+> The "chevrons" are the density bell curves. 
+
+For a `[09:20, 10:20)` scenario, the sampler conditions this distribution on being inside that window. Times near `09:30`, `09:50`, and `10:10` are therefore much more likely than times far from historical activity.
+
+### 4. Concrete sampling example
+
+Continuing with three required additions:
+
+#### Addition 0
+
+The random generator selects historical center `09:50`.
+
+```text
+Gaussian offset: +8 minutes
+candidate:       09:58
+```
+
+`09:58` is inside `[09:20, 10:20)`, so it is accepted.
+
+This falls in the common period between the two rolling windows.
+
+#### Addition 1
+
+First attempt:
+
+```text
+selected center: 10:10
+Gaussian offset: +15 minutes
+candidate:       10:25
+```
+
+`10:25` is outside the window, so it is rejected.
+
+Second attempt:
+
+```text
+selected center: 09:30
+Gaussian offset: −5 minutes
+candidate:       09:25
+```
+
+`09:25` is accepted and falls in the common period.
+
+#### Addition 2
+
+```text
+selected center: 09:50
+Gaussian offset: +25 minutes
+candidate:       10:15
+```
+
+`10:15` is accepted and falls in W1’s exclusive period.
+
+The resulting synthetic split is:
+
+```text
+09:20–10:00 common period:       2 additions
+10:00–10:20 W1-exclusive period: 1 addition
+```
+
+The code never requested a `2/1` split. That split emerged from the sampled times.
+
+If no candidate lands inside the window after 256 attempts, the fallback is a uniform timestamp anywhere in the window.
+
+### 5. Mathematical interpretation
+
+For historical times of day \(t_1,\ldots,t_N\), the implicit density is approximately:
+
+$$
+\hat f(t)=\frac{1}{N}\sum_{i=1}^{N}
+\mathcal N_{\text{circular}}(t;t_i,h^2),
+$$
+
+where:
+
+```text
+h = intensity_bandwidth_s = 1,200 seconds
+```
+
+The sampler then conditions this density on the scenario window:
+
+$$
+t_{\text{synthetic}}\sim\hat f(t)\mid t\in[\text{window start},\text{window end}).
+$$
+
+The implementation does not explicitly calculate this formula; selecting a historical center and adding Gaussian noise produces the same kernel-mixture sampling behavior.
+
+### 6. Intensity pool versus donor pool
+
+These are separate:
+
+- The intensity pool decides the synthetic flight’s time.
+- The donor pool supplies its ground speed, altitude, baseline variant, and provenance.
+
+The donor is preferably selected from the exact same cluster, even when the time intensity had to fall back to runway or airport level. This happens in [`_materialize_cluster()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/traffic.py:552).
+
+For example:
+
+```text
+Time sampled using all RW17C arrivals
+Donor selected specifically from KDFW:RW17C:C1
+```
+
+Therefore, a sparse cluster may borrow its traffic timing pattern from its runway while retaining the cluster’s trajectory and flight-state characteristics.
+
+Finally, the randomness is reproducible. Each addition receives a deterministic random stream derived from the master seed, dataset, window, cluster, scale, replicate, and addition index. Same inputs produce the same centers, offsets, donors, and timestamps. Different replicates produce alternative realizations with the same exact target counts.
