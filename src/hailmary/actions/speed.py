@@ -102,12 +102,21 @@ def realize_speed_variant(
             "speed-envelope clamping would require a downstream commanded acceleration"
         )
 
-    tas = cas_to_tas(command, profiles["altitude_m"])
+    physical_cas = np.array(profiles["cas_mps"], dtype=float, copy=True)
+    physical_cas[downstream] = command[downstream]
+    tas = np.array(profiles["tas_mps"], dtype=float, copy=True)
+    tas[downstream] = cas_to_tas(
+        command[downstream],
+        profiles["altitude_m"][downstream],
+    )
     # Preserve the compiled variant's wind/along-track relationship. Under the
     # version-1 zero-wind compiler this equals TAS; it also keeps analytic and
     # externally compiled fixtures slowdown-monotone.
-    ground = profiles["ground_speed_mps"] * command / np.maximum(
-        profiles["command_cas_mps"], 1e-9
+    ground = np.array(profiles["ground_speed_mps"], dtype=float, copy=True)
+    ground[downstream] = (
+        profiles["ground_speed_mps"][downstream]
+        * command[downstream]
+        / np.maximum(profiles["command_cas_mps"][downstream], 1e-9)
     )
     resources = tuple(
         (crossing.resource_id, crossing.s_m)
@@ -141,7 +150,7 @@ def realize_speed_variant(
         east_m=profiles["east_m"],
         north_m=profiles["north_m"],
         altitude_m=profiles["altitude_m"],
-        cas_mps=command,
+        cas_mps=physical_cas,
         tas_mps=tas,
         ground_speed_mps=ground,
         command_cas_mps=command,

@@ -448,6 +448,34 @@ def test_schedule_view_uses_canonical_time_order_and_returns_fresh_payloads() ->
     assert HailmaryScheduleView(simulator, include_completed=False).arrival_schedule() == []
 
 
+def test_schedule_view_is_live_for_a_simulator_and_snapshot_bound_for_a_state() -> None:
+    variant = _variant()
+    definition = ScenarioDefinition(
+        scenario_id="ADAPTER_LIVE",
+        seed=5,
+        flights=(
+            FlightDefinition(
+                flight_id="F1",
+                release_time_s=100.0,
+                baseline_variant_id=variant.variant_id,
+            ),
+        ),
+        resources=(),
+        variants=(variant,),
+    )
+    simulator = Simulator(definition)
+    initial_state = simulator.state
+    live_view = HailmaryScheduleView(simulator, include_completed=False)
+    snapshot_view = HailmaryScheduleView(initial_state, include_completed=False)
+
+    simulator.run()
+
+    assert live_view.state_id == simulator.state.state_id
+    assert live_view.arrival_schedule() == []
+    assert snapshot_view.state_id == initial_state.state_id
+    assert len(snapshot_view.arrival_schedule()) == 1
+
+
 def test_schedule_adapter_has_no_mutable_scenario_manager_dependency() -> None:
     import hailmary.adapters.scenario_manager as module
 

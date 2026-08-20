@@ -695,6 +695,17 @@ def apply_action(
         )
 
     delay = max(0.0, variant.duration_s - current.duration_s)
+    validate_replacement = getattr(
+        simulator, "validate_flight_variant_replacement", None
+    )
+    if callable(validate_replacement):
+        validate_replacement(
+            action.bound_flight_id,
+            variant,
+            splice_s_m=action.s_m,
+            station_mapping_m=station_mapping_m,
+            expected_version=state.version,
+        )
     _install_variant(simulator, variant)
     installed_state = getattr(simulator, "state")
     replace_method = getattr(simulator, "replace_flight_variant")

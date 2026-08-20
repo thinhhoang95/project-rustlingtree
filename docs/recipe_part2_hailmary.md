@@ -35,12 +35,12 @@ In order to test the demand scaling, run the script:
 ```
 
 
-## b. What happens inside one window?
+# Hail Mary proceedings: What happens inside one window?
 
 The simplified sequence is:
 
 ```text
-Traffic scenario
+Traffic scenario (One intervened window, and only flights pertaining to this window are considered to build an event queue)
     ↓
 Create event-driven simulator
     ↓
@@ -75,6 +75,230 @@ The route graph is already built offline. For the current scenario, Hailmary cre
 - exogenous disturbance, if configured.
 
 This is an event heap rather than a newly learned “event graph.” The simulator processes simultaneous events together in [`Simulator.advance_next()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/simulator/engine.py:207).
+
+#### Why is there an Event-driven simulator and why does the event queue matter at all?
+
+This is because the simulator does not try to advance the timeline by second or milisecond. Instead, it will look at the key moments in the timeline (similar to *keyframes* in movie-making), and the timeline will just *jump* to these timeline moments. So that's a *leapfrogging* behavior instead.
+
+Generally, an event is **consumed**, which mostly means updating some bookkeeping system like refining the event queues (removing past events), creating new decision epoch, change the lifecycle flag to `active`... It does not change the takeoff time, or the flight path just because an event is consumed (technically there is an exception: the *exogeneous disturbance* event will also mutate the flight state—takeoff time for instance).
+
+Think of each trajectory as a prerecorded film, and events as bookmarks in that film.
+
+The simulator does not “push” an aircraft forward every second. Instead, it knows:
+
+```text
+trajectory(elapsed time) → position, altitude, speed
+```
+
+For flight `F`:
+
+```text
+physical_state(t) = F.current_trajectory(t - F.trajectory_origin_time)
+```
+
+The event queue says when to stop fast-forwarding the films because something relevant happens. An action can replace the unplayed remainder of one film.
+
+### A concrete two-aircraft example
+
+Suppose two arrivals share runway `RWY`:
+
+```text
+Leader L predicted runway time:   t=200
+Follower F predicted runway time: t=250
+Required runway spacing:             90 seconds
+```
+
+The predicted spacing is:
+
+```text
+250 - 200 = 50 seconds
+```
+
+So the follower is predicted to arrive 40 seconds too soon:
+
+```text
+required delay = 90 - 50 = 40 seconds
+```
+
+Flight `F` has a speed-action station that it will reach at `t=130`.
+
+At initialization, part of the queue might look like:
+
+```text
+t=100  RELEASED(L)
+t=110  RELEASED(F)
+t=130  ACTION_STATION_CROSSED(F, station=3)
+t=200  RESOURCE_CROSSED(L, RWY)
+t=200  COMPLETED(L)
+t=250  RESOURCE_CROSSED(F, RWY)
+t=250  COMPLETED(F)
+```
+
+### 1. At `t=100`: leader release
+
+The engine jumps directly to `t=100` and consumes `RELEASED(L)`.
+
+State changes:
+
+```text
+simulation time: 100
+L.lifecycle: scheduled → active
+release event: removed from queue
+```
+
+What does not change:
+
+```text
+L.current_trajectory remains BASE_L
+trajectory arrays remain immutable
+```
+
+Nevertheless, asking “where is L at `t=105`?” works by sampling `BASE_L` five seconds after its trajectory origin.
+
+### 2. At `t=110`: follower release
+
+The same thing happens:
+
+```text
+simulation time: 110
+F.lifecycle: scheduled → active
+```
+
+No trajectory changes.
+
+### 3. At `t=130`: follower reaches an action station
+
+The event time was calculated in advance from the trajectory:
+
+```text
+BASE_F reaches station 3 at elapsed time 20 s
+F trajectory origin = 110
+event time = 110 + 20 = 130
+```
+
+When the event is processed:
+
+```text
+simulation time: 130
+station 3 added to F.crossed_action_stations
+event removed from queue
+decision epoch created
+```
+
+Again, the event itself does not change the trajectory. It records:
+
+> According to the current trajectory and clock, F is exactly at station 3 now.
+
+The controller then examines the post-event state:
+
+```text
+leader runway ETA:   200
+follower runway ETA: 250
+spacing deficit:      40 seconds
+```
+
+The action catalog might offer:
+
+```text
+no-op
+speed/light
+speed/medium
+speed/heavy
+path-stretch
+```
+
+These are possibilities, not commands.
+
+### 4. Counterfactual comparison
+
+Suppose the controller temporarily forks the world.
+
+#### No-op branch
+
+```text
+F keeps BASE_F
+F runway event remains t=250
+spacing remains 50 seconds
+```
+
+#### Slowdown branch
+
+A slower trajectory variant `SLOW_F` is created. At `t=130`, it is spliced onto the aircraft’s current location:
+
+```text
+Past:
+    t=110–130 uses BASE_F and remains unchanged
+
+Future:
+    t=130 onward uses SLOW_F
+```
+
+Suppose this variant adds 40 seconds before the runway:
+
+```text
+old F runway time: 250
+new F runway time: 290
+
+new spacing: 290 - 200 = 90 seconds
+```
+
+The slowdown branch therefore receives a better spacing score.
+
+The temporary branches are discarded. If the policy selects slowdown, the same action is applied to the real simulator.
+
+### 5. Applying the selected action
+
+Applying slowdown changes:
+
+```text
+F.current_variant_id:
+    BASE_F → SLOW_F
+
+F.action_history:
+    [] → [speed-action-id]
+
+F.speed_action_count:
+    0 → 1
+
+predicted RWY crossing:
+    250 → 290
+```
+
+The queue changes to:
+
+```text
+t=200  RESOURCE_CROSSED(L, RWY)
+t=200  COMPLETED(L)
+t=290  RESOURCE_CROSSED(F, RWY)
+t=290  COMPLETED(F)
+```
+
+Crucially:
+
+```text
+F's position at t=130 before action
+=
+F's position at t=130 after action
+```
+
+There is no teleportation. Only its future changes. This is the purpose of the splice logic in [engine.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/simulator/engine.py:607).
+
+### Where is the conflict event?
+
+There isn’t one.
+
+The spacing deficit at `t=130` is derived from predicted runway times. It motivates the action, but it is not a queued event.
+
+Similarly, suppose the two aircraft violate airborne separation between `t=157.3` and `t=164.8`. The conflict detector can analytically discover that interval even if the event queue contains only:
+
+```text
+t=150  some station crossing
+t=170  some resource crossing
+```
+
+The engine does not need `CONFLICT_STARTED` and `CONFLICT_ENDED` events. Conflict is an evaluated property of the trajectories over an interval; events are the timestamps where the simulator must update discrete state or consult the controller.
+
+---
 
 ### 2. Detect useful aircraft pairs
 

@@ -192,17 +192,41 @@ class Simulator:
         )
 
     def sample_flight(
-        self, flight_id: str, *, at_time_s: float | None = None
+        self,
+        flight_id: str,
+        *,
+        at_time_s: float | None = None,
+        clip: bool = False,
     ) -> TrajectorySample:
+        """Sample one flight on its current trajectory timeline.
+
+        The public query is strict by default so a timestamp before the
+        trajectory origin or after completion cannot silently masquerade as an
+        endpoint sample.  ``clip=True`` is an explicit compatibility escape
+        hatch for callers that deliberately want endpoint projection.
+        """
+
         dynamic = self.state.flight(flight_id)
         absolute_time_s = (
             self.state.sim_time_s if at_time_s is None else float(at_time_s)
         )
+        if not math.isfinite(absolute_time_s):
+            raise ValueError("flight sample time must be finite")
         trajectory = MonotoneTrajectory.from_variant(
             self.definition.variant(dynamic.current_variant_id)
         )
         elapsed = absolute_time_s - dynamic.trajectory_clock_origin_s
-        return trajectory.sample(elapsed)
+        try:
+            return trajectory.sample(elapsed, clip=clip)
+        except ValueError as exc:
+            if clip or "lies outside" not in str(exc):
+                raise
+            start_time_s = dynamic.trajectory_clock_origin_s
+            end_time_s = start_time_s + trajectory.duration_s
+            raise ValueError(
+                f"flight {flight_id!r} cannot be sampled at {absolute_time_s}; "
+                f"its current trajectory is defined on [{start_time_s}, {end_time_s}]"
+            ) from exc
 
     def advance_next(self) -> EventBatchResult | None:
         if not self.state.event_heap:
@@ -630,40 +654,21 @@ class Simulator:
         )
         before = self.state
         dynamic = before.flight(flight_id)
-        if dynamic.lifecycle is not FlightLifecycle.ACTIVE:
-            raise ValueError(
-                "a trajectory variant can only be replaced for an active flight"
-            )
         current_variant = self.definition.variant(dynamic.current_variant_id)
         replacement_variant = self.definition.variant(variant_id)
-        current_trajectory = MonotoneTrajectory.from_variant(current_variant)
-        replacement_trajectory = MonotoneTrajectory.from_variant(replacement_variant)
-
-        current_elapsed_s = before.sim_time_s - dynamic.trajectory_clock_origin_s
-        if not -1e-8 <= current_elapsed_s <= current_trajectory.duration_s + 1e-8:
-            raise ValueError("active flight time lies outside its current trajectory")
-        current_station_s_m = current_trajectory.station_at_elapsed(current_elapsed_s)
-        requested_splice_s_m = (
-            current_station_s_m if splice_s_m is None else float(splice_s_m)
-        )
-        station_tolerance_m = max(1e-5, current_trajectory.upstream_s_m * 1e-10)
-        if abs(requested_splice_s_m - current_station_s_m) > station_tolerance_m:
-            raise ValueError(
-                "variant replacement splice does not match the aircraft's current station"
-            )
-        mapped_splice_s_m = _mapped_station_s_m(
+        (
+            current_trajectory,
+            replacement_trajectory,
             requested_splice_s_m,
-            station_mapping_m,
-            current_trajectory=current_trajectory,
-            replacement_trajectory=replacement_trajectory,
-        )
-        replacement_elapsed_s = replacement_trajectory.elapsed_at_station(
-            mapped_splice_s_m
-        )
-        replacement_origin_s = before.sim_time_s - replacement_elapsed_s
-        _assert_splice_position_continuity(
-            current_trajectory.sample(current_elapsed_s),
-            replacement_trajectory.sample(replacement_elapsed_s),
+            mapped_splice_s_m,
+            replacement_origin_s,
+        ) = _validated_variant_splice(
+            before,
+            dynamic,
+            current_variant,
+            replacement_variant,
+            splice_s_m=splice_s_m,
+            station_mapping_m=station_mapping_m,
         )
 
         pending_for_flight = sorted(
@@ -774,6 +779,33 @@ class Simulator:
             action_log=action_log,
         )
         return self.state
+
+    def validate_flight_variant_replacement(
+        self,
+        flight_id: str,
+        replacement_variant: object,
+        *,
+        splice_s_m: float | None = None,
+        station_mapping_m: tuple[tuple[float, float], ...] | None = None,
+        expected_version: int | None = None,
+        expected_state_id: str | None = None,
+    ) -> None:
+        """Validate a candidate splice without installing or applying it."""
+
+        self.assert_fresh(
+            expected_version=expected_version, expected_state_id=expected_state_id
+        )
+        before = self.state
+        dynamic = before.flight(flight_id)
+        current_variant = self.definition.variant(dynamic.current_variant_id)
+        _validated_variant_splice(
+            before,
+            dynamic,
+            current_variant,
+            replacement_variant,
+            splice_s_m=splice_s_m,
+            station_mapping_m=station_mapping_m,
+        )
 
     def schedule_event(
         self,
@@ -1098,6 +1130,186 @@ def _assert_splice_position_continuity(
         raise ValueError(
             "variant replacement is discontinuous at the live splice for "
             + ", ".join(discontinuities)
+        )
+
+
+def _validated_variant_splice(
+    state: SimulationState,
+    dynamic: FlightDynamic,
+    current_variant: object,
+    replacement_variant: object,
+    *,
+    splice_s_m: float | None,
+    station_mapping_m: tuple[tuple[float, float], ...] | None,
+) -> tuple[MonotoneTrajectory, MonotoneTrajectory, float, float, float]:
+    """Return splice context after proving live and historical continuity."""
+
+    if dynamic.lifecycle is not FlightLifecycle.ACTIVE:
+        raise ValueError(
+            "a trajectory variant can only be replaced for an active flight"
+        )
+    current_trajectory = MonotoneTrajectory.from_variant(current_variant)
+    replacement_trajectory = MonotoneTrajectory.from_variant(replacement_variant)
+    current_elapsed_s = state.sim_time_s - dynamic.trajectory_clock_origin_s
+    if not -1e-8 <= current_elapsed_s <= current_trajectory.duration_s + 1e-8:
+        raise ValueError("active flight time lies outside its current trajectory")
+    current_station_s_m = current_trajectory.station_at_elapsed(current_elapsed_s)
+    requested_splice_s_m = (
+        current_station_s_m if splice_s_m is None else float(splice_s_m)
+    )
+    station_tolerance_m = max(1e-5, current_trajectory.upstream_s_m * 1e-10)
+    if abs(requested_splice_s_m - current_station_s_m) > station_tolerance_m:
+        raise ValueError(
+            "variant replacement splice does not match the aircraft's current station"
+        )
+    mapped_splice_s_m = _mapped_station_s_m(
+        requested_splice_s_m,
+        station_mapping_m,
+        current_trajectory=current_trajectory,
+        replacement_trajectory=replacement_trajectory,
+    )
+    replacement_elapsed_s = replacement_trajectory.elapsed_at_station(
+        mapped_splice_s_m
+    )
+    replacement_origin_s = state.sim_time_s - replacement_elapsed_s
+    _assert_splice_position_continuity(
+        current_trajectory.sample(current_elapsed_s),
+        replacement_trajectory.sample(replacement_elapsed_s),
+    )
+    _assert_historical_prefix_continuity(
+        current_trajectory,
+        replacement_trajectory,
+        current_origin_s=dynamic.trajectory_clock_origin_s,
+        replacement_origin_s=replacement_origin_s,
+        through_time_s=state.sim_time_s,
+    )
+    return (
+        current_trajectory,
+        replacement_trajectory,
+        requested_splice_s_m,
+        mapped_splice_s_m,
+        replacement_origin_s,
+    )
+
+
+_HISTORICAL_PROFILE_FIELDS: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("east_m", ("east_m",), 1e-4),
+    ("north_m", ("north_m",), 1e-4),
+    ("lat_deg", ("lat_deg",), 1e-8),
+    ("lon_deg", ("lon_deg",), 1e-8),
+    ("altitude_m", ("altitude_m", "h_m", "geoaltitude_m"), 1e-4),
+    ("cas_mps", ("cas_mps", "v_cas_mps"), 1e-7),
+    ("tas_mps", ("tas_mps", "v_tas_mps"), 1e-7),
+    ("ground_speed_mps", ("ground_speed_mps",), 1e-7),
+)
+
+
+def _variant_profile(
+    trajectory: MonotoneTrajectory,
+    names: tuple[str, ...],
+) -> np.ndarray | None:
+    variant = trajectory.variant
+    raw: Any | None = None
+    if isinstance(variant, Mapping):
+        for name in names:
+            if name in variant:
+                raw = variant[name]
+                break
+    if raw is None:
+        for name in names:
+            if hasattr(variant, name):
+                raw = getattr(variant, name)
+                break
+    if raw is None:
+        return None
+    values = np.asarray(raw, dtype=np.float64)
+    if values.ndim != 1 or len(values) != len(trajectory.source_indices):
+        raise ValueError(
+            f"trajectory field {names!r} must match the station/time grid"
+        )
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"trajectory field {names!r} must be finite")
+    return np.asarray(values[trajectory.source_indices], dtype=np.float64)
+
+
+def _assert_historical_prefix_continuity(
+    current: MonotoneTrajectory,
+    replacement: MonotoneTrajectory,
+    *,
+    current_origin_s: float,
+    replacement_origin_s: float,
+    through_time_s: float,
+) -> None:
+    """Prove that replacing the current variant cannot reinterpret its past."""
+
+    clock_tolerance_s = 1e-7
+    if abs(float(current_origin_s) - float(replacement_origin_s)) > clock_tolerance_s:
+        raise ValueError(
+            "variant replacement would rewrite history by changing the "
+            "trajectory clock origin"
+        )
+
+    current_elapsed_s = float(through_time_s - current_origin_s)
+    replacement_elapsed_s = float(through_time_s - replacement_origin_s)
+    current_knots = current_origin_s + current.elapsed_time_s[
+        current.elapsed_time_s <= current_elapsed_s + clock_tolerance_s
+    ]
+    replacement_knots = replacement_origin_s + replacement.elapsed_time_s[
+        replacement.elapsed_time_s <= replacement_elapsed_s + clock_tolerance_s
+    ]
+    absolute_times = np.unique(
+        np.concatenate(
+            (
+                current_knots,
+                replacement_knots,
+                np.asarray([current_origin_s, through_time_s], dtype=np.float64),
+            )
+        )
+    )
+    absolute_times = absolute_times[
+        (absolute_times >= current_origin_s - clock_tolerance_s)
+        & (absolute_times <= through_time_s + clock_tolerance_s)
+    ]
+
+    compared_fields = 0
+    for label, names, tolerance in _HISTORICAL_PROFILE_FIELDS:
+        current_values = _variant_profile(current, names)
+        replacement_values = _variant_profile(replacement, names)
+        if current_values is None and replacement_values is None:
+            continue
+        if current_values is None or replacement_values is None:
+            raise ValueError(
+                f"variant replacement would rewrite history because {label} "
+                "is missing from one trajectory"
+            )
+        compared_fields += 1
+        current_samples = np.interp(
+            absolute_times - current_origin_s,
+            current.elapsed_time_s,
+            current_values,
+        )
+        replacement_samples = np.interp(
+            absolute_times - replacement_origin_s,
+            replacement.elapsed_time_s,
+            replacement_values,
+        )
+        if not np.allclose(
+            current_samples,
+            replacement_samples,
+            rtol=0.0,
+            atol=tolerance,
+        ):
+            maximum_error = float(
+                np.max(np.abs(current_samples - replacement_samples))
+            )
+            raise ValueError(
+                f"variant replacement would rewrite the already-flown {label} "
+                f"profile (maximum error {maximum_error})"
+            )
+    if compared_fields == 0:
+        raise ValueError(
+            "variant replacement cannot verify history because neither trajectory "
+            "exposes a physical profile"
         )
 
 

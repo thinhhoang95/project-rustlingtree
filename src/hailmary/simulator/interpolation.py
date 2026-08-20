@@ -125,8 +125,20 @@ class MonotoneTrajectory:
         elapsed = float(np.clip(float(elapsed_time_s), 0.0, self.duration_s))
         return float(np.interp(elapsed, self.elapsed_time_s, ordered))
 
-    def sample(self, elapsed_time_s: float) -> TrajectorySample:
-        elapsed = float(np.clip(float(elapsed_time_s), 0.0, self.duration_s))
+    def sample(
+        self,
+        elapsed_time_s: float,
+        *,
+        clip: bool = True,
+    ) -> TrajectorySample:
+        elapsed = float(elapsed_time_s)
+        if not np.isfinite(elapsed):
+            raise ValueError("elapsed_time_s must be finite")
+        if not clip and not -1e-9 <= elapsed <= self.duration_s + 1e-9:
+            raise ValueError(
+                f"elapsed time {elapsed} lies outside [0, {self.duration_s}]"
+            )
+        elapsed = float(np.clip(elapsed, 0.0, self.duration_s))
         return TrajectorySample(
             elapsed_time_s=elapsed,
             s_m=self.station_at_elapsed(elapsed),

@@ -41,10 +41,16 @@ def _diagnostics_payload(variant: object) -> dict[str, Any]:
 
 @dataclass(frozen=True, init=False)
 class HailmaryScheduleView:
-    """Implement ``arrival_schedule()`` over an immutable definition/state."""
+    """Implement ``arrival_schedule()`` over a live simulator or a snapshot.
 
-    definition: ScenarioDefinition
-    state: SimulationState | None
+    Passing a ``Simulator`` keeps the view live and resolves its latest
+    immutable state on every query. Passing a ``SimulationState`` deliberately
+    pins the view to that exact snapshot.
+    """
+
+    _definition: ScenarioDefinition
+    _snapshot_state: SimulationState | None
+    _live_source: object | None
     include_completed: bool
 
     def __init__(
@@ -53,43 +59,77 @@ class HailmaryScheduleView:
         *,
         include_completed: bool = True,
     ) -> None:
+        live_source: object | None = None
         if isinstance(source, SimulationState):
             definition = source.definition
-            state: SimulationState | None = source
+            snapshot_state: SimulationState | None = source
         elif isinstance(source, ScenarioDefinition):
             definition = source
-            state = None
+            snapshot_state = None
         else:
             candidate = getattr(source, "state", None)
             if not isinstance(candidate, SimulationState):
                 raise TypeError("source must be a ScenarioDefinition, SimulationState, or Simulator")
             definition = candidate.definition
-            state = candidate
-        object.__setattr__(self, "definition", definition)
-        object.__setattr__(self, "state", state)
+            snapshot_state = None
+            live_source = source
+        object.__setattr__(self, "_definition", definition)
+        object.__setattr__(self, "_snapshot_state", snapshot_state)
+        object.__setattr__(self, "_live_source", live_source)
         object.__setattr__(self, "include_completed", bool(include_completed))
+
+    def _resolved(self) -> tuple[ScenarioDefinition, SimulationState | None]:
+        if self._live_source is None:
+            return self._definition, self._snapshot_state
+        state = getattr(self._live_source, "state", None)
+        if not isinstance(state, SimulationState):
+            raise TypeError("live schedule source no longer exposes a SimulationState")
+        return state.definition, state
+
+    @property
+    def definition(self) -> ScenarioDefinition:
+        return self._resolved()[0]
+
+    @property
+    def state(self) -> SimulationState | None:
+        return self._resolved()[1]
 
     @property
     def state_id(self) -> str | None:
-        return None if self.state is None else self.state.state_id
+        state = self.state
+        return None if state is None else state.state_id
 
-    def _runtime(self, flight_id: str) -> tuple[str, float, FlightLifecycle | None]:
-        definition_flight = self.definition.flight(flight_id)
-        if self.state is None:
+    @staticmethod
+    def _runtime(
+        definition: ScenarioDefinition,
+        state: SimulationState | None,
+        flight_id: str,
+    ) -> tuple[str, float, FlightLifecycle | None]:
+        definition_flight = definition.flight(flight_id)
+        if state is None:
             return definition_flight.baseline_variant_id, definition_flight.release_time_s, None
-        dynamic = self.state.flight(flight_id)
+        dynamic = state.flight(flight_id)
         return (
             dynamic.current_variant_id,
             dynamic.trajectory_clock_origin_s,
             dynamic.lifecycle,
         )
 
-    def _arrival(self, flight_id: str) -> dict[str, Any] | None:
-        flight = self.definition.flight(flight_id)
-        variant_id, release_time_s, lifecycle = self._runtime(flight_id)
+    def _arrival(
+        self,
+        definition: ScenarioDefinition,
+        state: SimulationState | None,
+        flight_id: str,
+    ) -> dict[str, Any] | None:
+        flight = definition.flight(flight_id)
+        variant_id, release_time_s, lifecycle = self._runtime(
+            definition,
+            state,
+            flight_id,
+        )
         if lifecycle is FlightLifecycle.COMPLETED and not self.include_completed:
             return None
-        variant = self.definition.variant(variant_id)
+        variant = definition.variant(variant_id)
         trajectory = MonotoneTrajectory.from_variant(variant)
         order = trajectory.source_indices
         lat = _variant_array(variant, "lat_deg")[order]
@@ -113,8 +153,8 @@ class HailmaryScheduleView:
         lever = str(getattr(action_provenance, "lever", "baseline"))
         route_type = "base-route" if lever == "baseline" else lever.replace("_", "-")
         payload: dict[str, Any] = {
-            "scenario_id": self.definition.scenario_id,
-            "state_id": self.state_id,
+            "scenario_id": definition.scenario_id,
+            "state_id": None if state is None else state.state_id,
             "flight_id": flight.flight_id,
             "callsign": flight.callsign or flight.flight_id,
             "icao24": flight.icao24,
@@ -151,10 +191,11 @@ class HailmaryScheduleView:
     def arrival_schedule(self) -> list[dict[str, Any]]:
         """Return a fresh, threshold-ETA-ordered schedule on every call."""
 
+        definition, state = self._resolved()
         arrivals = [
             arrival
-            for flight in self.definition.flights
-            if (arrival := self._arrival(flight.flight_id)) is not None
+            for flight in definition.flights
+            if (arrival := self._arrival(definition, state, flight.flight_id)) is not None
         ]
         arrivals.sort(key=lambda item: (float(item["time_at_last_event"]), str(item["flight_id"])))
         return arrivals

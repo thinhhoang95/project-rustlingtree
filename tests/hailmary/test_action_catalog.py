@@ -232,6 +232,43 @@ def test_candidate_becomes_stale_after_any_state_transition() -> None:
         apply_action(simulator, candidate)
 
 
+def test_rejected_replacement_preflight_does_not_install_a_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    simulator = _simulator_with_stations(
+        (ActionStationDefinition(0, 80_000.0, "speed"),)
+    )
+    batch = _next_station_batch(simulator)
+    candidate = _candidate(
+        ActionCatalog().enumerate_for_batch(
+            simulator,
+            batch,
+            anchor_id="ANCHOR",
+            bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
+        ),
+        ActionLever.SPEED,
+        "light",
+    )
+    state_before = simulator.state
+    variant_ids_before = simulator.definition.variant_ids
+
+    def reject_replacement(*_args, **_kwargs) -> None:
+        raise ValueError("candidate replacement rejected")
+
+    monkeypatch.setattr(
+        simulator,
+        "validate_flight_variant_replacement",
+        reject_replacement,
+    )
+    with pytest.raises(ValueError, match="candidate replacement rejected"):
+        apply_action(simulator, candidate)
+
+    assert simulator.state is state_before
+    assert simulator.definition.variant_ids == variant_ids_before
+
+
 def test_two_speed_actions_are_composed_and_third_station_offers_no_speed() -> None:
     simulator = _simulator_with_stations(
         (

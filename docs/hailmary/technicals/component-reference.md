@@ -417,6 +417,7 @@ outcome plan.
 | `hailmary-build-route-graph` | `build_route_graph.py` | Qualified medoid routes | Hashed route-graph artifact and audit |
 | `hailmary-build-traffic-batch` | `build_traffic_batch.py` | Terminal-entry corpus, templates, and route graph | Hashed scenario-batch audit |
 | `hailmary-simulate` | `simulate.py` | Scenario JSON referencing variant NPZ files | Deterministic simulation trace JSON |
+| `hailmary-visualize-event-queue` | `visualize_event_queue.py` | Corpus, templates, optional route graph, and selected demand window | Local event-queue verifier GUI with flight radar |
 
 The CLI persistence helpers use deterministic JSON/NPZ forms and validate data
 again when reading. Python APIs expose richer results, especially raw ADS-B

@@ -61,6 +61,36 @@ def test_speed_action_never_exceeds_reference_or_current_command() -> None:
     np.testing.assert_array_equal(baseline.command_cas_mps, np.full(len(baseline.s_m), 100.0))
 
 
+def test_speed_action_preserves_all_physical_profiles_through_the_anchor() -> None:
+    baseline = replace(
+        _straight_variant(),
+        altitude_m=np.full(501, 2_000.0),
+        variant_id="",
+    )
+    anchor_s_m = 80_000.0
+
+    slowed = realize_speed_variant(
+        baseline,
+        anchor_s_m=anchor_s_m,
+        band="light",
+        reduction_kts=10.0,
+    )
+
+    historical = slowed.s_m >= anchor_s_m - 1e-9
+    np.testing.assert_array_equal(
+        slowed.cas_mps[historical],
+        baseline.cas_mps[historical],
+    )
+    np.testing.assert_array_equal(
+        slowed.tas_mps[historical],
+        baseline.tas_mps[historical],
+    )
+    np.testing.assert_array_equal(
+        slowed.ground_speed_mps[historical],
+        baseline.ground_speed_mps[historical],
+    )
+
+
 def test_sequential_speed_actions_compose_from_current_variant_without_relaxation() -> None:
     baseline = _straight_variant()
     first = realize_speed_variant(

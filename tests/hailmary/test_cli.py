@@ -15,6 +15,7 @@ from hailmary.cli import (
     build_templates,
     build_traffic_batch,
     simulate,
+    visualize_event_queue,
     visualize_offline_corpus,
 )
 from hailmary.clustering import ClusterLibrary
@@ -32,6 +33,7 @@ from .test_adapters import _variant
         build_route_graph.main,
         build_traffic_batch.main,
         simulate.main,
+        visualize_event_queue.main,
         visualize_offline_corpus.main,
     ],
 )
@@ -57,6 +59,10 @@ def test_pyproject_registers_hailmary_console_scripts() -> None:
     assert scripts["hailmary-build-route-graph"] == "hailmary.cli.build_route_graph:main"
     assert scripts["hailmary-build-traffic-batch"] == "hailmary.cli.build_traffic_batch:main"
     assert scripts["hailmary-simulate"] == "hailmary.cli.simulate:main"
+    assert (
+        scripts["hailmary-visualize-event-queue"]
+        == "hailmary.cli.visualize_event_queue:main"
+    )
 
 
 def test_cluster_cli_builds_canonical_artifact_from_npz(tmp_path: Path, capsys) -> None:

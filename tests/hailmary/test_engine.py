@@ -153,6 +153,23 @@ def test_monotone_interpolation_accepts_canonical_station_order() -> None:
     assert sample.cas_mps == pytest.approx(75.0)
 
 
+def test_flight_sampling_rejects_out_of_timeline_queries_unless_clipping_is_explicit() -> None:
+    simulator = Simulator(_definition())
+
+    with pytest.raises(ValueError, match="cannot be sampled at 90.0"):
+        simulator.sample_flight("F1", at_time_s=90.0)
+    before_release = simulator.sample_flight("F1", at_time_s=90.0, clip=True)
+    assert before_release.elapsed_time_s == 0.0
+    assert before_release.s_m == pytest.approx(2_000.0)
+
+    simulator.run()
+    with pytest.raises(ValueError, match="cannot be sampled at 999.0"):
+        simulator.sample_flight("F1", at_time_s=999.0)
+    after_completion = simulator.sample_flight("F1", at_time_s=999.0, clip=True)
+    assert after_completion.elapsed_time_s == pytest.approx(20.0)
+    assert after_completion.s_m == pytest.approx(0.0)
+
+
 def test_equal_time_physical_events_are_batched_before_one_decision_epoch() -> None:
     simulator = Simulator(_definition())
 
@@ -239,6 +256,35 @@ def test_replacing_variant_reschedules_only_bound_flight_future_events() -> None
     assert simulator.state.flight("F1").current_variant_id == "SLOW"
     assert simulator.state.flight("F1").action_history == ("slow-at-entry",)
     assert simulator.state.action_log_records[0]["to_variant_id"] == "SLOW"
+
+
+def test_direct_variant_replacement_rejects_a_rewritten_historical_prefix() -> None:
+    simulator = Simulator(_definition(include_slow_variant=True))
+    simulator.advance_next()  # disturbance and release at t=100
+    simulator.advance_next()  # first action station at t=105
+    state_before = simulator.state
+    replacement = simulator.definition.variant("SLOW")
+
+    with pytest.raises(ValueError, match="rewrite history"):
+        simulator.validate_flight_variant_replacement(
+            "F1",
+            replacement,
+            expected_version=state_before.version,
+        )
+    assert simulator.state is state_before
+
+    with pytest.raises(ValueError, match="rewrite history"):
+        simulator.replace_flight_variant(
+            "F1",
+            "SLOW",
+            expected_version=state_before.version,
+        )
+
+    assert simulator.state is state_before
+    assert simulator.state.flight("F1").current_variant_id == "BASE"
+    assert simulator.sample_flight("F1", at_time_s=100.0).s_m == pytest.approx(
+        2_000.0
+    )
 
 
 def test_generator_release_jitter_is_order_independent_and_recorded() -> None:

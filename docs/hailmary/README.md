@@ -73,7 +73,25 @@ hailmary-build-offline-corpus --help
 hailmary-build-route-graph --help
 hailmary-build-traffic-batch --help
 hailmary-simulate --help
+hailmary-visualize-event-queue --help
 ```
+
+Inspect a scaled traffic window against the production event queue in a local
+browser GUI:
+
+```bash
+hailmary-visualize-event-queue \
+  --window-start "2026-04-01 09:00" \
+  --timezone UTC \
+  --scale 1.25
+```
+
+The GUI shows observed and scaled flight counts, every pending queue item, the
+equal-time batch most recently processed, live catalog action eligibility, and
+all aircraft positions. The time scrubber and Previous/Next Event buttons move
+only across states produced by `Simulator.advance_next()`. If no compiled route
+graph is supplied, the CLI discovers `route_graph.json` next to the corpus or
+compiles a sibling `route_graph_input.json` in memory.
 
 The step-by-step visual checks requested by the design are in
 `notebooks/hailmary/01_clusters.ipynb` and
