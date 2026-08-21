@@ -523,7 +523,22 @@ Y_heavy = 1.000 + 0.556 − 0.133 − 0.006
         = 1.417
 ```
 
-The full composition is implemented directly in [outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:339). Annotation 1
+The full composition is implemented directly in [outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:339).
+
+#### Intuitive mental model of the score:
+```
+pair:
+    Did we repair the target gap?
+
+propagation:
+    Did repairing it damage the next three gaps?
+
+intervention:
+    How complicated/aggressive was the solution?
+
+throughput:
+    Did the solution create unnecessarily large gaps?
+```
 
 ### How the rules are actually credited
 
@@ -550,6 +565,157 @@ These differences—not the raw scores—grade the matching rules ([credit.py](/
 - No-op rules receive veto evidence of `1.111 − 1.595 = −0.484`.
 
 That distinction is important: heavy slowdown is learned as beneficial relative to doing nothing, but inferior to medium slowdown.
+
+
+#### Nuances: when flows merge together, the pair identities will adapt correctly; but in three-arms roll-out, the pair identities stay frozen. This is to prevent unstable learning of causality
+
+Yes, with one crucial qualification: pair identities are refreshed between real decision epochs, but frozen during one three-arm rollout.
+
+### 1. Are pairs adapted over time?
+
+At every real decision epoch, Hailmary rebuilds the flow for every active route segment:
+
+- Aircraft already occupying the segment are ordered by physical progress.
+- Future entrants are ordered by predicted entry time.
+- Adjacent aircraft become leader–follower pairs.
+- Aircraft that have crossed the segment exit are removed.
+
+This happens in [anchors.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/anchors.py:311).
+
+Suppose two inbound flows merge:
+
+```text
+Before merge:
+
+Flow A: A1 → A2
+Flow B: B1 → B2
+
+After predicted merge ordering:
+
+A1 → B1 → A2 → B2
+```
+
+At the next real decision epoch, the resulting anchors could be:
+
+```text
+A1→B1
+B1→A2
+A2→B2
+```
+
+So yes, the learner adapts to the current physical/predicted sequence rather than permanently treating `A1→A2` as a pair.
+
+However, once a three-arm experiment begins, its cohort is deliberately frozen:
+
+```text
+real decision epoch:
+    freeze L, F, T1, T2, T3
+
+selected rollout:
+    score those same identities
+
+rival rollout:
+    score those same identities
+
+no-op rollout:
+    score those same identities
+```
+
+This is enforced by `freeze_outcome_cohort()` ([outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:56)).
+
+If an action makes the frozen follower overtake its leader in one branch, Hailmary does not silently redefine the pair to make the branch look better. Their exit-time difference becomes zero or negative and receives a bad score. Freezing is necessary so all three arms answer the same causal question.
+
+After the chosen action is committed and the real simulator advances to the next decision event, pairs are rebuilt again.
+
+So the lifecycle is:
+
+```text
+Real epoch 1:
+    rebuild current pairs
+    freeze selected pair for three-arm comparison
+    commit one action
+
+Real epoch 2:
+    rebuild pairs from the changed real state
+    freeze the new selected pair
+    ...
+```
+
+### 2. Where is a long segment evaluated?
+
+Not at the segment beginning. The segment has three conceptually different locations:
+
+```text
+segment entry         action station(s)          segment exit
+     │                       │                         │
+     ▼                       ▼                         ▼
+determine membership   trigger a decision       evaluate spacing
+and merge ordering     and apply an action       at this resource
+```
+
+The scoring resource is the segment’s **exit gate**. When an anchor is created:
+
+```python
+anchor.resource_id = segment.exit_resource_id
+```
+
+([anchors.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/anchors.py:383))
+
+The entry gate is used to distinguish:
+
+- aircraft already physically occupying the segment;
+- aircraft committed to enter it later.
+
+The exit gate is where Hailmary asks:
+
+```text
+When will the leader cross the segment exit?
+When will the follower cross it?
+Is the difference close to the required interval?
+```
+
+Actions are considered when the follower crosses an eligible action station—not necessarily at the segment entry ([catalog.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/actions/catalog.py:335)).
+
+For example:
+
+```text
+Segment length: 60 NM
+Required exit interval: 90 s
+
+t=100: F crosses an upstream action station
+       current predicted exit times:
+           L = 900
+           F = 950
+       predicted exit spacing = 50 s
+
+       → three-arm rollout begins at t=100
+       → slowdown/path-stretch/no-op are compared
+       → each arm is graded at the segment exit resource
+```
+
+The branches run until a common horizon:
+
+```text
+last frozen trailer’s baseline segment-exit time
++ one required spacing interval
+```
+
+If there are no trailers, it is the follower’s baseline exit time plus one interval ([outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:86)).
+
+Thus “evaluation at the exit” does not mean the real controller waits until the aircraft physically reaches the exit before choosing. It means the decision is made upstream using temporary rollouts, and the consequence is measured through predicted exit-crossing times after those rollouts.
+
+On a long segment with several action stations, Hailmary can reconsider the traffic repeatedly:
+
+```text
+station 1 → rebuild pairs → rollout → commit
+station 2 → rebuild pairs → rollout → commit
+station 3 → rebuild pairs → rollout → commit
+segment exit
+```
+
+That repeated re-anchoring is precisely what lets the system adapt when merge order or leader–follower identity changes over time.
+
+---
 
 ---
 ### 4. Compute the feature vector
