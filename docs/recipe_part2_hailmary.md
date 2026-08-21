@@ -2,7 +2,7 @@
 
 One `TrafficScenario` contains one one-hour demand window. A `TrafficScenarioBatch` contains many such scenarios, but they are simulated independently.
 
-## a. Full day or individual windows?
+## Full day or individual windows?
 
 Hailmary does not run one continuous full-day simulation. **It only concerns the flights whose terminal-entry times are within the intervened window (say 09:00–10:00)**. The first event in the event queue could start at or later than 09:00, and the last event will correspond to the last flight whose original terminal-arrival time is within the intervend window.
 
@@ -34,8 +34,9 @@ In order to test the demand scaling, run the script:
   --window-start "2026-04-01 09:00"
 ```
 
+---
 
-# Hail Mary proceedings: What happens inside one window?
+# Hail Mary Proceedings: What Happens Inside One Window?
 
 The simplified sequence is:
 
@@ -63,7 +64,7 @@ Apply only selected action to real scenario
 Continue to next event
 ```
 
-### 1. Create the event queue
+## Step 1 — Create the Event Queue
 
 The route graph is already built offline. For the current scenario, Hailmary creates an event-driven simulator containing events such as:
 
@@ -76,7 +77,7 @@ The route graph is already built offline. For the current scenario, Hailmary cre
 
 This is an event heap rather than a newly learned “event graph.” The simulator processes simultaneous events together in [`Simulator.advance_next()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/simulator/engine.py:207).
 
-#### Why is there an Event-driven simulator and why does the event queue matter at all?
+### Why an Event-Driven Simulator?
 
 This is because the simulator does not try to advance the timeline by second or milisecond. Instead, it will look at the key moments in the timeline (similar to *keyframes* in movie-making), and the timeline will just *jump* to these timeline moments. So that's a *leapfrogging* behavior instead.
 
@@ -98,7 +99,7 @@ physical_state(t) = F.current_trajectory(t - F.trajectory_origin_time)
 
 The event queue says when to stop fast-forwarding the films because something relevant happens. An action can replace the unplayed remainder of one film.
 
-### A concrete two-aircraft example
+### A Concrete Two-Aircraft Example
 
 Suppose two arrivals share runway `RWY`:
 
@@ -134,7 +135,7 @@ t=250  RESOURCE_CROSSED(F, RWY)
 t=250  COMPLETED(F)
 ```
 
-### 1. At `t=100`: leader release
+#### 1. At `t=100`: Leader Release
 
 The engine jumps directly to `t=100` and consumes `RELEASED(L)`.
 
@@ -155,7 +156,7 @@ trajectory arrays remain immutable
 
 Nevertheless, asking “where is L at `t=105`?” works by sampling `BASE_L` five seconds after its trajectory origin.
 
-### 2. At `t=110`: follower release
+#### 2. At `t=110`: Follower Release
 
 The same thing happens:
 
@@ -166,7 +167,7 @@ F.lifecycle: scheduled → active
 
 No trajectory changes.
 
-### 3. At `t=130`: follower reaches an action station
+#### 3. At `t=130`: Follower Reaches an Action Station
 
 The event time was calculated in advance from the trajectory:
 
@@ -209,11 +210,11 @@ path-stretch
 
 These are possibilities, not commands.
 
-### 4. Counterfactual comparison
+#### 4. Counterfactual Comparison
 
 Suppose the controller temporarily forks the world.
 
-#### No-op branch
+##### No-op branch
 
 ```text
 F keeps BASE_F
@@ -221,7 +222,7 @@ F runway event remains t=250
 spacing remains 50 seconds
 ```
 
-#### Slowdown branch
+##### Slowdown branch
 
 A slower trajectory variant `SLOW_F` is created. At `t=130`, it is spliced onto the aircraft’s current location:
 
@@ -246,7 +247,7 @@ The slowdown branch therefore receives a better spacing score.
 
 The temporary branches are discarded. If the policy selects slowdown, the same action is applied to the real simulator.
 
-### 5. Applying the selected action
+#### 5. Applying the Selected Action
 
 Applying slowdown changes:
 
@@ -283,7 +284,7 @@ F's position at t=130 after action
 
 There is no teleportation. Only its future changes. This is the purpose of the splice logic in [engine.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/simulator/engine.py:607).
 
-### Where is the conflict event?
+### Where Is the Conflict Event?
 
 There isn’t one.
 
@@ -300,7 +301,7 @@ The engine does not need `CONFLICT_STARTED` and `CONFLICT_ENDED` events. Conflic
 
 ---
 
-### 2. Detect useful aircraft pairs
+## Step 2 — Detect Useful Aircraft Pairs
 
 At every decision-triggering event, Hailmary examines the current route-segment flows.
 
@@ -314,7 +315,7 @@ This is recomputed dynamically because previous speed or path actions may change
 
 If a window has no actionable shared-segment pair, it remains in traffic auditing but contributes no learning experiment.
 
-### 3. Enumerate feasible actions
+## Step 3 — Enumerate Feasible Actions
 
 For each leader/follower pair, the action catalog generates actions bound to the follower, including:
 
@@ -326,7 +327,9 @@ Infeasible actions are omitted. This happens through [`ActionCatalog`](/Volumes/
 
 > **Notice:** Even though the simulator may stop at every action station for every flight, the actions that can be considered are strictly reserved for the pertaining flight only. In other words, if flight `A` hits the action station, then flight `B` does not have the chance to take action.
 
-### Shared Resources—to correctly identify the leader–follower pairs, and provide the necessary delay baseline to compute the pair's features such as: `required_delay_s`, `required_delay_over_speed_capacity`, `required_delay_over_path_capacity`
+### Shared Resources
+
+Shared resources are what let Hailmary correctly identify leader–follower pairs, and they provide the necessary delay baseline to compute the pair's features such as `required_delay_s`, `required_delay_over_speed_capacity`, and `required_delay_over_path_capacity`.
 
 Resources represent shared sequencing gates, including merge boundaries. They are used to establish flows, leader–follower ordering, ETAs, and required spacing. Shared resources produce events (entering and exiting shared resources such as runway threshold or segment begin/end, which defines the keyframes where the event-driven simulator will hop to).
 
@@ -357,16 +360,85 @@ Remark: the (global) conflict detector's use is to be employed by the low-medium
 
 > **Notice:** the `hailmary` code does not use the global conflict detector to grade the rule's reward and therefore use a conflict related value for rule credit assignment. It uses a score that is pair-based, which suits the TMA application more, and provides better causality signal to the learner. 
 
+## Step 4 — Compute the Feature Vector
+
+Hailmary converts the current pair and surrounding traffic into features, including concepts such as:
+
+- predicted spacing error;
+- required separation;
+- distance and time to the shared resource;
+- slowdown and path-stretch capacity;
+- traffic pressure;
+- remaining intervention freedom;
+- downstream-trailer margins;
+- exact airport, runway, segment and cluster identities.
+
+This is done by [`simulator_state_vector()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/state_vector.py:409).
+
+## Step 5 — Match or Create Rules
+
+Existing mutable rules are tested against the feature vector.
+
+Conceptually, a rule looks like:
+
+```text
+IF
+    spacing error is between −90 and 0 seconds
+    AND speed capacity is sufficient
+    AND airport/runway/segment/cluster identities match
+THEN
+    apply medium slowdown to the follower
+```
+
+If the current state lacks rules advocating some feasible actions, the covering mechanism creates initial rules around the current feature point. See [`_freeze_match_sets()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/learning/trainer.py:660).
+
+Thus, candidate actions come from the physical action catalog; candidate rules are created and evolved by the learner.
+
+## Step 6 — Run Three Temporary Rollout Arms
+
+For one selected pair, Hailmary forks the exact same simulator state into:
+
+```text
+Arm A: selected action
+Arm B: strongest rival action
+Arm C: no-op
+```
+
+Each branch runs to the same local outcome horizon under the same frozen continuation policy. It scores spacing, safety, intervention cost and related outcome terms.
+
+The three branches are temporary and discarded afterward. This occurs in [`CausalTrainer.process_epoch()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/learning/trainer.py:1253).
+
+## Step 7 — Update the Rules
+
+Hailmary compares the scores:
+
+```text
+selected − rival
+selected − no-op
+rival − no-op
+```
+
+Those differences update the evidence attached to matching rules. Over repeated windows and decision epochs, the learner:
+
+- accumulates means, variances and confidence bounds;
+- mutates and crosses rules within action niches;
+- specializes overly broad rules;
+- deletes weak rules when the population is full;
+- periodically certifies sufficiently supported rules into a frozen deployment rulebook.
+
+Only Arm A’s initial action is committed to the real scenario. The rival and no-op branches never alter it. The simulator then advances to the next real event.
+
 ---
 
-#### Rule Credit Assignment
+## Rule Credit Assignment: A Worked Example
 
+This section elaborates on how the scoring and credit assignment in Steps 6 and 7 actually work end to end.
 
 The key mental model is: the route graph defines a one-dimensional queue on each shared directed segment. An action is graded by how it repairs one adjacent gap without damaging the following gaps too much.
 
 Also, rules do not receive the branch’s absolute score. They receive score differences between selected, rival, and no-op arms.
 
-### Concrete route-graph example
+### Concrete Route-Graph Example
 
 Suppose five aircraft share segment `S`, whose exit resource requires 90-second spacing:
 
@@ -405,7 +477,7 @@ T1→T2 = 90 s    ideal
 T2→T3 = 90 s    ideal
 ```
 
-### Converting one gap into a score
+### Converting One Gap into a Score
 
 With required interval \(R=90\), each adjacent gap is converted using the piecewise function in [spacing.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/spacing.py:87):
 
@@ -432,7 +504,7 @@ Therefore:
 
 Notice that a 50-second spacing violation still has a slightly positive score. Zero on this scale occurs at 45 seconds; it is not the boundary between legal and illegal spacing.
 
-### Three rollout arms
+### Three Rollout Arms
 
 Suppose the controller compares:
 
@@ -444,7 +516,7 @@ Arm C: no-op
 
 Assume all trajectories remain dynamically feasible and no later interventions occur.
 
-#### Arm C: no-op
+#### Arm C: No-op
 
 The gaps remain:
 
@@ -467,7 +539,7 @@ Total:
 Y_noop = 0.111 + 1.000 = 1.111
 ```
 
-#### Arm A: medium slowdown
+#### Arm A: Medium Slowdown
 
 F moves from `1050` to `1090`:
 
@@ -495,7 +567,7 @@ Y_medium = 1.000 + 0.704 − 0.108
          = 1.595
 ```
 
-#### Arm B: heavy slowdown
+#### Arm B: Heavy Slowdown
 
 F moves to `1110`:
 
@@ -525,7 +597,8 @@ Y_heavy = 1.000 + 0.556 − 0.133 − 0.006
 
 The full composition is implemented directly in [outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:339).
 
-#### Intuitive mental model of the score:
+#### Intuitive Mental Model of the Score
+
 ```
 pair:
     Did we repair the target gap?
@@ -540,7 +613,7 @@ throughput:
     Did the solution create unnecessarily large gaps?
 ```
 
-### How the rules are actually credited
+### How the Rules Are Actually Credited
 
 The arm ordering is:
 
@@ -566,12 +639,13 @@ These differences—not the raw scores—grade the matching rules ([credit.py](/
 
 That distinction is important: heavy slowdown is learned as beneficial relative to doing nothing, but inferior to medium slowdown.
 
+### Nuances: Pair Identity Freezing During Rollouts
 
-#### Nuances: when flows merge together, the pair identities will adapt correctly; but in three-arms roll-out, the pair identities stay frozen. This is to prevent unstable learning of causality
+When flows merge together, the pair identities will adapt correctly; but in a three-arm rollout, the pair identities stay frozen. This is to prevent unstable learning of causality.
 
 Yes, with one crucial qualification: pair identities are refreshed between real decision epochs, but frozen during one three-arm rollout.
 
-### 1. Are pairs adapted over time?
+#### Are Pairs Adapted Over Time?
 
 At every real decision epoch, Hailmary rebuilds the flow for every active route segment:
 
@@ -641,7 +715,7 @@ Real epoch 2:
     ...
 ```
 
-### 2. Where is a long segment evaluated?
+#### Where Is a Long Segment Evaluated?
 
 Not at the segment beginning. The segment has three conceptually different locations:
 
@@ -717,76 +791,7 @@ That repeated re-anchoring is precisely what lets the system adapt when merge or
 
 ---
 
----
-### 4. Compute the feature vector
-
-Hailmary converts the current pair and surrounding traffic into features, including concepts such as:
-
-- predicted spacing error;
-- required separation;
-- distance and time to the shared resource;
-- slowdown and path-stretch capacity;
-- traffic pressure;
-- remaining intervention freedom;
-- downstream-trailer margins;
-- exact airport, runway, segment and cluster identities.
-
-This is done by [`simulator_state_vector()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/state_vector.py:409).
-
-### 5. Match or create rules
-
-Existing mutable rules are tested against the feature vector.
-
-Conceptually, a rule looks like:
-
-```text
-IF
-    spacing error is between −90 and 0 seconds
-    AND speed capacity is sufficient
-    AND airport/runway/segment/cluster identities match
-THEN
-    apply medium slowdown to the follower
-```
-
-If the current state lacks rules advocating some feasible actions, the covering mechanism creates initial rules around the current feature point. See [`_freeze_match_sets()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/learning/trainer.py:660).
-
-Thus, candidate actions come from the physical action catalog; candidate rules are created and evolved by the learner.
-
-### 6. Run three temporary rollout arms
-
-For one selected pair, Hailmary forks the exact same simulator state into:
-
-```text
-Arm A: selected action
-Arm B: strongest rival action
-Arm C: no-op
-```
-
-Each branch runs to the same local outcome horizon under the same frozen continuation policy. It scores spacing, safety, intervention cost and related outcome terms.
-
-The three branches are temporary and discarded afterward. This occurs in [`CausalTrainer.process_epoch()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/learning/trainer.py:1253).
-
-### 7. Update the rules
-
-Hailmary compares the scores:
-
-```text
-selected − rival
-selected − no-op
-rival − no-op
-```
-
-Those differences update the evidence attached to matching rules. Over repeated windows and decision epochs, the learner:
-
-- accumulates means, variances and confidence bounds;
-- mutates and crosses rules within action niches;
-- specializes overly broad rules;
-- deletes weak rules when the population is full;
-- periodically certifies sufficiently supported rules into a frozen deployment rulebook.
-
-Only Arm A’s initial action is committed to the real scenario. The rival and no-op branches never alter it. The simulator then advances to the next real event.
-
-## The key distinction
+## The Key Distinction
 
 ```text
 Within a window:
