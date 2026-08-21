@@ -64,6 +64,27 @@ and runway endpoints before immutable executable arrays are stored. Both-pass
 threshold errors, the calibrated stop tolerance, station mapping, and bank
 persistence are recorded in diagnostics.
 
+### Route-graph compilation
+
+`hailmary-build-offline-corpus` writes `route_graph_input.json` from every
+successfully compiled cluster medoid. The template geometry is reversed into
+flight direction for that file; the graph builder then restores the canonical
+remaining-distance convention where station zero is the runway and distance
+increases upstream. Routes are compared only within one airport/runway
+partition—waypoint names are not consulted.
+
+The builder resamples every medoid at 0.25 NM. At each common station, two
+routes are related when their lateral distance is no greater than the larger of
+the 0.5-NM floor and their observed cluster dispersions, and their tangents are
+within 15 degrees. Gaps up to 0.75 NM are closed, while related runs shorter
+than 5 NM are discarded. Connected components of those pairwise relations
+become cluster memberships along the runway axis. Each uninterrupted membership
+becomes one directed segment; membership changes create merge boundaries, and
+a membership containing multiple clusters is the canonical common traffic
+segment. The result is content-hashed as `route_graph.json`. During scenario
+generation, every segment contributes explicit `:entry` and `:exit` event
+resources with the configured spacing interval (90 seconds by default).
+
 For artifact-oriented workflows, the installed commands are:
 
 ```bash
@@ -73,8 +94,24 @@ hailmary-build-offline-corpus --help
 hailmary-build-route-graph --help
 hailmary-build-traffic-batch --help
 hailmary-simulate --help
+hailmary-visualize-route-graph --help
 hailmary-visualize-event-queue --help
 ```
+
+Inspect the pre-computed route graph before generating learning scenarios:
+
+```bash
+hailmary-visualize-route-graph \
+  --corpus-dir data/artifacts/hailmary/corpus
+```
+
+The local browser GUI reads `route_graph.json` without rebuilding it, overlays
+observed per-cluster counts from `traffic_corpus.json`, and highlights a common
+traffic segment only when the canonical segment record contains more than one
+cluster. Selecting a segment exposes the exact `:entry` and `:exit` resource
+IDs used by runtime events and flow anchors. Route filtering follows stored
+traversal ordinals from upstream entry toward the runway; it does not infer
+connections or sharing from the rendered geometry.
 
 Inspect a scaled traffic window against the production event queue in a local
 browser GUI:

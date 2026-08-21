@@ -523,6 +523,7 @@ hailmary-build-clusters --help
 hailmary-build-templates --help
 hailmary-build-offline-corpus --help
 hailmary-build-route-graph --help
+hailmary-visualize-route-graph --help
 hailmary-build-traffic-batch --help
 hailmary-simulate --help
 ```

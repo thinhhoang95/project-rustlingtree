@@ -355,6 +355,203 @@ Concretely, suppose A and B approach a shared final segment from different branc
 
 Remark: the (global) conflict detector's use is to be employed by the low-medium-high path stretch to measure which variant of the path stretching is optimal. 
 
+> **Notice:** the `hailmary` code does not use the global conflict detector to grade the rule's reward and therefore use a conflict related value for rule credit assignment. It uses a score that is pair-based, which suits the TMA application more, and provides better causality signal to the learner. 
+
+---
+
+#### Rule Credit Assignment
+
+
+The key mental model is: the route graph defines a one-dimensional queue on each shared directed segment. An action is graded by how it repairs one adjacent gap without damaging the following gaps too much.
+
+Also, rules do not receive the branch’s absolute score. They receive score differences between selected, rival, and no-op arms.
+
+### Concrete route-graph example
+
+Suppose five aircraft share segment `S`, whose exit resource requires 90-second spacing:
+
+```text
+upstream                                      segment exit
+L → F → T1 → T2 → T3  ────────────────────────────►
+    ^
+    action is applied to F
+```
+
+The ordering comes from physical progress for current occupants, followed by entry ETA for future entrants. Adjacent pairs become anchors ([anchors.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/anchors.py:311)).
+
+For the decision anchored on `L → F`, the generic outcome cohort is frozen as:
+
+```text
+bound pair:  L → F
+trailers:        F → T1 → T2 → T3
+```
+
+Assume the original predicted exit times are:
+
+| Aircraft | Exit time |
+|---|---:|
+| L | 1000 |
+| F | 1050 |
+| T1 | 1140 |
+| T2 | 1230 |
+| T3 | 1320 |
+
+Thus the original gaps are:
+
+```text
+L→F   = 50 s    deficient
+F→T1  = 90 s    ideal
+T1→T2 = 90 s    ideal
+T2→T3 = 90 s    ideal
+```
+
+### Converting one gap into a score
+
+With required interval \(R=90\), each adjacent gap is converted using the piecewise function in [spacing.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/spacing.py:87):
+
+```text
+gap ≤ 0                  → −1
+0 < gap < 90             → −1 + 2 × gap/90
+90 ≤ gap ≤ 112.5         → +1
+112.5 < gap < 180        → declines linearly
+gap ≥ 180                → −0.5
+```
+
+Therefore:
+
+```text
+50-second gap:
+−1 + 2 × 50/90 = +0.111
+
+90-second gap:
++1.000
+
+30-second gap:
+−1 + 2 × 30/90 = −0.333
+```
+
+Notice that a 50-second spacing violation still has a slightly positive score. Zero on this scale occurs at 45 seconds; it is not the boundary between legal and illegal spacing.
+
+### Three rollout arms
+
+Suppose the controller compares:
+
+```text
+Arm A: medium slowdown, adding 40 s to F
+Arm B: heavy slowdown, adding 60 s to F
+Arm C: no-op
+```
+
+Assume all trajectories remain dynamically feasible and no later interventions occur.
+
+#### Arm C: no-op
+
+The gaps remain:
+
+```text
+50, 90, 90, 90
+```
+
+Therefore:
+
+```text
+pair score        = score(L→F) = 0.111
+propagation score = mean(1, 1, 1) = 1.000
+intervention term = 0
+throughput term   = 0
+```
+
+Total:
+
+```text
+Y_noop = 0.111 + 1.000 = 1.111
+```
+
+#### Arm A: medium slowdown
+
+F moves from `1050` to `1090`:
+
+```text
+L→F   = 90 s
+F→T1  = 50 s
+T1→T2 = 90 s
+T2→T3 = 90 s
+```
+
+The action perfectly repairs the bound pair, but transfers some compression to the first trailer:
+
+```text
+pair score        = 1.000
+propagation score = mean(0.111, 1, 1)
+                  = 0.704
+```
+
+For one 15-knot speed action, the normalized intervention cost is approximately `0.361`; with weight `0.3`, its contribution is `−0.108` ([outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:176)).
+
+No gap exceeds 90 seconds, so the excess-gap throughput term is zero:
+
+```text
+Y_medium = 1.000 + 0.704 − 0.108
+         = 1.595
+```
+
+#### Arm B: heavy slowdown
+
+F moves to `1110`:
+
+```text
+L→F   = 110 s
+F→T1  = 30 s
+T1→T2 = 90 s
+T2→T3 = 90 s
+```
+
+The 110-second bound gap still receives the maximum `+1`, but the first trailer is now heavily compressed:
+
+```text
+pair score        = 1.000
+propagation score = mean(−0.333, 1, 1)
+                  = 0.556
+intervention term = −0.133
+throughput term   = −0.006
+```
+
+The throughput penalty appears because the 110-second gap contains 20 seconds of excess spacing. It is averaged over the four cohort edges and given only weight `0.1`.
+
+```text
+Y_heavy = 1.000 + 0.556 − 0.133 − 0.006
+        = 1.417
+```
+
+The full composition is implemented directly in [outcome.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/evaluation/outcome.py:339). Annotation 1
+
+### How the rules are actually credited
+
+The arm ordering is:
+
+```text
+medium slowdown: 1.595
+heavy slowdown:  1.417
+no-op:           1.111
+```
+
+The learner derives:
+
+```text
+medium − heavy = +0.179
+medium − no-op = +0.484
+heavy  − no-op = +0.306
+```
+
+These differences—not the raw scores—grade the matching rules ([credit.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/learning/credit.py:57)):
+
+- Medium-slowdown rules receive `+0.179` in their rival/evolution ledger and `+0.484` in their no-op/deployment ledger.
+- Heavy-slowdown rules receive `−0.179` in their rival ledger, but still receive `+0.306` versus no-op.
+- No-op rules receive veto evidence of `1.111 − 1.595 = −0.484`.
+
+That distinction is important: heavy slowdown is learned as beneficial relative to doing nothing, but inferior to medium slowdown.
+
+---
 ### 4. Compute the feature vector
 
 Hailmary converts the current pair and surrounding traffic into features, including concepts such as:

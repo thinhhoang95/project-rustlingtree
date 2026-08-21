@@ -17,6 +17,7 @@ from hailmary.cli import (
     simulate,
     visualize_event_queue,
     visualize_offline_corpus,
+    visualize_route_graph,
 )
 from hailmary.clustering import ClusterLibrary
 from hailmary.topology import RouteGraphArtifact
@@ -35,6 +36,7 @@ from .test_adapters import _variant
         simulate.main,
         visualize_event_queue.main,
         visualize_offline_corpus.main,
+        visualize_route_graph.main,
     ],
 )
 def test_cli_help_is_headless_and_successful(entrypoint, capsys) -> None:
@@ -62,6 +64,10 @@ def test_pyproject_registers_hailmary_console_scripts() -> None:
     assert (
         scripts["hailmary-visualize-event-queue"]
         == "hailmary.cli.visualize_event_queue:main"
+    )
+    assert (
+        scripts["hailmary-visualize-route-graph"]
+        == "hailmary.cli.visualize_route_graph:main"
     )
 
 
