@@ -343,11 +343,11 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
       const [x, y] = project(node.lon_deg, node.lat_deg);
       let shape;
       if (node.kind === 'merge') {
-        shape = svgNode('rect', { x: x - 5, y: y - 5, width: 10, height: 10, transform: `rotate(45 ${x} ${y})`, class: 'node merge' });
+        shape = svgNode('rect', { x: x - 3, y: y - 3, width: 6, height: 6, transform: `rotate(45 ${x} ${y})`, class: 'node merge' });
       } else if (node.kind === 'runway_endpoint') {
-        shape = svgNode('rect', { x: x - 6, y: y - 6, width: 12, height: 12, class: 'node runway_endpoint' });
+        shape = svgNode('rect', { x: x - 4, y: y - 4, width: 8, height: 8, class: 'node runway_endpoint' });
       } else {
-        shape = svgNode('circle', { cx: x, cy: y, r: 3.5, class: 'node corridor' });
+        shape = svgNode('circle', { cx: x, cy: y, r: 3, class: 'node corridor' });
       }
       viewport.append(shape);
     });
@@ -358,7 +358,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
   function installMarkers(viewport) {
     const defs = svgNode('defs');
     [['arrow', '#62d9ff'], ['arrow-shared', '#ffbf47']].forEach(([id, color]) => {
-      const marker = svgNode('marker', { id, viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse', markerUnits: 'strokeWidth' });
+      const marker = svgNode('marker', { id, viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse', markerUnits: 'userSpaceOnUse' });
       marker.append(svgNode('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: color }));
       defs.append(marker);
     });
