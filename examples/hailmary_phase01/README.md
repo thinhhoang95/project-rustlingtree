@@ -13,10 +13,13 @@ ADS-B build.
 
 `01_demand_and_scaling.py` demonstrates half-open overlapping demand windows,
 cluster-level half-up scaling, exact scale-one replay, and joint donor
-provenance. `02_route_graph_and_pairing.py` builds three converging routes and
-one nearby parallel route, advances a real simulator, and shows how a live
-speed-profile change rebuilds the planned merge order while preserving every
-`SegmentTraversalDefinition`.
+provenance. `02_route_graph_and_pairing.py` builds converging routes and one
+nearby parallel route, advances a real simulator, and shows how a live
+speed-profile change rebuilds a segment-scoped queue while preserving every
+`SegmentTraversalDefinition`. The topology builder itself is airport-wide and
+can share multiple separated trunks across routes bound for different runways;
+that join/split/rejoin case is covered by the topology tests and route-graph
+verifier.
 
 For the complete repository ADS-B day, run the public artifact chain in order:
 

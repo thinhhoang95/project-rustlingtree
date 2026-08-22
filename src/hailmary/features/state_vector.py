@@ -3,15 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 import numpy as np
 
-from hailmary.config import FeatureConfig, M_PER_NM, MPS_PER_KNOT, ScenarioConfig, TemplateConfig
+from hailmary.config import (
+    FeatureConfig,
+    M_PER_NM,
+    MPS_PER_KNOT,
+    ScenarioConfig,
+    TemplateConfig,
+)
 from hailmary.evaluation.spacing import compute_spacing
 from hailmary.features.anchors import LeaderFollowerAnchor
 from hailmary.features.minimum_time import ReachabilityMap
-from hailmary.features.schema import FeatureSchema, FeatureVector, leader_follower_feature_schema
+from hailmary.features.schema import (
+    FeatureSchema,
+    FeatureVector,
+    leader_follower_feature_schema,
+)
 
 
 def _clip01(value: float) -> float:
@@ -43,7 +61,9 @@ def commitment_components(
     station_fraction = _clip01(remaining_station_fraction)
     budget_fraction = _clip01(remaining_intervention_budget_fraction)
     gate_component = _clip01(intercept_or_final_gate_flag)
-    time_component = _clip01(1.0 - float(time_to_threshold_s) / cfg.commitment_time_scale_s)
+    time_component = _clip01(
+        1.0 - float(time_to_threshold_s) / cfg.commitment_time_scale_s
+    )
     freedom_remaining = float(
         cfg.station_freedom_weight * station_fraction
         + cfg.budget_freedom_weight * budget_fraction
@@ -114,7 +134,8 @@ class LeaderFollowerFeatureInputs:
     live_nominal_etas_s: tuple[float, ...]
     trailing_spacing_margins_s: tuple[float, ...] = ()
     airport: str = "UNKNOWN"
-    runway: str = "UNKNOWN"
+    leader_runway: str = "UNKNOWN"
+    follower_runway: str = "UNKNOWN"
     segment: str = "UNKNOWN"
     leader_cluster: str = "unassigned"
     follower_cluster: str = "unassigned"
@@ -137,19 +158,31 @@ class LeaderFollowerFeatureInputs:
             raise ValueError("feature input scalars must be finite")
         if self.required_interval_s <= 0.0:
             raise ValueError("required_interval_s must be positive")
-        if self.follower_distance_to_resource_m < 0.0 or self.leader_distance_to_resource_m < 0.0:
+        if (
+            self.follower_distance_to_resource_m < 0.0
+            or self.leader_distance_to_resource_m < 0.0
+        ):
             raise ValueError("resource distances cannot be negative")
         if self.follower_cas_kts < 0.0 or self.follower_cas_lower_kts < 0.0:
             raise ValueError("CAS values cannot be negative")
         if self.total_action_station_count <= 0 or self.total_intervention_budget <= 0:
             raise ValueError("action-station and intervention totals must be positive")
-        if not 0 <= self.remaining_action_station_count <= self.total_action_station_count:
+        if (
+            not 0
+            <= self.remaining_action_station_count
+            <= self.total_action_station_count
+        ):
             raise ValueError("remaining action-station count is out of range")
-        if not 0 <= self.remaining_intervention_budget <= self.total_intervention_budget:
+        if (
+            not 0
+            <= self.remaining_intervention_budget
+            <= self.total_intervention_budget
+        ):
             raise ValueError("remaining intervention budget is out of range")
         categories = (
             self.airport,
-            self.runway,
+            self.leader_runway,
+            self.follower_runway,
             self.segment,
             self.leader_cluster,
             self.follower_cluster,
@@ -165,7 +198,9 @@ class LeaderFollowerFeatureInputs:
             "effective_remaining_intervention_budget_fraction",
         ):
             value = getattr(self, name)
-            if value is not None and (not np.isfinite(value) or not 0.0 <= value <= 1.0):
+            if value is not None and (
+                not np.isfinite(value) or not 0.0 <= value <= 1.0
+            ):
                 raise ValueError(f"{name} must lie in [0, 1] when supplied")
 
 
@@ -257,11 +292,15 @@ def derive_leader_follower_state_vector(
         "required_interval_s": spacing.required_interval_s,
         "follower_time_to_resource_s": follower_time,
         "leader_time_to_resource_s": leader_time,
-        "follower_distance_to_resource_m": float(inputs.follower_distance_to_resource_m),
+        "follower_distance_to_resource_m": float(
+            inputs.follower_distance_to_resource_m
+        ),
         "leader_distance_to_resource_m": float(inputs.leader_distance_to_resource_m),
         "follower_cas_kts": float(inputs.follower_cas_kts),
         "follower_cas_lower_kts": float(inputs.follower_cas_lower_kts),
-        "follower_cas_margin_kts": float(inputs.follower_cas_kts - inputs.follower_cas_lower_kts),
+        "follower_cas_margin_kts": float(
+            inputs.follower_cas_kts - inputs.follower_cas_lower_kts
+        ),
         "speed_capacity_s": speed_capacity,
         "path_capacity_s": path_capacity,
         "required_delay_over_speed_capacity": speed_ratio,
@@ -288,7 +327,9 @@ def derive_leader_follower_state_vector(
             "capacity_slots": pressure_capacity,
             "window_s": scenario_cfg.pressure_window_s,
             "window_start_s": float(inputs.sim_time_s),
-            "window_end_exclusive_s": float(inputs.sim_time_s + scenario_cfg.pressure_window_s),
+            "window_end_exclusive_s": float(
+                inputs.sim_time_s + scenario_cfg.pressure_window_s
+            ),
         },
         "commitment": {
             "time_component": commitment.time_component,
@@ -309,7 +350,8 @@ def derive_leader_follower_state_vector(
         named,
         categories={
             "airport": inputs.airport,
-            "runway": inputs.runway,
+            "leader_runway": inputs.leader_runway,
+            "follower_runway": inputs.follower_runway,
             "segment": inputs.segment,
             "leader_cluster": inputs.leader_cluster,
             "follower_cluster": inputs.follower_cluster,
@@ -326,13 +368,17 @@ class LeaderFollowerStateQuery(Protocol):
 
     def nominal_eta_s(self, state: Any, flight_id: str, resource_id: str) -> float: ...
 
-    def distance_to_resource_m(self, state: Any, flight_id: str, resource_id: str) -> float: ...
+    def distance_to_resource_m(
+        self, state: Any, flight_id: str, resource_id: str
+    ) -> float: ...
 
     def cas_kts(self, state: Any, flight_id: str) -> float: ...
 
     def cas_lower_kts(self, state: Any, flight_id: str) -> float: ...
 
-    def reachability_map(self, state: Any, flight_id: str, resource_id: str) -> ReachabilityMap: ...
+    def reachability_map(
+        self, state: Any, flight_id: str, resource_id: str
+    ) -> ReachabilityMap: ...
 
     def intercept_or_final_gate_flag(self, state: Any, flight_id: str) -> float: ...
 
@@ -363,9 +409,15 @@ def state_vector_from_query(
     scenario_config: ScenarioConfig | None = None,
     schema: FeatureSchema | None = None,
 ) -> FeatureVector:
-    remaining_stations, total_stations = query.action_station_counts(state, anchor.follower_id)
-    remaining_budget, total_budget = query.intervention_budget(state, anchor.follower_id)
-    live_ids = tuple(str(item) for item in query.live_flight_ids(state, anchor.resource_id))
+    remaining_stations, total_stations = query.action_station_counts(
+        state, anchor.follower_id
+    )
+    remaining_budget, total_budget = query.intervention_budget(
+        state, anchor.follower_id
+    )
+    live_ids = tuple(
+        str(item) for item in query.live_flight_ids(state, anchor.resource_id)
+    )
     live_etas = tuple(
         float(query.nominal_eta_s(state, flight_id, anchor.resource_id))
         for flight_id in live_ids
@@ -374,7 +426,9 @@ def state_vector_from_query(
     inputs = LeaderFollowerFeatureInputs(
         sim_time_s=query.simulation_time_s(state),
         leader_eta_s=query.nominal_eta_s(state, anchor.leader_id, anchor.resource_id),
-        follower_eta_s=query.nominal_eta_s(state, anchor.follower_id, anchor.resource_id),
+        follower_eta_s=query.nominal_eta_s(
+            state, anchor.follower_id, anchor.resource_id
+        ),
         required_interval_s=required_interval_s,
         follower_distance_to_resource_m=query.distance_to_resource_m(
             state, anchor.follower_id, anchor.resource_id
@@ -384,16 +438,23 @@ def state_vector_from_query(
         ),
         follower_cas_kts=query.cas_kts(state, anchor.follower_id),
         follower_cas_lower_kts=query.cas_lower_kts(state, anchor.follower_id),
-        reachability=query.reachability_map(state, anchor.follower_id, anchor.resource_id),
-        intercept_or_final_gate_flag=query.intercept_or_final_gate_flag(state, anchor.follower_id),
+        reachability=query.reachability_map(
+            state, anchor.follower_id, anchor.resource_id
+        ),
+        intercept_or_final_gate_flag=query.intercept_or_final_gate_flag(
+            state, anchor.follower_id
+        ),
         remaining_action_station_count=remaining_stations,
         total_action_station_count=total_stations,
         remaining_intervention_budget=remaining_budget,
         total_intervention_budget=total_budget,
         live_nominal_etas_s=live_etas,
-        trailing_spacing_margins_s=tuple(query.trailing_spacing_margins_s(state, anchor)),
+        trailing_spacing_margins_s=tuple(
+            query.trailing_spacing_margins_s(state, anchor)
+        ),
         airport=scope["airport"],
-        runway=scope["runway"],
+        leader_runway=scope["leader_runway"],
+        follower_runway=scope["follower_runway"],
         segment=scope["segment"],
         leader_cluster=scope["leader_cluster"],
         follower_cluster=scope["follower_cluster"],
@@ -430,7 +491,9 @@ def simulator_state_vector(
         anchor.state_version != str(state.dynamic_content_hash)
         or anchor.epoch != state.decision_epoch_index
     ):
-        raise StaleActionError("leader/follower anchor was derived from a stale simulator epoch")
+        raise StaleActionError(
+            "leader/follower anchor was derived from a stale simulator epoch"
+        )
     feature_cfg = _scenario_feature_config(simulator, feature_config)
     template_cfg = _scenario_template_config(simulator, template_config)
     resource = state.definition.resource(anchor.resource_id)
@@ -438,7 +501,9 @@ def simulator_state_vector(
     predictions = active_resource_predictions(simulator, resource_id=anchor.resource_id)
     by_flight = {item.flight_id: item for item in predictions}
     if anchor.leader_id not in by_flight or anchor.follower_id not in by_flight:
-        raise StaleActionError("anchor flights are no longer active at the bound resource")
+        raise StaleActionError(
+            "anchor flights are no longer active at the bound resource"
+        )
     leader = by_flight[anchor.leader_id]
     follower = by_flight[anchor.follower_id]
 
@@ -451,7 +516,9 @@ def simulator_state_vector(
         required=True,
     )
     if follower.sample.cas_mps is None or lower_cas_mps is None:
-        raise ValueError("canonical follower variant must expose CAS and its lower envelope")
+        raise ValueError(
+            "canonical follower variant must expose CAS and its lower envelope"
+        )
 
     (
         remaining_stations,
@@ -468,12 +535,15 @@ def simulator_state_vector(
 
     from hailmary.features.anchors import build_current_segment_anchors
 
-    ordered = build_current_segment_anchors(simulator).flow_for_segment(
-        anchor.segment_id
-    ).ordered_flight_ids
+    ordered = (
+        build_current_segment_anchors(simulator)
+        .flow_for_segment(anchor.segment_id)
+        .ordered_flight_ids
+    )
     follower_index = ordered.index(anchor.follower_id)
     trailing = tuple(
-        by_flight[flight_id] for flight_id in ordered[follower_index + 1 : follower_index + 4]
+        by_flight[flight_id]
+        for flight_id in ordered[follower_index + 1 : follower_index + 4]
     )
     trailing_margins: list[float] = []
     previous_eta = follower.eta_s
@@ -490,6 +560,8 @@ def simulator_state_vector(
         return str(getattr(variant, "cluster_id", "unassigned") or "unassigned")
 
     resource_metadata = resource.metadata_dict
+    leader_definition = state.definition.flight(anchor.leader_id)
+    follower_definition = state.definition.flight(anchor.follower_id)
     reachability = simulator_reachability_map(
         simulator,
         flight_id=anchor.follower_id,
@@ -522,8 +594,10 @@ def simulator_state_vector(
         live_nominal_etas_s=live_etas,
         trailing_spacing_margins_s=tuple(trailing_margins),
         airport=str(resource_metadata.get("airport", "UNKNOWN")),
-        runway=str(resource_metadata.get("runway", "UNKNOWN")),
-        segment=anchor.segment_id or str(resource_metadata.get("segment_id", "UNKNOWN")),
+        leader_runway=str(leader_definition.runway or "UNKNOWN"),
+        follower_runway=str(follower_definition.runway or "UNKNOWN"),
+        segment=anchor.segment_id
+        or str(resource_metadata.get("segment_id", "UNKNOWN")),
         leader_cluster=cluster_label(anchor.leader_id),
         follower_cluster=cluster_label(anchor.follower_id),
         effective_remaining_action_station_fraction=effective_station_fraction,
@@ -546,8 +620,12 @@ def _simulator_intervention_freedom(
     dynamic = state.flight(flight_id)
     definition = state.definition.flight(flight_id)
     crossed = set(dynamic.crossed_action_station_keys)
-    speed_budget_available = dynamic.speed_action_count < template_config.max_speed_actions
-    stretch_budget_available = dynamic.path_stretch_count < template_config.max_path_stretches
+    speed_budget_available = (
+        dynamic.speed_action_count < template_config.max_speed_actions
+    )
+    stretch_budget_available = (
+        dynamic.path_stretch_count < template_config.max_path_stretches
+    )
     remaining_stations = sum(
         1
         for station in definition.action_stations
@@ -558,8 +636,12 @@ def _simulator_intervention_freedom(
         )
     )
     total_stations = max(1, len(definition.action_stations))
-    total_budget = template_config.max_speed_actions + template_config.max_path_stretches
-    remaining_budget = max(0, template_config.max_speed_actions - dynamic.speed_action_count) + max(
+    total_budget = (
+        template_config.max_speed_actions + template_config.max_path_stretches
+    )
+    remaining_budget = max(
+        0, template_config.max_speed_actions - dynamic.speed_action_count
+    ) + max(
         0,
         template_config.max_path_stretches - dynamic.path_stretch_count,
     )
@@ -625,7 +707,9 @@ def simulator_flight_commitment_components(
     try:
         prediction = next(item for item in predictions if item.flight_id == flight_id)
     except StopIteration as exc:
-        raise ValueError(f"flight {flight_id!r} is not active at resource {resolved_resource!r}") from exc
+        raise ValueError(
+            f"flight {flight_id!r} is not active at resource {resolved_resource!r}"
+        ) from exc
     state = simulator.state
     dynamic = state.flight(flight_id)
     (

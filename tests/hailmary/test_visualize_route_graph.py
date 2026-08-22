@@ -81,6 +81,7 @@ def test_view_uses_canonical_shared_membership_and_runtime_resource_ids() -> Non
 
     assert shared
     assert shared[0]["cluster_count"] == 2
+    assert shared[0]["runway_ids"] == ["RW18R"]
     assert shared[0]["observed_arrival_count"] == 3
     assert shared[0]["entry_resource_id"].endswith(":entry")
     assert shared[0]["exit_resource_id"].endswith(":exit")
@@ -104,4 +105,4 @@ def test_local_web_app_serves_map_and_canonical_payload() -> None:
     assert "Common traffic segment" in page.text
     assert "Runtime interpretation" in page.text
     assert response.status_code == 200
-    assert response.json()["schema_version"] == "hailmary.route_graph.viewer.v1"
+    assert response.json()["schema_version"] == "hailmary.route_graph.viewer.v2"

@@ -70,7 +70,9 @@ def test_commitment_uses_declared_transparent_formula() -> None:
 
     assert components.time_component == pytest.approx(0.5)
     assert components.freedom_remaining == pytest.approx(0.5 * 0.5 + 0.5 * (1.0 / 3.0))
-    assert components.freedom_component == pytest.approx(1.0 - components.freedom_remaining)
+    assert components.freedom_component == pytest.approx(
+        1.0 - components.freedom_remaining
+    )
     assert components.commitment_fraction == pytest.approx(
         (components.time_component + components.freedom_component + 1.0) / 3.0
     )
@@ -101,7 +103,8 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
         live_nominal_etas_s=(99.0, 100.0, 699.999, 700.0),
         trailing_spacing_margins_s=(),
         airport="KATL",
-        runway="RW18R",
+        leader_runway="RW18R",
+        follower_runway="RW19L",
         segment="segment-common",
         leader_cluster="KATL:RW18R:1",
         follower_cluster="KATL:RW18R:2",
@@ -113,7 +116,7 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
         scenario_config=ScenarioConfig(),
     )
 
-    assert vector.schema.schema_version == "hailmary.features.leader_follower.v2"
+    assert vector.schema.schema_version == "hailmary.features.leader_follower.v3"
     assert vector.schema_hash == leader_follower_feature_schema().schema_hash
     assert vector.values.dtype == np.float64
     assert np.isfinite(vector.values).all()
@@ -128,7 +131,8 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
     assert vector.diagnostics["pressure"]["count"] == 2
     assert dict(vector.categories) == {
         "airport": "KATL",
-        "runway": "RW18R",
+        "leader_runway": "RW18R",
+        "follower_runway": "RW19L",
         "segment": "segment-common",
         "leader_cluster": "KATL:RW18R:1",
         "follower_cluster": "KATL:RW18R:2",

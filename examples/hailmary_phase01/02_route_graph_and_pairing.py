@@ -7,6 +7,7 @@ import json
 import numpy as np
 
 from hailmary.actions import ActionCatalog, ActionLever, realize_speed_variant
+from hailmary.actions.splice import preserve_compiled_live_prefix
 from hailmary.features import build_current_segment_anchors
 from hailmary.geometry import LocalFrame
 from hailmary.scenario import (
@@ -48,7 +49,9 @@ def _resample_path(points: tuple[tuple[float, float], ...]) -> tuple[np.ndarray,
     return stations, east, north
 
 
-def _variant(cluster_id: str, points: tuple[tuple[float, float], ...], speed: float) -> TrajectoryVariant:
+def _variant(
+    cluster_id: str, points: tuple[tuple[float, float], ...], speed: float
+) -> TrajectoryVariant:
     stations, east, north = _resample_path(points)
     frame = LocalFrame(0.0, 0.0)
     lat, lon = frame.unproject(east, north)
@@ -101,7 +104,9 @@ def _template(
 def _anchor_summary(simulator: Simulator, shared_segment_id: str) -> dict[str, object]:
     anchors = build_current_segment_anchors(simulator)
     flow = anchors.flow_for_segment(shared_segment_id)
-    order = {flight_id: index for index, flight_id in enumerate(flow.ordered_flight_ids)}
+    order = {
+        flight_id: index for index, flight_id in enumerate(flow.ordered_flight_ids)
+    }
     pairs = [
         {
             "leader": item.leader_id,
@@ -143,14 +148,11 @@ def main() -> None:
     shared = next(
         segment
         for segment in graph.segments
-        if segment.cluster_ids
-        == ("KATL:RW18R:C1", "KATL:RW18R:C2", "KATL:RW18R:C3")
+        if segment.cluster_ids == ("KATL:RW18R:C1", "KATL:RW18R:C2", "KATL:RW18R:C3")
     )
 
     templates = {
-        f"KATL:RW18R:{cluster}": _template(
-            cluster, points, 100.0
-        )
+        f"KATL:RW18R:{cluster}": _template(cluster, points, 100.0)
         for cluster, points in LOCAL_PATHS.items()
     }
     releases = {
@@ -226,11 +228,17 @@ def main() -> None:
         simulator.state.flight("C_C3_FUTURE").current_variant_id
     )
     current_station = simulator.sample_flight("C_C3_FUTURE").s_m
-    slow_variant = realize_speed_variant(
+    realized_variant = realize_speed_variant(
         current_variant,
         anchor_s_m=current_station,
         band="example_delay",
         reduction_kts=55.0,
+    )
+    slow_variant = preserve_compiled_live_prefix(
+        current_variant,
+        realized_variant,
+        parent_anchor_s_m=current_station,
+        child_anchor_s_m=current_station,
     )
     simulator.install_variant(slow_variant)
     simulator.replace_flight_variant(
@@ -253,9 +261,7 @@ def main() -> None:
     }
     required_crossing_ids = {
         resource_id
-        for traversal in scenario.definition.flight(
-            "C_C3_FUTURE"
-        ).segment_traversals
+        for traversal in scenario.definition.flight("C_C3_FUTURE").segment_traversals
         for resource_id in (
             traversal.entry_resource_id,
             traversal.exit_resource_id,

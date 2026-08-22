@@ -326,8 +326,8 @@ For one anchor, `simulator_state_vector` gathers:
 - demand pressure in the configured half-open time window; and
 - trailing-flight spacing context.
 
-The values and exact airport/runway/segment/cluster categories are encoded
-through feature schema v2, producing a `FeatureVector` whose field order,
+The values and exact airport/leader-runway/follower-runway/segment/cluster
+categories are encoded through feature schema v3, producing a `FeatureVector` whose field order,
 masks, categorical scope, and schema identity are explicit.
 Commitment is a measured combination of time, remaining freedom, and final-gate
 status.

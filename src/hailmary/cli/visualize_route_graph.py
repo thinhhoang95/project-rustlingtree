@@ -6,6 +6,7 @@ import argparse
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from importlib import import_module
 from pathlib import Path
 import threading
 import webbrowser
@@ -100,7 +101,7 @@ def build_route_graph_view(
             {
                 "segment_id": segment.segment_id,
                 "airport": segment.airport,
-                "runway": segment.runway,
+                "runway_ids": list(segment.runway_ids),
                 "entry_node_id": segment.entry_node_id,
                 "exit_node_id": segment.exit_node_id,
                 "entry_resource_id": segment.entry_resource_id,
@@ -132,11 +133,12 @@ def build_route_graph_view(
     for cluster_id, records in sorted(traversals_by_cluster.items()):
         ordered = sorted(records, key=lambda item: item.ordinal)
         first_segment = artifact.segment(ordered[0].segment_id)
+        _, runway, _ = cluster_id.split(":", 2)
         routes.append(
             {
                 "qualified_cluster_id": cluster_id,
                 "airport": first_segment.airport,
-                "runway": first_segment.runway,
+                "runway": runway,
                 "observed_arrival_count": traffic_by_cluster[cluster_id],
                 "traversals": [
                     {
@@ -152,16 +154,10 @@ def build_route_graph_view(
             }
         )
 
-    partition_keys = sorted(
-        {(segment.airport, segment.runway) for segment in artifact.segments}
-    )
+    partition_keys = sorted({segment.airport for segment in artifact.segments})
     partitions = []
-    for airport, runway in partition_keys:
-        partition_segments = [
-            item
-            for item in segments
-            if item["airport"] == airport and item["runway"] == runway
-        ]
+    for airport in partition_keys:
+        partition_segments = [item for item in segments if item["airport"] == airport]
         partition_clusters = {
             cluster_id
             for item in partition_segments
@@ -169,9 +165,15 @@ def build_route_graph_view(
         }
         partitions.append(
             {
-                "key": f"{airport}:{runway}",
+                "key": airport,
                 "airport": airport,
-                "runway": runway,
+                "runway_ids": sorted(
+                    {
+                        runway
+                        for item in partition_segments
+                        for runway in item["runway_ids"]
+                    }
+                ),
                 "segment_count": len(partition_segments),
                 "shared_segment_count": sum(
                     bool(item["shared"]) for item in partition_segments
@@ -184,9 +186,10 @@ def build_route_graph_view(
         )
 
     shared_segments = [item for item in segments if item["shared"]]
-    merge_nodes = [item for item in nodes if item["kind"] == "merge"]
+    merge_nodes = [item for item in nodes if item["kind"] in {"merge", "merge_split"}]
+    split_nodes = [item for item in nodes if item["kind"] in {"split", "merge_split"}]
     payload: dict[str, object] = {
-        "schema_version": "hailmary.route_graph.viewer.v1",
+        "schema_version": "hailmary.route_graph.viewer.v2",
         "dataset_id": artifact.dataset_id,
         "artifact_content_hash": artifact.artifact_content_hash,
         "route_graph_source": route_graph_source,
@@ -198,6 +201,7 @@ def build_route_graph_view(
             "segment_count": len(segments),
             "shared_segment_count": len(shared_segments),
             "merge_node_count": len(merge_nodes),
+            "split_node_count": len(split_nodes),
             "observed_arrival_count": 0 if corpus is None else len(corpus.arrivals),
         },
         "coverage": {
@@ -214,7 +218,10 @@ def build_route_graph_view(
                 "Canonical RouteGraphArtifact records; the viewer does not infer "
                 "sharing from rendered geometry."
             ),
-            "shared_segment_rule": "A segment is shared exactly when cluster_count > 1.",
+            "shared_segment_rule": (
+                "A segment is shared exactly when cluster_count > 1, regardless "
+                "of the routes' destination runways."
+            ),
             "geometry_direction": (
                 "Every segment polyline runs from upstream entry gate to downstream "
                 "exit gate, matching traversal order toward the runway."
@@ -226,7 +233,8 @@ def build_route_graph_view(
             ),
             "queue_resource": (
                 "Each static segment becomes :entry and :exit resources; live flow "
-                "anchors are bound to the segment exit resource."
+                "anchors are bound to the segment exit resource and pair identity "
+                "is scoped by segment."
             ),
         },
         "partitions": partitions,
@@ -258,21 +266,22 @@ def _load_view(args: argparse.Namespace) -> RouteGraphView:
 
 
 def create_app(view: RouteGraphView):
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, JSONResponse
+    # Keep the optional web stack outside the static core dependency graph.
+    fastapi = import_module("fastapi")
+    responses = import_module("fastapi.responses")
 
-    app = FastAPI(
+    app = fastapi.FastAPI(
         title="Hailmary route-graph verifier",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/", response_class=responses.HTMLResponse)
     def index() -> str:
         return ROUTE_GRAPH_HTML
 
-    @app.get("/api/route-graph", response_class=JSONResponse)
+    @app.get("/api/route-graph", response_class=responses.JSONResponse)
     def route_graph_payload() -> dict[str, object]:
         return view.to_dict()
 

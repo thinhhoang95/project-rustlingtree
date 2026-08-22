@@ -37,7 +37,12 @@ class LeaderFollowerAnchor:
             raise ValueError("epoch cannot be negative")
         if self.segment_id and not self.entry_resource_id:
             raise ValueError("segment anchors require an entry resource")
-        if self.ordering_basis not in {"eta", "physical_progress", "entry_eta", "mixed"}:
+        if self.ordering_basis not in {
+            "eta",
+            "physical_progress",
+            "entry_eta",
+            "mixed",
+        }:
             raise ValueError("unknown leader/follower ordering basis")
         if self.predicted_exit_interval_s is not None and not np.isfinite(
             self.predicted_exit_interval_s
@@ -131,11 +136,24 @@ class ResourceAnchors:
 
 @dataclass(frozen=True)
 class SegmentAnchorSet:
-    """All canonical segment queues for one real simulator epoch."""
+    """Complete segment-scoped situation awareness for one simulator epoch.
+
+    The same two flights may form different directed edges on multiple future
+    corridors.  Their identity is therefore ``(segment, leader, follower)``;
+    callers must not collapse the set to unordered aircraft pairs.
+    """
 
     flows: tuple[FlowAnchor, ...]
     leader_follower: tuple[LeaderFollowerAnchor, ...]
     aircraft_resource: tuple[AircraftResourceAnchor, ...]
+
+    def __post_init__(self) -> None:
+        identities = [
+            (item.segment_id, item.leader_id, item.follower_id)
+            for item in self.leader_follower
+        ]
+        if len(set(identities)) != len(identities):
+            raise ValueError("segment awareness contains duplicate directed edges")
 
     def flow_for_segment(self, segment_id: str) -> FlowAnchor:
         for flow in self.flows:
@@ -171,7 +189,10 @@ def order_flights_by_eta(eta_by_flight: Mapping[str, float]) -> tuple[str, ...]:
         if not np.isfinite(eta):
             raise ValueError(f"non-finite ETA for {flight_id!r}")
         normalized.append((eta, str(flight_id)))
-    return tuple(flight_id for _eta, flight_id in sorted(normalized, key=lambda item: (item[0], item[1])))
+    return tuple(
+        flight_id
+        for _eta, flight_id in sorted(normalized, key=lambda item: (item[0], item[1]))
+    )
 
 
 def build_resource_anchors(
@@ -265,7 +286,9 @@ def resource_eta_s(simulator: Any, flight_id: str, resource_id: str) -> float:
     variant = state.definition.variant(dynamic.current_variant_id)
     trajectory = MonotoneTrajectory.from_variant(variant)
     station = resource_station_m(simulator, str(flight_id), str(resource_id))
-    return float(dynamic.trajectory_clock_origin_s + trajectory.elapsed_at_station(station))
+    return float(
+        dynamic.trajectory_clock_origin_s + trajectory.elapsed_at_station(station)
+    )
 
 
 def active_resource_predictions(
@@ -335,7 +358,7 @@ def build_current_segment_anchors(simulator: Any) -> SegmentAnchorSet:
 
     flows: list[FlowAnchor] = []
     aircraft: list[AircraftResourceAnchor] = []
-    candidates: list[tuple[tuple[str, str], int, LeaderFollowerAnchor]] = []
+    edges: list[LeaderFollowerAnchor] = []
     for segment_id, records in sorted(traversals_by_segment.items()):
         occupants: list[tuple[float, str, Any]] = []
         future: list[tuple[float, str, Any]] = []
@@ -399,7 +422,6 @@ def build_current_segment_anchors(simulator: Any) -> SegmentAnchorSet:
             )
             for flight_id in ordered
         )
-        traversal_by_flight = {item[1]: item[2] for item in ordered_records}
         for leader_id, follower_id in zip(ordered, ordered[1:], strict=False):
             leader_basis = basis_by_flight[leader_id]
             follower_basis = basis_by_flight[follower_id]
@@ -417,25 +439,11 @@ def build_current_segment_anchors(simulator: Any) -> SegmentAnchorSet:
                 predicted_exit_interval_s=interval,
                 catch_up=bool(interval < 0.0),
             )
-            first_ordinal = max(
-                traversal_by_flight[leader_id].ordinal,
-                traversal_by_flight[follower_id].ordinal,
-            )
-            candidates.append((tuple(sorted((leader_id, follower_id))), first_ordinal, anchor))
-
-    # One pair is bound to the earliest unpassed segment on its common suffix.
-    selected: dict[tuple[str, str], tuple[int, LeaderFollowerAnchor]] = {}
-    for pair, ordinal, anchor in candidates:
-        current = selected.get(pair)
-        if current is None or (ordinal, anchor.segment_id) < (
-            current[0],
-            current[1].segment_id,
-        ):
-            selected[pair] = (ordinal, anchor)
+            edges.append(anchor)
     return SegmentAnchorSet(
         flows=tuple(sorted(flows, key=lambda item: item.resource_id)),
         leader_follower=tuple(
-            sorted((item[1] for item in selected.values()), key=lambda item: item.anchor_id)
+            sorted(edges, key=lambda item: (item.segment_id, item.anchor_id))
         ),
         aircraft_resource=tuple(sorted(aircraft, key=lambda item: item.anchor_id)),
     )

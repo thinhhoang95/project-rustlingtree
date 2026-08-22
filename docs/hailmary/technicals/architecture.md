@@ -326,6 +326,13 @@ airport/runway/cluster identities, and static `SegmentTraversalDefinition`
 records. `RouteGraphArtifact` contributes the segment entry/exit resources.
 There is no factorial generation or correlation gate.
 
+Route-graph schema v2 is partitioned by airport, not destination runway.
+Physical, co-directional medoid corridors are shared across runway clusters;
+each route traversal retains its own station coordinates while shared
+segments retain one resource identity. Directed incidence produces explicit
+merge and split nodes, so join/split/rejoin paths do not depend on a common
+suffix assumption.
+
 ## 8. Runtime event engine
 
 ### 8.1 Initial event materialization

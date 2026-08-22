@@ -72,13 +72,13 @@
     ],
     "follower": "D_C2_FUTURE",
     "leader": "A_C3_OCCUPANT",
-    "segment_id": "segment_c378e643fa3bbe4099e28a7d9047",
+    "segment_id": "segment_48c8d6fff451140a7d253781b255",
     "time_s": -183.3
   },
   "parallel_route": {
     "appears_in_shared_segment": false,
     "segment_ids": [
-      "segment_bab24be25ed21cb91d426e81149f"
+      "segment_a090803196a1c00a8673bf7907eb"
     ]
   },
   "registered_thresholds": {
@@ -86,10 +86,10 @@
     "minimum_common_length_nm": 5.0,
     "tangent_tolerance_deg": 15.0
   },
-  "route_graph_hash": "cae02a700c6a189c77304b4615b029d8d784938e2f4a238baa051396a974d2ef",
+  "route_graph_hash": "279e4ce1b3f3c86423e2aba7628e2073aa3a6a7e154df4efbcd3d1851f6c613d",
   "segment_membership": [
-    "segment_c88058491f22524fa8a007bd2563",
-    "segment_c378e643fa3bbe4099e28a7d9047"
+    "segment_02460d9dede1f56f797015d0a02d",
+    "segment_48c8d6fff451140a7d253781b255"
   ],
   "segment_membership_unchanged": true,
   "shared_segment": {
@@ -98,8 +98,8 @@
       "KATL:RW18R:C2",
       "KATL:RW18R:C3"
     ],
-    "length_nm": 8.5,
-    "segment_id": "segment_c378e643fa3bbe4099e28a7d9047"
+    "length_nm": 8.583,
+    "segment_id": "segment_48c8d6fff451140a7d253781b255"
   },
   "variant_segment_crossings_complete": true
 }

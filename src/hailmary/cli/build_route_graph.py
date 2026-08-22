@@ -1,11 +1,11 @@
-"""Build a versioned route graph from medoid polyline geometry."""
+"""Build an airport-wide versioned route graph from medoid geometry."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from hailmary.topology import MedoidRoute, RouteGraphConfig, build_route_graph
 
@@ -36,7 +36,13 @@ def _load_routes(path: Path) -> tuple[MedoidRoute, ...]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hailmary-build-route-graph")
+    parser = argparse.ArgumentParser(
+        prog="hailmary-build-route-graph",
+        description=(
+            "Compile all medoid routes at each airport into shared directed "
+            "corridors, including corridors used by different runways."
+        ),
+    )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lateral-floor-nm", type=float, default=0.5)
@@ -62,7 +68,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=config,
         provenance={
             "input": args.input.resolve().as_posix(),
-            "source_hashes": sorted({item.source_hash for item in routes if item.source_hash}),
+            "source_hashes": sorted(
+                {item.source_hash for item in routes if item.source_hash}
+            ),
         },
     )
     artifact.write(args.output)

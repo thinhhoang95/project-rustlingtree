@@ -98,7 +98,8 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
     .segment.shared:hover, .segment.shared.selected { stroke: #fff1bf; stroke-width: 10; }
     .node { vector-effect: non-scaling-stroke; stroke: #071019; stroke-width: 2; }
     .node.corridor { fill: var(--cyan); }
-    .node.merge { fill: var(--merge); }
+    .node.merge, .node.split, .node.merge_split { fill: var(--merge); }
+    .node.route_entry { fill: var(--bg); stroke: var(--cyan); }
     .node.runway_endpoint { fill: var(--runway); }
     .legend {
       position: absolute;
@@ -191,7 +192,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
   <header>
     <div>
       <h1>Hailmary route-graph verifier</h1>
-      <p class="subtitle">Canonical static segments, merge corridors, and event-queue resource gates</p>
+      <p class="subtitle">Airport-wide corridors, merge/split topology, and event-queue resource gates</p>
     </div>
     <div id="hash" class="hash"></div>
   </header>
@@ -199,7 +200,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
   <main>
     <section class="card map-card">
       <div class="toolbar">
-        <label for="partition">Airport / runway</label><select id="partition"></select>
+        <label for="partition">Airport</label><select id="partition"></select>
         <label for="cluster">Route cluster</label><select id="cluster"></select>
         <button id="reset-view" type="button">Reset view</button>
         <span class="muted">Drag to pan · wheel to zoom · click a segment</span>
@@ -212,7 +213,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
       <div class="legend">
         <span><i class="swatch"></i>exclusive segment</span>
         <span><i class="swatch shared"></i>Common traffic segment</span>
-        <span><i class="dot"></i>merge boundary</span>
+        <span><i class="dot"></i>merge / split boundary</span>
         <span>→ flight direction</span>
       </div>
     </section>
@@ -259,9 +260,10 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
     el('hash').textContent = `${data.dataset_id} · ${data.artifact_content_hash}`;
     const s = data.summary;
     el('summary').innerHTML = [
-      metric(s.partition_count, 'runway partitions'), metric(s.cluster_count, 'route clusters'),
+      metric(s.partition_count, 'airports'), metric(s.cluster_count, 'route clusters'),
       metric(s.segment_count, 'segments'), metric(s.shared_segment_count, 'common segments', 'shared'),
-      metric(s.merge_node_count, 'merge nodes'), metric(s.observed_arrival_count, 'observed arrivals')
+      metric(s.merge_node_count, 'merge nodes'), metric(s.split_node_count, 'split nodes'),
+      metric(s.observed_arrival_count, 'observed arrivals')
     ].join('');
     fillPartitionSelect();
     renderFidelity();
@@ -276,7 +278,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
     state.data.partitions.forEach((item, index) => {
       const option = document.createElement('option');
       option.value = item.key;
-      option.textContent = `${item.key} · ${item.cluster_count} routes · ${item.shared_segment_count} common`;
+      option.textContent = `${item.key} · ${item.runway_ids.join(', ')} · ${item.cluster_count} routes · ${item.shared_segment_count} common`;
       select.append(option);
       if (index === 0) state.partition = item.key;
     });
@@ -300,10 +302,10 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
   }
 
   function routes() {
-    return state.data.routes.filter(item => `${item.airport}:${item.runway}` === state.partition);
+    return state.data.routes.filter(item => item.airport === state.partition);
   }
   function segments() {
-    return state.data.segments.filter(item => `${item.airport}:${item.runway}` === state.partition);
+    return state.data.segments.filter(item => item.airport === state.partition);
   }
 
   function projection(items) {
@@ -344,8 +346,14 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
       let shape;
       if (node.kind === 'merge') {
         shape = svgNode('rect', { x: x - 3, y: y - 3, width: 6, height: 6, transform: `rotate(45 ${x} ${y})`, class: 'node merge' });
+      } else if (node.kind === 'split') {
+        shape = svgNode('path', { d: `M ${x} ${y - 5} L ${x + 5} ${y + 4} L ${x - 5} ${y + 4} Z`, class: 'node split' });
+      } else if (node.kind === 'merge_split') {
+        shape = svgNode('rect', { x: x - 5, y: y - 5, width: 10, height: 10, transform: `rotate(45 ${x} ${y})`, class: 'node merge_split' });
       } else if (node.kind === 'runway_endpoint') {
         shape = svgNode('rect', { x: x - 4, y: y - 4, width: 8, height: 8, class: 'node runway_endpoint' });
+      } else if (node.kind === 'route_entry') {
+        shape = svgNode('circle', { cx: x, cy: y, r: 4, class: 'node route_entry' });
       } else {
         shape = svgNode('circle', { cx: x, cy: y, r: 3, class: 'node corridor' });
       }
@@ -381,6 +389,7 @@ ROUTE_GRAPH_HTML = r"""<!doctype html>
     target.innerHTML = `${tag}<h3 style="margin-top:10px">${escapeHtml(shortId(segment.segment_id))}</h3>
       <dl class="facts">
         <dt>Route clusters</dt><dd>${segment.cluster_count}</dd>
+        <dt>Destination runways</dt><dd>${segment.runway_ids.map(escapeHtml).join(', ')}</dd>
         <dt>Observed traffic</dt><dd>${compact(segment.observed_arrival_count)} arrivals</dd>
         <dt>Length</dt><dd>${compact(segment.length_nm)} NM</dd>
         <dt>Corridor width</dt><dd>${compact(segment.corridor_width_m)} m</dd>

@@ -61,14 +61,21 @@ class FeatureSchema:
         if len(names) != len(set(names)):
             raise ValueError("feature names must be unique")
         categories = tuple(str(name).strip() for name in self.category_names)
-        if any(not name for name in categories) or len(categories) != len(set(categories)):
+        if any(not name for name in categories) or len(categories) != len(
+            set(categories)
+        ):
             raise ValueError("categorical feature names must be non-empty and unique")
         if set(categories).intersection(names):
-            raise ValueError("continuous and categorical feature names must be disjoint")
+            raise ValueError(
+                "continuous and categorical feature names must be disjoint"
+            )
         object.__setattr__(self, "category_names", categories)
         name_set = set(names)
         for feature in self.fields:
-            if feature.missingness_mask is not None and feature.missingness_mask not in name_set:
+            if (
+                feature.missingness_mask is not None
+                and feature.missingness_mask not in name_set
+            ):
                 raise ValueError(
                     f"{feature.name} references unknown missingness mask {feature.missingness_mask!r}"
                 )
@@ -103,24 +110,42 @@ class FeatureSchema:
         if extras:
             raise ValueError(f"unknown feature values: {extras}")
 
-        values = np.asarray([float(named_values[name]) for name in self.names], dtype=np.float64)
+        values = np.asarray(
+            [float(named_values[name]) for name in self.names], dtype=np.float64
+        )
         if not np.all(np.isfinite(values)):
-            bad = [name for name, value in zip(self.names, values, strict=True) if not np.isfinite(value)]
+            bad = [
+                name
+                for name, value in zip(self.names, values, strict=True)
+                if not np.isfinite(value)
+            ]
             raise ValueError(f"learning vector contains non-finite values: {bad}")
 
         tolerance = 1e-12
         for feature, value in zip(self.fields, values, strict=True):
-            if feature.lower_bound is not None and value < feature.lower_bound - tolerance:
-                raise ValueError(f"{feature.name}={value} is below {feature.lower_bound}")
-            if feature.upper_bound is not None and value > feature.upper_bound + tolerance:
-                raise ValueError(f"{feature.name}={value} is above {feature.upper_bound}")
+            if (
+                feature.lower_bound is not None
+                and value < feature.lower_bound - tolerance
+            ):
+                raise ValueError(
+                    f"{feature.name}={value} is below {feature.lower_bound}"
+                )
+            if (
+                feature.upper_bound is not None
+                and value > feature.upper_bound + tolerance
+            ):
+                raise ValueError(
+                    f"{feature.name}={value} is above {feature.upper_bound}"
+                )
 
         supplied_categories = {} if categories is None else dict(categories)
         missing_categories = [
             name for name in self.category_names if name not in supplied_categories
         ]
         if missing_categories:
-            raise ValueError(f"missing categorical feature values: {missing_categories}")
+            raise ValueError(
+                f"missing categorical feature values: {missing_categories}"
+            )
         extra_categories = sorted(set(supplied_categories) - set(self.category_names))
         if extra_categories:
             raise ValueError(f"unknown categorical feature values: {extra_categories}")
@@ -154,8 +179,12 @@ class FeatureVector:
             raise ValueError("named feature values must be finite")
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "named", MappingProxyType(named))
-        object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
-        categories = {name: str(self.categories[name]) for name in self.schema.category_names}
+        object.__setattr__(
+            self, "diagnostics", MappingProxyType(dict(self.diagnostics))
+        )
+        categories = {
+            name: str(self.categories[name]) for name in self.schema.category_names
+        }
         if any(not value for value in categories.values()):
             raise ValueError("categorical feature values must be non-empty")
         object.__setattr__(self, "categories", MappingProxyType(categories))
@@ -169,11 +198,11 @@ class FeatureVector:
 
 
 def leader_follower_feature_schema(
-    schema_version: str = "hailmary.features.leader_follower.v2",
+    schema_version: str = "hailmary.features.leader_follower.v3",
 ) -> FeatureSchema:
     """Return the segment-scoped leader/follower learning-vector contract."""
 
-    if schema_version != "hailmary.features.leader_follower.v2":
+    if schema_version != "hailmary.features.leader_follower.v3":
         raise ValueError("unsupported leader/follower feature schema")
 
     nonnegative = 0.0
@@ -207,7 +236,12 @@ def leader_follower_feature_schema(
             upper_bound=10.0,
             missingness_mask="path_capacity_undefined_mask",
         ),
-        FeatureField("commitment_fraction", "1", lower_bound=unit_interval[0], upper_bound=unit_interval[1]),
+        FeatureField(
+            "commitment_fraction",
+            "1",
+            lower_bound=unit_interval[0],
+            upper_bound=unit_interval[1],
+        ),
         FeatureField(
             "intercept_or_final_gate_flag",
             "1",
@@ -227,16 +261,23 @@ def leader_follower_feature_schema(
             "s",
             missingness_mask="trailing_spacing_undefined_mask",
         ),
-        FeatureField("speed_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
-        FeatureField("path_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
-        FeatureField("trailing_spacing_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0),
+        FeatureField(
+            "speed_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0
+        ),
+        FeatureField(
+            "path_capacity_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0
+        ),
+        FeatureField(
+            "trailing_spacing_undefined_mask", "1", lower_bound=0.0, upper_bound=1.0
+        ),
     )
     return FeatureSchema(
         schema_version=schema_version,
         fields=fields,
         category_names=(
             "airport",
-            "runway",
+            "leader_runway",
+            "follower_runway",
             "segment",
             "leader_cluster",
             "follower_cluster",

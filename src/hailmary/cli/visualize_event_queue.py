@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import import_module
 import json
 from pathlib import Path
 import threading
@@ -24,7 +25,6 @@ from hailmary.scenario import (
     iter_demand_windows,
 )
 from hailmary.simulator import EventBatchResult, ScheduledEvent, Simulator
-from hailmary.simulator.interpolation import MonotoneTrajectory
 from hailmary.templates import TemplateStore
 from hailmary.topology import MedoidRoute, RouteGraphArtifact, build_route_graph
 
@@ -592,21 +592,22 @@ def _load_sample(
 def create_app(trace: EventQueueTrace):
     """Create the local FastAPI app without starting a server (useful in tests)."""
 
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, JSONResponse
+    # Keep the optional web stack outside the static core dependency graph.
+    fastapi = import_module("fastapi")
+    responses = import_module("fastapi.responses")
 
-    app = FastAPI(
+    app = fastapi.FastAPI(
         title="Hailmary Event Queue Verifier",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/", response_class=responses.HTMLResponse)
     def index() -> str:
         return EVENT_QUEUE_HTML
 
-    @app.get("/api/trace", response_class=JSONResponse)
+    @app.get("/api/trace", response_class=responses.JSONResponse)
     def trace_payload() -> dict[str, object]:
         return trace.to_dict()
 

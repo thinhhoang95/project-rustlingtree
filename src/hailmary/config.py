@@ -296,7 +296,7 @@ class ScenarioConfig:
 
 @dataclass(frozen=True)
 class FeatureConfig:
-    schema_version: str = "hailmary.features.leader_follower.v2"
+    schema_version: str = "hailmary.features.leader_follower.v3"
     ratio_capacity_floor_s: float = 1.0
     ratio_clip_max: float = 10.0
     commitment_time_scale_s: float = 1_200.0
@@ -307,7 +307,7 @@ class FeatureConfig:
     budget_freedom_weight: float = 0.5
 
     def __post_init__(self) -> None:
-        if self.schema_version != "hailmary.features.leader_follower.v2":
+        if self.schema_version != "hailmary.features.leader_follower.v3":
             raise ConfigurationError(
                 "unsupported leader-follower feature schema version"
             )
