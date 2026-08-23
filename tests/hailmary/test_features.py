@@ -129,6 +129,15 @@ def test_state_vector_is_finite_versioned_and_masks_zero_capacity() -> None:
     assert vector.value("required_delay_over_path_capacity") == 1.0
     assert vector.value("trailing_spacing_undefined_mask") == 1.0
     assert vector.diagnostics["pressure"]["count"] == 2
+    evidence = vector.diagnostics["provenance"]
+    assert tuple(evidence) == vector.schema.names
+    assert evidence["spacing_deviation_s"]["operands"] == {
+        "leader_eta_s": 200.0,
+        "follower_eta_s": 260.0,
+        "required_interval_s": 90.0,
+    }
+    assert evidence["spacing_deviation_s"]["value"] == -30.0
+    assert evidence["pressure_ratio"]["configuration"]["pressure_window_s"] == 600.0
     assert dict(vector.categories) == {
         "airport": "KATL",
         "leader_runway": "RW18R",

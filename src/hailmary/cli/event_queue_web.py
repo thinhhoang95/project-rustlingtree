@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 EVENT_QUEUE_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -10,393 +11,116 @@ EVENT_QUEUE_HTML = r"""<!doctype html>
   <title>Hailmary · Event Queue Verifier</title>
   <style>
     :root {
-      --ink: #0b1620;
-      --muted: #637483;
-      --paper: #f3f6f4;
-      --card: rgba(255, 255, 255, .92);
-      --line: #d9e1dd;
-      --navy: #092a3b;
-      --cyan: #19b7b0;
-      --lime: #b9d94b;
-      --amber: #f2a93b;
-      --red: #e76b62;
-      --shadow: 0 14px 36px rgba(8, 34, 47, .09);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-        "Segoe UI", sans-serif;
+      --ink:#101d26; --muted:#657782; --paper:#edf2ef; --surface:#fff;
+      --line:#d8e1dd; --navy:#082a3b; --cyan:#21bbb4; --cyan-dark:#117d79;
+      --lime:#b9d94b; --amber:#f2a93b; --magenta:#ef78b4; --red:#dd655d;
+      --shadow:0 12px 32px rgba(8,34,47,.09);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     }
-    * { box-sizing: border-box; }
-    [hidden] { display: none !important; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 7% 0%, rgba(25, 183, 176, .11), transparent 25rem),
-        linear-gradient(180deg, #edf3f0 0, var(--paper) 28rem);
-    }
-    button, input { font: inherit; }
-    .shell { width: min(1680px, calc(100% - 32px)); margin: 0 auto 40px; }
-    header {
-      display: flex; justify-content: space-between; gap: 24px; align-items: flex-end;
-      padding: 26px 2px 18px;
-    }
-    .eyebrow { color: #178c88; font: 700 11px/1.2 ui-monospace, monospace; letter-spacing: .17em; text-transform: uppercase; }
-    h1 { margin: 5px 0 3px; font-size: clamp(26px, 3vw, 42px); line-height: 1; letter-spacing: -.045em; }
-    .subtitle { color: var(--muted); font-size: 14px; }
-    .truth-badge {
-      flex: none; display: flex; align-items: center; gap: 9px; padding: 9px 13px;
-      border: 1px solid rgba(25, 183, 176, .3); border-radius: 999px;
-      background: rgba(255, 255, 255, .72); color: #176a68; font: 700 11px/1 ui-monospace, monospace;
-    }
-    .truth-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 4px rgba(25,183,176,.14); }
-    .summary { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; margin-bottom: 10px; }
-    .metric, .card { background: var(--card); border: 1px solid rgba(210, 221, 216, .95); box-shadow: var(--shadow); }
-    .metric { min-height: 92px; border-radius: 14px; padding: 14px 16px; }
-    .metric.wide { grid-column: span 2; }
-    .metric .label { color: var(--muted); font: 700 10px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .11em; }
-    .metric .value { display: block; margin-top: 7px; font-size: 27px; font-weight: 730; letter-spacing: -.04em; }
-    .metric .value.window { font-size: 17px; letter-spacing: -.02em; line-height: 1.35; }
-    .metric .minor { color: var(--muted); font-size: 11px; }
-    .card { border-radius: 16px; overflow: hidden; }
-    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 16px 12px; border-bottom: 1px solid var(--line); }
-    .card-head h2 { margin: 0; font-size: 13px; letter-spacing: -.01em; }
-    .micro { color: var(--muted); font: 600 10px/1.3 ui-monospace, monospace; }
-    .top-grid { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(330px, .75fr); gap: 10px; }
-    .radar { min-height: 530px; background: var(--navy); position: relative; }
-    #radar { display: block; width: 100%; height: 530px; }
-    .radar-overlay { position: absolute; left: 18px; top: 17px; color: #d8f4f0; pointer-events: none; }
-    .radar-time { font: 700 18px/1 ui-monospace, monospace; letter-spacing: -.04em; }
-    .radar-sub { margin-top: 6px; color: #78a7ae; font: 600 10px/1.3 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .1em; }
-    .legend { position: absolute; right: 14px; top: 14px; display: flex; gap: 8px; padding: 7px 9px; border: 1px solid rgba(160,205,207,.18); border-radius: 9px; background: rgba(6,25,36,.78); color: #a8c3c7; font: 600 9px/1 ui-monospace, monospace; }
-    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 3px; }
-    .dot.scheduled { background: #77939b; } .dot.active { background: var(--lime); } .dot.completed { background: #2b6f77; }
-    .flight-panel { display: flex; flex-direction: column; min-height: 530px; max-height: 530px; }
-    .flight-list { overflow: auto; flex: 1; }
-    .flight-row { display: grid; grid-template-columns: 8px minmax(90px, 1fr) auto; gap: 10px; align-items: center; padding: 11px 15px; border-bottom: 1px solid #edf1ef; }
-    .status-bar { width: 5px; height: 31px; border-radius: 3px; background: #8ba0a7; }
-    .status-bar.active { background: var(--lime); } .status-bar.completed { background: #34828a; }
-    .flight-name { font: 740 12px/1.2 ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .flight-meta { margin-top: 3px; color: var(--muted); font-size: 10px; }
-    .flight-data { text-align: right; font: 650 10px/1.45 ui-monospace, monospace; }
-    .synthetic { color: #af6e00; }
-    .timeline-card { margin-top: 10px; padding: 16px; }
-    .timeline-top { display: flex; align-items: center; gap: 12px; }
-    .controls { display: flex; gap: 7px; flex: none; }
-    .controls button {
-      border: 1px solid #bfd0ca; background: #fff; color: var(--ink); border-radius: 9px;
-      min-height: 38px; padding: 0 13px; cursor: pointer; font-weight: 700; font-size: 12px;
-    }
-    .controls button.primary { border-color: var(--navy); background: var(--navy); color: #fff; }
-    .controls button:disabled { opacity: .35; cursor: default; }
-    .scrubber { min-width: 0; flex: 1; }
-    input[type="range"] { width: 100%; accent-color: var(--cyan); cursor: pointer; }
-    .timeline-labels { display: flex; justify-content: space-between; gap: 14px; margin-top: 8px; color: var(--muted); font: 600 10px/1.3 ui-monospace, monospace; }
-    .timeline-labels .current { color: #126f6c; font-weight: 800; text-align: center; }
-    .batch-strip { display: flex; align-items: center; gap: 7px; min-height: 30px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); overflow-x: auto; }
-    .batch-label { flex: none; color: var(--muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
-    .chip { flex: none; border-radius: 999px; padding: 5px 8px; color: #245260; background: #e8f3f1; font: 700 9px/1 ui-monospace, monospace; }
-    .chip.exogenous { background: #fff0d9; color: #9a5b00; }
-    .chip.completed { background: #e7eceb; color: #5f7478; }
-    .bottom-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr); gap: 10px; margin-top: 10px; }
-    .queue-card, .actions-card { min-height: 480px; max-height: 620px; display: flex; flex-direction: column; }
-    .badge { border-radius: 999px; padding: 4px 8px; background: #e9efec; color: #53656c; font: 700 9px/1 ui-monospace, monospace; }
-    .table-wrap { overflow: auto; flex: 1; }
-    table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    th { position: sticky; top: 0; z-index: 1; padding: 9px 11px; text-align: left; background: #f7f9f8; color: var(--muted); border-bottom: 1px solid var(--line); font: 700 9px/1 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
-    td { padding: 9px 11px; border-bottom: 1px solid #edf1ef; vertical-align: top; }
-    tbody tr:hover { background: #f6faf8; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .kind { display: inline-block; border-radius: 5px; padding: 3px 5px; background: #e9f5f2; color: #147772; font: 750 9px/1 ui-monospace, monospace; }
-    .kind.EXOGENOUS_DISTURBANCE { background: #fff0d9; color: #9a5b00; }
-    .kind.FLIGHT_COMPLETED { background: #e8edeb; color: #5f7478; }
-    .action-content { overflow: auto; flex: 1; padding: 13px 15px 16px; }
-    .section-label { margin: 2px 0 9px; color: var(--muted); font: 750 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
-    .vocabulary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 17px; }
-    .vocab { border: 1px solid #d5e2dd; border-radius: 7px; padding: 6px 8px; background: #f8faf9; font: 700 9px/1 ui-monospace, monospace; }
-    .action { border: 1px solid #dbe5e1; border-left: 4px solid var(--cyan); border-radius: 10px; padding: 11px 12px; margin-bottom: 8px; }
-    .action.no_op { border-left-color: #9baba8; }
-    .action-title { display: flex; justify-content: space-between; gap: 8px; font: 760 11px/1.25 ui-monospace, monospace; }
-    .action-detail { margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.45; }
-    .empty { margin-top: 7px; padding: 19px 16px; border: 1px dashed #cbd8d3; border-radius: 10px; color: var(--muted); font-size: 11px; line-height: 1.55; }
-    .footnote { margin-top: 10px; padding: 12px 15px; color: #64757b; font-size: 10px; line-height: 1.55; text-align: center; }
-    .loading { height: 100vh; display: grid; place-items: center; color: var(--muted); font: 700 12px/1 ui-monospace, monospace; }
-    @media (max-width: 1050px) {
-      .summary { grid-template-columns: repeat(3, 1fr); }
-      .metric.wide { grid-column: span 2; }
-      .top-grid, .bottom-grid { grid-template-columns: 1fr; }
-      .flight-panel { min-height: 360px; max-height: 360px; }
-    }
-    @media (max-width: 680px) {
-      .shell { width: min(100% - 18px, 1680px); }
-      header { align-items: flex-start; flex-direction: column; }
-      .summary { grid-template-columns: repeat(2, 1fr); }
-      .metric.wide { grid-column: span 2; }
-      .timeline-top { align-items: stretch; flex-direction: column; }
-      .controls button { flex: 1; }
-      #radar, .radar { height: 430px; min-height: 430px; }
-    }
+    *{box-sizing:border-box} [hidden]{display:none!important}
+    html,body{height:100%} body{margin:0;color:var(--ink);background:var(--paper);overflow:hidden}
+    button,input{font:inherit} button{cursor:pointer}
+    .loading{display:grid;height:100%;place-items:center;color:var(--cyan-dark);font:700 12px/1.4 ui-monospace,monospace;letter-spacing:.12em}
+    .shell{height:100%;padding:14px 18px 16px;display:grid;grid-template-rows:auto auto minmax(0,1fr);gap:10px}
+    header{display:flex;align-items:end;justify-content:space-between;gap:18px;padding:0 2px}
+    .eyebrow,.micro,.label{font:700 10px/1.35 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+    .eyebrow{color:var(--cyan-dark);letter-spacing:.16em}
+    h1{font-size:clamp(25px,2.7vw,38px);line-height:1;margin:3px 0 2px;letter-spacing:-.045em}
+    .subtitle{font-size:12px;color:var(--muted)}
+    .truth{display:flex;align-items:center;gap:8px;border:1px solid rgba(33,187,180,.32);background:rgba(255,255,255,.76);padding:8px 11px;border-radius:999px;color:#176a68;font:700 10px/1 ui-monospace,monospace}
+    .truth::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 0 4px rgba(33,187,180,.13)}
+    .summary{display:grid;grid-template-columns:1.5fr repeat(4,1fr);gap:8px}
+    .metric{min-width:0;background:rgba(255,255,255,.88);border:1px solid var(--line);border-radius:12px;padding:9px 12px;box-shadow:var(--shadow)}
+    .metric strong{display:block;margin-top:3px;font-size:18px;letter-spacing:-.035em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .metric:first-child strong{font-size:14px;letter-spacing:-.01em}
+    .metric small{display:block;color:var(--muted);font-size:9px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .workspace{min-height:0;background:var(--surface);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow);overflow:hidden;display:grid;grid-template-columns:minmax(0,1.72fr) minmax(355px,.78fr);grid-template-rows:minmax(0,1fr) auto}
+    .radar{min-width:0;min-height:0;position:relative;background:var(--navy);border-right:1px solid #173f50}
+    #radar{display:block;width:100%;height:100%}
+    .radar-head{position:absolute;left:15px;top:14px;pointer-events:none;color:#e6fbf6}
+    .radar-time{font:800 18px/1 ui-monospace,monospace;letter-spacing:-.04em}
+    .radar-sub{margin-top:5px;color:#82aeb4;font:700 9px/1.3 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.09em}
+    .legend{position:absolute;right:12px;top:12px;display:flex;flex-wrap:wrap;justify-content:end;gap:7px;max-width:65%;padding:6px 8px;border:1px solid rgba(139,190,195,.2);background:rgba(4,28,41,.76);border-radius:8px;color:#b8d5d7;font:700 9px/1 ui-monospace,monospace}
+    .legend i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px}
+    .map-controls{position:absolute;left:14px;right:14px;bottom:12px;background:rgba(4,28,41,.9);border:1px solid rgba(139,190,195,.24);border-radius:10px;padding:8px 10px;color:#d8efed;display:grid;grid-template-columns:auto minmax(120px,1fr) auto;gap:10px;align-items:center}
+    .map-controls input{width:100%;accent-color:var(--cyan)}
+    .mode-buttons{display:flex;gap:4px}.mode-buttons button{border:1px solid #316273;background:#0b374a;color:#a8c8cc;border-radius:6px;padding:4px 7px;font:700 9px/1 ui-monospace,monospace}.mode-buttons button.active{background:var(--cyan);border-color:var(--cyan);color:#062b36}
+    .inspector{min-width:0;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);background:#fbfcfb}
+    .binding{padding:10px 12px;border-bottom:1px solid var(--line);background:#f5f8f6;min-height:55px}
+    .binding-main{display:flex;align-items:center;gap:7px;margin-top:4px;font:800 13px/1.2 ui-monospace,monospace}.binding-main .leader{color:#b82d79}.binding-main .follower{color:#087c78}.binding-meta{font-size:10px;color:var(--muted);margin-top:3px}
+    .tabs{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line);background:white}
+    .tab{border:0;border-right:1px solid var(--line);background:white;color:var(--muted);padding:10px 3px 8px;font:800 9px/1 ui-monospace,monospace;text-transform:uppercase}.tab:last-child{border-right:0}.tab.active{color:var(--cyan-dark);box-shadow:inset 0 -2px 0 var(--cyan)}
+    .panel{display:none;min-height:0;overflow:auto;padding:10px 11px}.panel.active{display:block}
+    .empty{border:1px dashed #cbd8d3;border-radius:9px;padding:13px;color:var(--muted);font-size:11px;line-height:1.5;background:#f8faf9}
+    .flight-row,.action-card{display:grid;align-items:center;border-bottom:1px solid #e7ece9;padding:8px 3px;gap:8px}.flight-row{grid-template-columns:7px minmax(0,1fr) auto}.flight-row.role-leader{background:rgba(239,120,180,.08)}.flight-row.role-follower{background:rgba(33,187,180,.1)}.flight-row.role-trailer{background:rgba(242,169,59,.07)}
+    .status{width:5px;height:28px;border-radius:5px;background:#a8b5b6}.status.active{background:var(--lime)}.status.completed{background:#3b7580}.status.scheduled{background:#aab5b7}
+    .name{font-weight:800;font-size:12px}.name.synthetic{color:#b57210}.meta{font-size:9px;color:var(--muted);margin-top:2px}.flight-data{text-align:right;font:700 9px/1.45 ui-monospace,monospace;color:#536770}.role-tag{font:800 8px/1 ui-monospace,monospace;text-transform:uppercase;margin-left:5px;color:var(--cyan-dark)}
+    .action-card{grid-template-columns:minmax(0,1fr) auto;padding:9px 6px;border:1px solid var(--line);border-left:4px solid #9aa9aa;border-radius:9px;margin-bottom:7px;background:white}.action-card.speed{border-left-color:var(--cyan)}.action-card.path_stretch{border-left-color:var(--amber)}.action-card.no_op{border-left-color:#93a1a3}.action-card.selected{outline:2px solid rgba(33,187,180,.23)}
+    .action-title{font:800 11px/1.2 ui-monospace,monospace;text-transform:uppercase}.action-detail{font-size:9px;color:var(--muted);line-height:1.45;margin-top:3px}.preview-button{border:1px solid var(--cyan-dark);background:white;color:var(--cyan-dark);border-radius:7px;padding:6px 8px;font:800 9px/1 ui-monospace,monospace}.preview-button:hover{background:#e9f8f6}.preview-button:disabled{opacity:.5;cursor:wait}
+    .section-title{display:flex;justify-content:space-between;align-items:center;margin:12px 0 6px;font:800 9px/1.3 ui-monospace,monospace;text-transform:uppercase;color:#536770}.section-title:first-child{margin-top:0}
+    .score-head{display:grid;grid-template-columns:1fr 1fr;gap:7px}.score-box{border:1px solid var(--line);border-radius:9px;padding:9px;background:white}.score-box span{display:block;font:800 9px/1 ui-monospace,monospace;text-transform:uppercase;color:var(--muted)}.score-box strong{display:block;margin-top:4px;font-size:21px;letter-spacing:-.04em}.delta{margin:7px 0 10px;padding:8px 9px;border-radius:8px;background:#e8f7f4;color:#116b68;font:800 12px/1 ui-monospace,monospace}.delta.negative{background:#fff0ee;color:#ad433c}
+    table{width:100%;border-collapse:collapse;font-size:9px}th{text-align:left;color:var(--muted);font:800 8px/1.2 ui-monospace,monospace;text-transform:uppercase;position:sticky;top:0;background:#fbfcfb;z-index:1}th,td{padding:6px 4px;border-bottom:1px solid #e7ece9;vertical-align:top}td.num{text-align:right;font-family:ui-monospace,monospace;font-weight:700}.positive{color:#087c78}.negative-text{color:#b6423a}
+    details{border:1px solid var(--line);border-radius:8px;background:white;margin:6px 0;overflow:hidden}summary{cursor:pointer;padding:8px 9px;font:800 9px/1.2 ui-monospace,monospace;color:#49616a}details>div{padding:0 9px 9px;font-size:9px;color:#526871;line-height:1.5}.kv{display:grid;grid-template-columns:minmax(90px,.8fr) minmax(0,1.2fr);gap:3px 8px}.kv b{color:#304953}.mono{font-family:ui-monospace,monospace;overflow-wrap:anywhere}.hash{font-size:8px}
+    .vector-field{border-bottom:1px solid #e5ebe8;padding:8px 2px}.vector-top{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:7px;align-items:baseline}.vector-name{font:800 9px/1.25 ui-monospace,monospace;overflow-wrap:anywhere}.vector-value{font:800 11px/1 ui-monospace,monospace}.unit{font:700 8px/1 ui-monospace,monospace;color:var(--muted)}.formula{font-size:9px;color:#526871;margin-top:4px}.operands{font:600 8px/1.45 ui-monospace,monospace;color:#728187;margin-top:3px;overflow-wrap:anywhere}
+    .queue-row{padding:7px 2px;border-bottom:1px solid #e5ebe8}.queue-top{display:flex;justify-content:space-between;gap:8px}.kind{font:800 8px/1 ui-monospace,monospace;color:#166e6a}.queue-sub{font-size:9px;color:var(--muted);margin-top:3px;line-height:1.4}
+    .timeline{grid-column:1/-1;border-top:1px solid var(--line);padding:9px 12px;background:#f7f9f8;display:grid;grid-template-columns:auto minmax(160px,1fr) auto;gap:12px;align-items:center}.event-buttons{display:flex;gap:6px}.event-buttons button{border:1px solid #bdcbc6;background:white;color:#263d46;border-radius:7px;padding:7px 10px;font:800 9px/1 ui-monospace,monospace}.event-buttons button:disabled{opacity:.38}.scrub{display:grid;grid-template-columns:auto minmax(80px,1fr) auto;gap:8px;align-items:center}.scrub input{width:100%;accent-color:var(--cyan)}.batch-strip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#536770;font:700 9px/1.3 ui-monospace,monospace;text-align:right}
+    .busy{position:absolute;inset:0;display:grid;place-items:center;background:rgba(5,30,42,.64);color:white;font:800 11px/1.4 ui-monospace,monospace;letter-spacing:.08em;z-index:4}
+    @media(max-width:950px){body{overflow:auto}.shell{height:auto;min-height:100%;grid-template-rows:auto auto auto}.summary{grid-template-columns:repeat(2,1fr)}.workspace{grid-template-columns:1fr;grid-template-rows:520px 620px auto}.radar{border-right:0;border-bottom:1px solid #173f50}.timeline{grid-column:1}.truth{display:none}}
   </style>
 </head>
 <body>
-  <div id="loading" class="loading">RECONSTRUCTING QUEUE STATES…</div>
+  <div id="loading" class="loading">REPLAYING THE PRODUCTION EVENT QUEUE…</div>
   <div id="app" class="shell" hidden>
-    <header>
-      <div>
-        <div class="eyebrow">Hailmary / deterministic verifier</div>
-        <h1>Event Queue Radar</h1>
-        <div id="subtitle" class="subtitle"></div>
-      </div>
-      <div class="truth-badge">PRODUCTION QUEUE REPLAY</div>
-    </header>
-
+    <header><div><div class="eyebrow">Event-driven simulator verifier</div><h1>Hailmary event queue</h1><div id="subtitle" class="subtitle"></div></div><div class="truth">Canonical queue · actions · features · objective</div></header>
     <section class="summary">
-      <div class="metric wide"><span class="label">Intervention window</span><span id="window" class="value window"></span><span id="scale" class="minor"></span></div>
-      <div class="metric"><span class="label">Original count</span><span id="original-count" class="value"></span><span class="minor">observed arrivals</span></div>
-      <div class="metric"><span class="label">New flight count</span><span id="new-count" class="value"></span><span id="delta-count" class="minor"></span></div>
-      <div class="metric"><span class="label">Event batches</span><span id="batch-count" class="value"></span><span id="event-count" class="minor"></span></div>
+      <div class="metric"><span class="label">Intervened window</span><strong id="window"></strong><small id="scale"></small></div>
+      <div class="metric"><span class="label">Original count</span><strong id="original-count"></strong><small>observed arrivals</small></div>
+      <div class="metric"><span class="label">New flight count</span><strong id="new-count"></strong><small id="delta-count"></small></div>
+      <div class="metric"><span class="label">Event batches</span><strong id="batch-count"></strong><small id="event-count"></small></div>
+      <div class="metric"><span class="label">Preview policy</span><strong id="policy-name"></strong><small id="policy-mode"></small></div>
     </section>
-
-    <section class="top-grid">
-      <div class="card radar">
-        <svg id="radar" role="img" aria-label="Flight position radar"></svg>
-        <div class="radar-overlay"><div id="radar-time" class="radar-time"></div><div id="radar-sub" class="radar-sub"></div></div>
-        <div class="legend"><span><i class="dot scheduled"></i>scheduled</span><span><i class="dot active"></i>active</span><span><i class="dot completed"></i>completed</span></div>
-      </div>
-      <div class="card flight-panel">
-        <div class="card-head"><h2>Scaled flight list</h2><span id="flight-status" class="micro"></span></div>
-        <div id="flight-list" class="flight-list"></div>
-      </div>
-    </section>
-
-    <section class="card timeline-card">
-      <div class="timeline-top">
-        <div class="controls">
-          <button id="previous">← Previous Event</button>
-          <button id="next" class="primary">Next Event →</button>
-        </div>
-        <div class="scrubber">
-          <input id="scrubber" type="range" min="0" value="0" step="1" aria-label="Event timeline">
-          <div class="timeline-labels"><span id="timeline-start"></span><span id="timeline-current" class="current"></span><span id="timeline-end"></span></div>
-        </div>
-      </div>
-      <div id="batch-strip" class="batch-strip"></div>
-    </section>
-
-    <section class="bottom-grid">
-      <div class="card queue-card">
-        <div class="card-head"><h2>Pending event queue</h2><span id="queue-count" class="badge"></span></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>#</th><th>Time</th><th>Event kind</th><th>Flight / resource</th><th>Queue identity</th></tr></thead>
-            <tbody id="queue-body"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="card actions-card">
-        <div class="card-head"><h2>Available actions</h2><span id="action-count" class="badge"></span></div>
-        <div class="action-content">
-          <div class="section-label">Catalog vocabulary</div>
-          <div id="vocabulary" class="vocabulary"></div>
-          <div class="section-label">Eligible at selected batch</div>
-          <div id="actions"></div>
-        </div>
-      </div>
-    </section>
-    <div id="footnote" class="card footnote"></div>
+    <main class="workspace">
+      <section class="radar">
+        <svg id="radar" role="img" aria-label="Aircraft positions and preview routes"></svg>
+        <div class="radar-head"><div id="radar-time" class="radar-time"></div><div id="radar-sub" class="radar-sub"></div></div>
+        <div class="legend"><span><i style="background:#ef78b4"></i>leader</span><span><i style="background:#21bbb4"></i>opportunity aircraft</span><span><i style="background:#f2a93b"></i>trailers / no-op</span></div>
+        <div id="map-controls" class="map-controls" hidden><span id="preview-time" class="micro"></span><input id="preview-scrubber" type="range" min="0" value="0" aria-label="Preview rollout time"><div class="mode-buttons"><button data-mode="before">Before</button><button data-mode="both" class="active">Both</button><button data-mode="after">After</button></div></div>
+        <div id="busy" class="busy" hidden>REALIZING ACTION AND RUNNING COMMON-HORIZON ARMS…</div>
+      </section>
+      <aside class="inspector">
+        <div id="binding" class="binding"><div class="micro">Selected relationship</div><div class="binding-main">No action opportunity selected</div><div class="binding-meta">Choose Preview in the Actions tab.</div></div>
+        <nav class="tabs" aria-label="Verifier details"><button class="tab active" data-tab="flights">Flights</button><button class="tab" data-tab="actions">Actions</button><button class="tab" data-tab="objective">Objective</button><button class="tab" data-tab="vector">Vector</button><button class="tab" data-tab="queue">Queue</button></nav>
+        <section id="panel-flights" class="panel active"></section><section id="panel-actions" class="panel"></section><section id="panel-objective" class="panel"></section><section id="panel-vector" class="panel"></section><section id="panel-queue" class="panel"></section>
+      </aside>
+      <footer class="timeline"><div class="event-buttons"><button id="previous">Previous Event</button><button id="next">Next Event</button></div><div class="scrub"><span id="timeline-start" class="micro"></span><input id="scrubber" type="range" min="0" value="0" aria-label="Event timeline"><span id="timeline-end" class="micro"></span></div><div id="batch-strip" class="batch-strip"></div></footer>
+    </main>
   </div>
-
   <script>
-    const escapeHtml = value => String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
-    const fmt = new Intl.NumberFormat("en-US");
-    const shortId = value => value ? (value.length > 20 ? value.slice(0, 9) + "…" + value.slice(-7) : value) : "—";
-    let trace, queueByFrame, frameIndex = 0;
-
-    function compareEvents(aRef, bRef) {
-      const a = trace.event_catalog[aRef].sort_key;
-      const b = trace.event_catalog[bRef].sort_key;
-      for (let i = 0; i < a.length; i++) {
-        if (a[i] < b[i]) return -1;
-        if (a[i] > b[i]) return 1;
-      }
-      return 0;
-    }
-
-    function reconstructQueues() {
-      const states = [];
-      let queue = new Set(trace.initial_queue_refs);
-      states.push([...queue].sort(compareEvents));
-      for (let i = 1; i < trace.frames.length; i++) {
-        const frame = trace.frames[i];
-        frame.queue_removed_refs.forEach(ref => queue.delete(ref));
-        frame.queue_added_refs.forEach(ref => queue.add(ref));
-        states.push([...queue].sort(compareEvents));
-      }
-      return states;
-    }
-
-    function initializeSummary() {
-      document.getElementById("subtitle").textContent = `Scenario ${trace.scenario_id} · definition ${shortId(trace.definition_hash)}`;
-      document.getElementById("window").textContent = trace.window.label;
-      document.getElementById("scale").textContent = `Scale ${trace.scale} · replicate ${trace.replicate}`;
-      document.getElementById("original-count").textContent = fmt.format(trace.original_count);
-      document.getElementById("new-count").textContent = fmt.format(trace.new_flight_count);
-      const delta = trace.new_flight_count - trace.original_count;
-      document.getElementById("delta-count").textContent = `${delta >= 0 ? "+" : ""}${delta} net · ${trace.synthetic_count} synthetic · ${trace.removed_count} removed`;
-      document.getElementById("batch-count").textContent = fmt.format(trace.frames.length - 1);
-      document.getElementById("event-count").textContent = `${fmt.format(Object.keys(trace.event_catalog).length)} scheduled event instances`;
-      const scrubber = document.getElementById("scrubber");
-      scrubber.max = trace.frames.length - 1;
-      document.getElementById("timeline-start").textContent = trace.frames[0].time_label;
-      document.getElementById("timeline-end").textContent = trace.frames.at(-1).time_label;
-      document.getElementById("vocabulary").innerHTML = trace.action_vocabulary.map(a => `<span class="vocab">${escapeHtml(a.lever)} / ${escapeHtml(a.band)}</span>`).join("");
-      const routeText = trace.route_graph_source ? `Route graph: ${trace.route_graph_source}` : "No route graph was available; contextual segment actions may be empty.";
-      document.getElementById("footnote").textContent = `Each frame after the first is the immutable state returned by one Simulator.advance_next() call. Equal-time events remain one batch in Hailmary priority order. Aircraft positions use the simulator's live trajectory clock. ${routeText}`;
-    }
-
-    function project(x, y) {
-      const b = trace.map.bounds;
-      const width = Math.max(b.max_x - b.min_x, 1e-12);
-      const height = Math.max(b.max_y - b.min_y, 1e-12);
-      return [45 + (x - b.min_x) / width * 910, 565 - (y - b.min_y) / height * 520];
-    }
-
-    function radarGrid() {
-      let grid = "";
-      for (let x = 45; x <= 955; x += 91) grid += `<line x1="${x}" y1="45" x2="${x}" y2="565" stroke="#174556" stroke-width="1"/>`;
-      for (let y = 45; y <= 565; y += 65) grid += `<line x1="45" y1="${y}" x2="955" y2="${y}" stroke="#174556" stroke-width="1"/>`;
-      return grid;
-    }
-
-    function renderRadar(frame) {
-      const svg = document.getElementById("radar");
-      svg.setAttribute("viewBox", "0 0 1000 610");
-      const routeGroups = new Map();
-      trace.map.routes.forEach(route => {
-        const key = route.cluster_id || route.flight_id;
-        if (!routeGroups.has(key)) routeGroups.set(key, route);
-      });
-      const routes = [...routeGroups.values()].map(route => {
-        const points = route.points.map(([x, y]) => project(x, y).join(",")).join(" ");
-        return `<polyline points="${points}" fill="none" stroke="#2c6674" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" opacity=".68"><title>${escapeHtml(route.runway)} · ${escapeHtml(route.cluster_id)}</title></polyline>`;
-      }).join("");
-      const previous = trace.frames[Math.max(0, frameIndex - 1)];
-      const previousById = new Map(previous.positions.map(position => [position.flight_id, position]));
-      const markers = frame.positions.map(position => {
-        const [x, y] = project(position.x, position.y);
-        const old = previousById.get(position.flight_id) || position;
-        const [ox, oy] = project(old.x, old.y);
-        const angle = Math.abs(x - ox) + Math.abs(y - oy) < .01 ? 0 : Math.atan2(y - oy, x - ox) * 180 / Math.PI + 90;
-        const fill = position.lifecycle === "active" ? "#b9d94b" : position.lifecycle === "completed" ? "#367b84" : "#78939b";
-        const stroke = position.synthetic ? "#f2a93b" : "#e6fbf6";
-        const altitude = position.altitude_m == null ? "—" : `${Math.round(position.altitude_m)} m`;
-        return `<g transform="translate(${x.toFixed(2)} ${y.toFixed(2)})" opacity="${position.lifecycle === "active" ? 1 : .72}">
-          <g transform="rotate(${angle.toFixed(1)})"><path d="M0,-8 L5,7 L0,4 L-5,7 Z" fill="${fill}" stroke="${stroke}" stroke-width="1.2"/></g>
-          <text x="9" y="-7" fill="${position.lifecycle === "active" ? "#eaffaa" : "#9bb8bd"}" font-family="ui-monospace,monospace" font-size="9" font-weight="700">${escapeHtml(position.callsign)}</text>
-          <title>${escapeHtml(position.callsign)} · ${escapeHtml(position.lifecycle)} · ${altitude}</title>
-        </g>`;
-      }).join("");
-      svg.innerHTML = `<rect width="1000" height="610" fill="#092a3b"/>${radarGrid()}<g>${routes}</g><g>${markers}</g>`;
-      document.getElementById("radar-time").textContent = frame.time_label.split(" ").at(-1);
-      document.getElementById("radar-sub").textContent = `${trace.map.coordinate_mode} projection · frame ${frame.index}/${trace.frames.length - 1}`;
-    }
-
-    function renderFlights(frame) {
-      const positions = new Map(frame.positions.map(item => [item.flight_id, item]));
-      const counts = {scheduled: 0, active: 0, completed: 0};
-      const rows = trace.flights.map(flight => {
-        const p = positions.get(flight.flight_id);
-        const lifecycle = p?.lifecycle || "scheduled";
-        counts[lifecycle]++;
-        const altitude = p?.altitude_m == null ? "—" : `${Math.round(p.altitude_m)} m`;
-        const remaining = p?.remaining_distance_m == null ? "—" : `${(p.remaining_distance_m / 1000).toFixed(1)} km`;
-        return `<div class="flight-row">
-          <span class="status-bar ${lifecycle}"></span>
-          <div><div class="flight-name ${flight.synthetic ? "synthetic" : ""}">${escapeHtml(flight.callsign)}${flight.synthetic ? " ✦" : ""}</div><div class="flight-meta">${escapeHtml(flight.runway || "no runway")} · ${escapeHtml(lifecycle)} · ${escapeHtml(flight.release_label.split(" ").at(-1))}</div></div>
-          <div class="flight-data">${altitude}<br>${remaining}</div>
-        </div>`;
-      });
-      document.getElementById("flight-list").innerHTML = rows.join("");
-      document.getElementById("flight-status").textContent = `${counts.active} active · ${counts.scheduled} scheduled · ${counts.completed} complete`;
-    }
-
-    function renderBatch(frame) {
-      const strip = document.getElementById("batch-strip");
-      const events = frame.processed_event_refs.map(ref => trace.event_catalog[ref]);
-      if (!events.length) {
-        strip.innerHTML = `<span class="batch-label">Current batch</span><span class="chip">INITIAL STATE · NOTHING PROCESSED</span>`;
-        return;
-      }
-      strip.innerHTML = `<span class="batch-label">Processed together</span>` + events.map(event => {
-        const klass = event.kind === "EXOGENOUS_DISTURBANCE" ? "exogenous" : event.kind === "FLIGHT_COMPLETED" ? "completed" : "";
-        return `<span class="chip ${klass}" title="${escapeHtml(event.event_id)}">${escapeHtml(event.kind)} · ${escapeHtml(event.flight_id || event.resource_id || "global")}</span>`;
-      }).join("");
-    }
-
-    function renderQueue(frame) {
-      const refs = queueByFrame[frameIndex];
-      document.getElementById("queue-count").textContent = `${fmt.format(refs.length)} pending`;
-      document.getElementById("queue-body").innerHTML = refs.map((ref, index) => {
-        const event = trace.event_catalog[ref];
-        const subject = [event.flight_id, event.resource_id].filter(Boolean).join(" / ") || "global";
-        const payload = JSON.stringify(event.payload);
-        return `<tr title="${escapeHtml(payload)}">
-          <td class="mono">${index + 1}</td>
-          <td class="mono">${escapeHtml(event.time_label.split(" ").at(-1))}</td>
-          <td><span class="kind ${escapeHtml(event.kind)}">${escapeHtml(event.kind)}</span></td>
-          <td><strong>${escapeHtml(subject)}</strong>${event.station_index >= 0 ? `<br><span class="micro">station ${event.station_index}</span>` : ""}</td>
-          <td class="mono" title="${escapeHtml(event.event_id)}">${escapeHtml(shortId(event.event_id))}<br><span class="micro">priority ${event.priority} · seq ${event.insertion_sequence}</span></td>
-        </tr>`;
-      }).join("");
-    }
-
-    function renderActions(frame) {
-      const actions = frame.available_actions;
-      document.getElementById("action-count").textContent = `${actions.length} eligible`;
-      if (!actions.length) {
-        document.getElementById("actions").innerHTML = `<div class="empty">No contextual action is eligible at this exact batch. Hailmary only enumerates candidates when an active follower crosses a matching action station inside a live leader–follower segment queue.</div>`;
-        return;
-      }
-      document.getElementById("actions").innerHTML = actions.map(action => `<div class="action ${escapeHtml(action.lever)}">
-        <div class="action-title"><span>${escapeHtml(action.lever)} / ${escapeHtml(action.band)}</span><span>${action.feasible ? "ELIGIBLE" : "INFEASIBLE"}</span></div>
-        <div class="action-detail">${escapeHtml(action.leader_id)} → ${escapeHtml(action.follower_id)}<br>${escapeHtml(action.segment_id)} · ${escapeHtml(action.resource_id)} · station ${action.station_index} at ${(action.station_m / 1000).toFixed(1)} km</div>
-      </div>`).join("");
-    }
-
-    function render(index) {
-      frameIndex = Math.max(0, Math.min(trace.frames.length - 1, Number(index)));
-      const frame = trace.frames[frameIndex];
-      const scrubber = document.getElementById("scrubber");
-      scrubber.value = frameIndex;
-      document.getElementById("previous").disabled = frameIndex === 0;
-      document.getElementById("next").disabled = frameIndex === trace.frames.length - 1;
-      document.getElementById("timeline-current").textContent = `${frame.time_label} · event batch ${frameIndex}/${trace.frames.length - 1} · epoch ${frame.decision_epoch_index}`;
-      renderRadar(frame);
-      renderFlights(frame);
-      renderBatch(frame);
-      renderQueue(frame);
-      renderActions(frame);
-    }
-
-    async function boot() {
-      const response = await fetch("/api/trace");
-      if (!response.ok) throw new Error(`Trace request failed (${response.status})`);
-      trace = await response.json();
-      queueByFrame = reconstructQueues();
-      initializeSummary();
-      document.getElementById("scrubber").addEventListener("input", event => render(event.target.value));
-      document.getElementById("previous").addEventListener("click", () => render(frameIndex - 1));
-      document.getElementById("next").addEventListener("click", () => render(frameIndex + 1));
-      document.addEventListener("keydown", event => {
-        if (event.key === "ArrowLeft") render(frameIndex - 1);
-        if (event.key === "ArrowRight") render(frameIndex + 1);
-      });
-      document.getElementById("loading").hidden = true;
-      document.getElementById("app").hidden = false;
-      render(0);
-    }
-
-    boot().catch(error => {
-      document.getElementById("loading").textContent = `FAILED TO LOAD VERIFIER: ${error.message}`;
-    });
+    const esc=v=>String(v??"").replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
+    const fmt=new Intl.NumberFormat("en-US"),num=(v,d=3)=>v==null?"—":Number(v).toFixed(d).replace(/\.0+$/,"").replace(/(\.\d*?)0+$/,"$1"),short=v=>v?(String(v).length>19?String(v).slice(0,8)+"…"+String(v).slice(-7):String(v)):"—";
+    let trace,queues,frameIndex=0,preview=null,previewError=null,previewIndex=0,mapMode="both",selectedActionId=null,previewBusy=false;const byId=id=>document.getElementById(id);
+    function compareEvents(aRef,bRef){const a=trace.event_catalog[aRef].sort_key,b=trace.event_catalog[bRef].sort_key;for(let i=0;i<a.length;i++){if(a[i]<b[i])return-1;if(a[i]>b[i])return 1}return 0}
+    function reconstructQueues(){const out=[];let q=new Set(trace.initial_queue_refs);out.push([...q].sort(compareEvents));for(let i=1;i<trace.frames.length;i++){trace.frames[i].queue_removed_refs.forEach(x=>q.delete(x));trace.frames[i].queue_added_refs.forEach(x=>q.add(x));out.push([...q].sort(compareEvents))}return out}
+    function displayTime(seconds){return new Intl.DateTimeFormat("en-GB",{timeZone:trace.window.timezone,hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(new Date(Number(seconds)*1000))}
+    function initialize(){byId("subtitle").textContent=`Scenario ${trace.scenario_id} · definition ${short(trace.definition_hash)}`;byId("window").textContent=trace.window.label;byId("scale").textContent=`Scale ${trace.scale} · replicate ${trace.replicate}`;byId("original-count").textContent=fmt.format(trace.original_count);byId("new-count").textContent=fmt.format(trace.new_flight_count);const delta=trace.new_flight_count-trace.original_count;byId("delta-count").textContent=`${delta>=0?"+":""}${delta} net · ${trace.synthetic_count} synthetic`;byId("batch-count").textContent=fmt.format(trace.frames.length-1);byId("event-count").textContent=`${fmt.format(Object.keys(trace.event_catalog).length)} event instances`;byId("policy-name").textContent=trace.policy.label;byId("policy-mode").textContent=`${trace.policy.mode.replaceAll("_"," ")} · ${short(trace.policy.fingerprint)}`;byId("scrubber").max=trace.frames.length-1;byId("timeline-start").textContent=trace.frames[0].time_label.split(" ").at(-1);byId("timeline-end").textContent=trace.frames.at(-1).time_label.split(" ").at(-1)}
+    function activePanel(name){document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.tab===name));document.querySelectorAll(".panel").forEach(x=>x.classList.toggle("active",x.id===`panel-${name}`))}
+    function roleFor(id){if(!preview)return"";const b=preview.binding;if(id===b.leader_id)return"leader";if(id===b.follower_id)return"follower";if((b.trailer_ids||[]).includes(id))return"trailer";return""}
+    function renderBinding(){if(!preview){const a=trace?.frames?.[frameIndex]?.available_actions?.find(item=>item.action_id===selectedActionId);if(a){byId("binding").innerHTML=`<div class="micro">Opportunity aircraft and directed leader</div><div class="binding-main"><span class="leader">${esc(a.leader_id)}</span><span>→</span><span class="follower">${esc(a.follower_id)}</span></div><div class="binding-meta">${esc(a.segment_id)} · ${esc(a.resource_id)}${previewError?" · realization unavailable":""}</div>`}else{byId("binding").innerHTML=`<div class="micro">Selected relationship</div><div class="binding-main">No action opportunity selected</div><div class="binding-meta">Choose Preview in the Actions tab.</div>`}return}const b=preview.binding;byId("binding").innerHTML=`<div class="micro">Opportunity aircraft and directed leader</div><div class="binding-main"><span class="leader">${esc(b.leader_id)}</span><span>→</span><span class="follower">${esc(b.follower_id)}</span></div><div class="binding-meta">${esc(b.segment_id)} · ${esc(b.resource_id)} · ${esc(b.ordering_basis)} ordering · ${(b.trailer_ids||[]).length} frozen trailers</div>`}
+    function currentPositions(arm){if(!preview)return trace.frames[frameIndex].positions;return preview.map[arm].samples[Math.min(previewIndex,preview.map[arm].samples.length-1)].positions}
+    function mapBounds(positionSets,routeSets){const xs=[],ys=[];trace.map.routes.forEach(r=>r.points.forEach(p=>{xs.push(p[0]);ys.push(p[1])}));positionSets.flat().forEach(p=>{xs.push(p.x);ys.push(p.y)});routeSets.flat().forEach(p=>{xs.push(p[0]);ys.push(p[1])});if(!xs.length)return trace.map.bounds;let minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);const px=Math.max((maxX-minX)*.06,1e-9),py=Math.max((maxY-minY)*.06,1e-9);return{min_x:minX-px,max_x:maxX+px,min_y:minY-py,max_y:maxY+py}}
+    function renderRadar(){const frame=trace.frames[frameIndex],svg=byId("radar");svg.setAttribute("viewBox","0 0 1000 620");const before=preview?currentPositions("before"):[],after=preview?currentPositions("after"):frame.positions;const beforeRoutes=preview?(preview.map.before.route_history.at(-1)?.points||[]):[],afterRoutes=preview?(preview.map.after.route_history.at(-1)?.points||[]):[],validationPoints=preview?[preview.map.action_station,preview.map.target_resource]:[];const bounds=mapBounds([before,after,validationPoints],[beforeRoutes,afterRoutes]);const project=(x,y)=>[42+(x-bounds.min_x)/Math.max(bounds.max_x-bounds.min_x,1e-12)*916,574-(y-bounds.min_y)/Math.max(bounds.max_y-bounds.min_y,1e-12)*522];let grid="";for(let x=42;x<=958;x+=91.6)grid+=`<line x1="${x}" y1="52" x2="${x}" y2="574" stroke="#174556"/>`;for(let y=52;y<=574;y+=65.25)grid+=`<line x1="42" y1="${y}" x2="958" y2="${y}" stroke="#174556"/>`;const base=[...new Map(trace.map.routes.map(r=>[r.cluster_id||r.flight_id,r])).values()].map(r=>`<polyline points="${r.points.map(p=>project(p[0],p[1]).join(",")).join(" ")}" fill="none" stroke="#2c6674" stroke-width="1.35" opacity=".62"/>`).join("");const route=(points,color,dash,width)=>points.length?`<polyline points="${points.map(p=>project(p[0],p[1]).join(",")).join(" ")}" fill="none" stroke="${color}" stroke-width="${width}" stroke-dasharray="${dash}" stroke-linecap="round" stroke-linejoin="round" opacity=".95"/>`:"";let overlays="";if(preview&&(mapMode==="before"||mapMode==="both"))overlays+=route(beforeRoutes,"#f2a93b","8 6",2.5);if(preview&&(mapMode==="after"||mapMode==="both"))overlays+=route(afterRoutes,"#21bbb4","",2.8);const shown=preview&&mapMode==="before"?before:after;const markers=shown.map(p=>{const [x,y]=project(p.x,p.y),role=roleFor(p.flight_id);const fill=role==="leader"?"#ef78b4":role==="follower"?"#21bbb4":role==="trailer"?"#f2a93b":p.lifecycle==="active"?"#b9d94b":"#5f8790";const label=role||p.lifecycle==="active";return `<g transform="translate(${x.toFixed(2)} ${y.toFixed(2)})" opacity="${p.lifecycle==="active"?1:.68}"><path d="M0,-8 L5,7 L0,4 L-5,7 Z" fill="${fill}" stroke="#e8fbf6" stroke-width="1"/>${label?`<text x="9" y="-6" fill="#e9fbf5" font-family="ui-monospace,monospace" font-size="9" font-weight="700">${esc(p.callsign)}</text>`:""}<title>${esc(p.callsign)} · ${esc(role||p.lifecycle)} · ${num(p.altitude_m,0)} m</title></g>`}).join("");let ghosts="",validation="";if(preview&&mapMode==="both"){const id=preview.binding.follower_id,a=after.find(p=>p.flight_id===id),b=before.find(p=>p.flight_id===id);if(a&&b){const [ax,ay]=project(a.x,a.y),[bx,by]=project(b.x,b.y);ghosts=`<line x1="${bx}" y1="${by}" x2="${ax}" y2="${ay}" stroke="#f2a93b" stroke-dasharray="3 4"/><circle cx="${bx}" cy="${by}" r="6" fill="none" stroke="#f2a93b" stroke-width="2"><title>No-op position</title></circle>`}}if(preview){const [sx,sy]=project(preview.map.action_station.x,preview.map.action_station.y),[rx,ry]=project(preview.map.target_resource.x,preview.map.target_resource.y);validation=`<g><circle cx="${sx}" cy="${sy}" r="6" fill="#082a3b" stroke="#21bbb4" stroke-width="2"/><text x="${sx+9}" y="${sy+3}" fill="#aaf5ec" font-family="ui-monospace,monospace" font-size="9">ACTION STATION</text><path d="M${rx-6},${ry-6} L${rx+6},${ry+6} M${rx+6},${ry-6} L${rx-6},${ry+6}" stroke="#f5d26b" stroke-width="2"/><text x="${rx+9}" y="${ry+3}" fill="#f5d26b" font-family="ui-monospace,monospace" font-size="9">${esc(preview.binding.resource_id)}</text></g>`}svg.innerHTML=`<rect width="1000" height="620" fill="#082a3b"/>${grid}<g>${base}${overlays}</g><g>${validation}${ghosts}${markers}</g>`;const time=preview?preview.map.sample_times_s[previewIndex]:frame.time_s;byId("radar-time").textContent=displayTime(time);byId("radar-sub").textContent=preview?`rollout ${previewIndex+1}/${preview.map.sample_times_s.length} · ${mapMode} · horizon ${displayTime(preview.map.horizon_s)}`:`${trace.map.coordinate_mode} · event frame ${frameIndex}/${trace.frames.length-1}`;if(preview){byId("preview-time").textContent=displayTime(time);byId("preview-scrubber").value=previewIndex}}
+    function renderFlights(){const frame=trace.frames[frameIndex],positions=new Map(frame.positions.map(p=>[p.flight_id,p]));const rows=trace.flights.map(f=>{const p=positions.get(f.flight_id),life=p?.lifecycle||"scheduled",role=roleFor(f.flight_id),tag=role==="follower"?"opportunity":role;return `<div class="flight-row ${role?`role-${role}`:""}"><span class="status ${life}"></span><div><div class="name ${f.synthetic?"synthetic":""}">${esc(f.callsign)}${f.synthetic?" ✦":""}${tag?`<span class="role-tag">${esc(tag)}</span>`:""}</div><div class="meta">${esc(f.flight_id)} · ${esc(f.runway||"no runway")} · ${esc(life)}</div></div><div class="flight-data">${p?.altitude_m==null?"—":num(p.altitude_m,0)+" m"}<br>${p?.remaining_distance_m==null?"—":num(p.remaining_distance_m/1000,1)+" km"}</div></div>`}).join("");byId("panel-flights").innerHTML=`<div class="section-title"><span>Scaled flight list</span><span>${trace.flights.length} aircraft</span></div>${rows}`}
+    function renderActions(){const actions=trace.frames[frameIndex].available_actions;if(!actions.length){byId("panel-actions").innerHTML=`<div class="empty">No contextual action is eligible at this exact event batch. Candidates only exist when an active follower crosses a matching action station in a live directed segment flow.</div>`;return}const cards=actions.map(a=>`<div class="action-card ${esc(a.lever)} ${a.action_id===selectedActionId?"selected":""}"><div><div class="action-title">${esc(a.lever)} / ${esc(a.band)}</div><div class="action-detail"><b>Opportunity:</b> ${esc(a.follower_id)} · <b>leader:</b> ${esc(a.leader_id)}<br>${esc(a.segment_id)} → ${esc(a.resource_id)} · station ${a.station_index} · ${num(a.station_m/1000,1)} km</div></div><button class="preview-button" data-action="${esc(a.action_id)}" ${previewBusy?"disabled":""}>Preview</button></div>`).join("");let realized="";if(preview&&preview.frame_index===frameIndex){const r=preview.objective.after.realization.audit,v=preview.objective.after.realization.variant;realized=`<div class="section-title"><span>Realized selected action</span><span>${esc(r?.action?.lever||"")} / ${esc(r?.action?.band||"")}</span></div><div class="kv"><b>Realized delay</b><span>${num(r?.realized_delay_s,3)} s</span><b>Intervention magnitude</b><span>${num(r?.intervention_magnitude,3)}</span><b>Resulting variant</b><span class="mono hash">${esc(short(r?.variant_id))}</span><b>Physical diagnostics</b><span>${esc(v?.diagnostics?.message||"canonical no-op")}</span></div>${v?`<details><summary>Action provenance and realizer audit</summary><div><pre class="mono">${esc(JSON.stringify({provenance:v.action_provenance,audit:r.audit},null,2))}</pre></div></details>`:""}`}else if(previewError){realized=`<div class="section-title"><span>Realization evidence</span><span>infeasible</span></div><div class="empty"><b>${esc(previewError.error_type||"Action preview failed")}</b><br>${esc(previewError.message||previewError)}</div>`}byId("panel-actions").innerHTML=`<div class="section-title"><span>Eligible at selected batch</span><span>${actions.length} candidates</span></div>${cards}${realized}`;document.querySelectorAll(".preview-button").forEach(button=>button.addEventListener("click",()=>requestPreview(button.dataset.action)))}
+    function componentRows(before,after){const fields=[["Pair","pair_score","pair_term"],["Propagation","propagation_score","propagation_term"],["Intervention","intervention_penalty","intervention_term"],["Throughput","throughput_score","throughput_term"]];return fields.map(([label,raw,term])=>`<tr><td><b>${label}</b><br><span class="micro">weighted term</span></td><td class="num">${num(before[raw])}<br>${num(before[term])}</td><td class="num">${num(after[raw])}<br>${num(after[term])}</td><td class="num ${after[term]-before[term]>=0?"positive":"negative-text"}">${num(after[term]-before[term])}</td></tr>`).join("")}
+    function renderObjective(){if(!preview){byId("panel-objective").innerHTML=`<div class="empty">Preview an eligible action to compare the canonical no-op and selected-action objectives at one frozen rollout horizon.</div>`;return}const b=preview.objective.before.outcome,a=preview.objective.after.outcome,d=preview.objective.delta;const edges=a.edge_outcomes.map((edge,i)=>{const old=b.edge_outcomes[i];return `<tr><td><b>${esc(edge.leader_id)} → ${esc(edge.follower_id)}</b></td><td class="num">${num(old?.predicted_interval_s,2)}</td><td class="num">${num(edge.predicted_interval_s,2)}</td><td class="num">${num(edge.score,3)} ${edge.dynamically_feasible?"✓":"✕"}</td></tr>`}).join("");const plan=preview.objective.outcome_plan,prov=preview.provenance;byId("panel-objective").innerHTML=`<div class="score-head"><div class="score-box"><span>Before · no-op arm</span><strong>${num(preview.objective.before.score,4)}</strong></div><div class="score-box"><span>After · selected action</span><strong>${num(preview.objective.after.score,4)}</strong></div></div><div class="delta ${d<0?"negative":""}">Δ after − before = ${d>=0?"+":""}${num(d,4)}</div><div class="section-title"><span>Objective components</span><span>raw / weighted</span></div><table><thead><tr><th>Component</th><th>Before</th><th>After</th><th>Δ term</th></tr></thead><tbody>${componentRows(b,a)}</tbody></table><div class="section-title"><span>Frozen edge outcomes</span><span>required ${num(plan.cohort.required_interval_s,1)} s</span></div><table><thead><tr><th>Directed edge</th><th>Before interval</th><th>After interval</th><th>After score</th></tr></thead><tbody>${edges}</tbody></table><details open><summary>Frozen cohort and horizon</summary><div class="kv"><b>Leader</b><span>${esc(plan.cohort.leader_id)}</span><b>Follower</b><span>${esc(plan.cohort.follower_id)}</span><b>Trailers</b><span>${esc((plan.cohort.trailer_ids||[]).join(", ")||"none")}</span><b>Root / horizon</b><span>${displayTime(plan.root_time_s)} → ${displayTime(plan.horizon_s)}</span><b>Policy</b><span>${esc(preview.comparison.continuation_policy)}</span></div></details><details><summary>Crossing times, intervention evidence, and hashes</summary><div><pre class="mono">${esc(JSON.stringify({before:b.diagnostics,after:a.diagnostics,provenance:prov},null,2))}</pre></div></details>`}
+    function renderVector(){if(!preview){byId("panel-vector").innerHTML=`<div class="empty">Select an opportunity to inspect the exact finite learning vector, its bound aircraft roles, operands, clipping rules, and configuration provenance.</div>`;return}const v=preview.feature_vector;const values=v.values.map(item=>`<div class="vector-field"><div class="vector-top"><span class="vector-name">${esc(item.name)}</span><span class="vector-value">${num(item.value,6)}</span><span class="unit">${esc(item.unit)}</span></div><div class="formula">${esc(item.operation||"canonical value")}</div><div class="operands">${esc(JSON.stringify(item.operands||{}))}${item.configuration?` · config ${esc(JSON.stringify(item.configuration))}`:""}</div></div>`).join("");byId("panel-vector").innerHTML=`<div class="section-title"><span>Canonical ordered vector</span><span>${v.values.length} float64 values</span></div><div class="kv"><b>Schema</b><span class="mono hash">${esc(v.schema_version)}<br>${esc(v.schema_hash)}</span><b>Vector hash</b><span class="mono hash">${esc(v.vector_hash)}</span><b>Leader / follower</b><span>${esc(v.bindings.leader_id)} → ${esc(v.bindings.follower_id)}</span><b>Scope</b><span>${esc(Object.entries(v.categories).map(([k,x])=>`${k}=${x}`).join(" · "))}</span></div><div class="section-title"><span>Values and provenance</span><span>learner order</span></div>${values}`}
+    function renderQueue(){const refs=queues[frameIndex];byId("panel-queue").innerHTML=`<div class="section-title"><span>Pending event queue</span><span>${refs.length} events</span></div>`+refs.map((ref,i)=>{const e=trace.event_catalog[ref],subject=[e.flight_id,e.resource_id].filter(Boolean).join(" / ")||"global";return `<div class="queue-row"><div class="queue-top"><span class="kind">${i+1}. ${esc(e.kind)}</span><span class="mono">${esc(e.time_label.split(" ").at(-1))}</span></div><div class="queue-sub"><b>${esc(subject)}</b>${e.station_index>=0?` · station ${e.station_index}`:""}<br><span class="mono hash">${esc(short(e.event_id))} · priority ${e.priority} · seq ${e.insertion_sequence}</span></div></div>`}).join("")}
+    function renderBatch(){const events=trace.frames[frameIndex].processed_event_refs.map(ref=>trace.event_catalog[ref]);byId("batch-strip").textContent=events.length?events.map(e=>`${e.kind} · ${e.flight_id||e.resource_id||"global"}`).join("  |  "):"INITIAL STATE · NOTHING PROCESSED"}
+    function renderAll(){const frame=trace.frames[frameIndex];byId("scrubber").value=frameIndex;byId("previous").disabled=frameIndex===0;byId("next").disabled=frameIndex===trace.frames.length-1;renderBinding();renderRadar();renderFlights();renderActions();renderObjective();renderVector();renderQueue();renderBatch()}
+    function changeFrame(index){frameIndex=Math.max(0,Math.min(trace.frames.length-1,Number(index)));preview=null;previewError=null;selectedActionId=null;previewIndex=0;byId("map-controls").hidden=true;renderAll()}
+    async function requestPreview(actionId){if(previewBusy)return;previewBusy=true;preview=null;previewError=null;selectedActionId=actionId;byId("busy").hidden=false;renderActions();try{const response=await fetch("/api/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({frame_index:frameIndex,action_id:actionId})});const payload=await response.json();if(!response.ok){const detail=payload.detail||{};previewError=typeof detail==="string"?{error_type:"Infeasible preview",message:detail}:detail;activePanel("actions")}else{preview=payload;previewIndex=0;byId("preview-scrubber").max=preview.map.sample_times_s.length-1;byId("map-controls").hidden=false;activePanel("objective")}}catch(error){previewError={error_type:"Preview request failed",message:error.message};activePanel("actions")}finally{previewBusy=false;byId("busy").hidden=true;renderAll()}}
+    async function boot(){const response=await fetch("/api/trace");if(!response.ok)throw new Error(`trace request failed (${response.status})`);trace=await response.json();queues=reconstructQueues();initialize();document.querySelectorAll(".tab").forEach(x=>x.addEventListener("click",()=>activePanel(x.dataset.tab)));byId("scrubber").addEventListener("input",e=>changeFrame(e.target.value));byId("previous").addEventListener("click",()=>changeFrame(frameIndex-1));byId("next").addEventListener("click",()=>changeFrame(frameIndex+1));byId("preview-scrubber").addEventListener("input",e=>{previewIndex=Number(e.target.value);renderRadar()});document.querySelectorAll(".mode-buttons button").forEach(x=>x.addEventListener("click",()=>{mapMode=x.dataset.mode;document.querySelectorAll(".mode-buttons button").forEach(y=>y.classList.toggle("active",y===x));renderRadar()}));document.addEventListener("keydown",e=>{if(e.key==="ArrowLeft")changeFrame(frameIndex-1);if(e.key==="ArrowRight")changeFrame(frameIndex+1)});byId("loading").hidden=true;byId("app").hidden=false;renderAll()}
+    boot().catch(error=>{byId("loading").textContent=`FAILED TO LOAD VERIFIER: ${error.message}`});
   </script>
 </body>
 </html>

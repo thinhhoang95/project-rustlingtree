@@ -588,6 +588,7 @@ def paired_simulator_rollout(
     frozen_policy: FrozenPolicy,
     outcome_plan: Any,
     outcome_config: Any | None = None,
+    rollout_runner: RolloutRunner | None = None,
 ) -> PairedRolloutResult:
     """Run paired arms and score a real simulator's frozen outcome cohort."""
 
@@ -610,6 +611,7 @@ def paired_simulator_rollout(
             outcome_plan=outcome_plan,
             config=outcome_config,
         ),
+        rollout_runner=rollout_runner,
     )
 
 

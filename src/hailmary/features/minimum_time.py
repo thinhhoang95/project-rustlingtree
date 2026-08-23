@@ -28,6 +28,8 @@ class ReachabilityMap:
     eta_earliest_s: float
     eta_latest_speed_s: float
     eta_latest_path_s: float
+    speed_action_eta_evidence: tuple[tuple[str, float], ...] = ()
+    path_action_eta_evidence: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -44,6 +46,14 @@ class ReachabilityMap:
             raise ValueError("a slowdown-only latest speed ETA cannot precede nominal ETA")
         if self.eta_latest_path_s < self.eta_nominal_s - tolerance:
             raise ValueError("a path-stretch latest ETA cannot precede nominal ETA")
+        for name in ("speed_action_eta_evidence", "path_action_eta_evidence"):
+            evidence = tuple(
+                (str(action_id), _finite(eta_s, name=f"{name}.eta_s"))
+                for action_id, eta_s in getattr(self, name)
+            )
+            if any(not action_id for action_id, _eta_s in evidence):
+                raise ValueError(f"{name} action IDs cannot be empty")
+            object.__setattr__(self, name, evidence)
 
     @property
     def speed_capacity_s(self) -> float:
@@ -70,16 +80,22 @@ def compute_reachability_map(
     eta_earliest_s: float,
     speed_action_etas_s: Iterable[float] = (),
     path_action_etas_s: Iterable[float] = (),
+    speed_action_eta_evidence: Iterable[tuple[str, float]] = (),
+    path_action_eta_evidence: Iterable[tuple[str, float]] = (),
 ) -> ReachabilityMap:
     """Build a map from explicit current-epoch feasible action ETAs."""
 
     nominal = _finite(eta_nominal_s, name="eta_nominal_s")
     earliest = _finite(eta_earliest_s, name="eta_earliest_s")
+    speed_etas = tuple(float(value) for value in speed_action_etas_s)
+    path_etas = tuple(float(value) for value in path_action_etas_s)
     return ReachabilityMap(
         eta_nominal_s=nominal,
         eta_earliest_s=earliest,
-        eta_latest_speed_s=_latest_local_eta(nominal, speed_action_etas_s, lever="speed"),
-        eta_latest_path_s=_latest_local_eta(nominal, path_action_etas_s, lever="path"),
+        eta_latest_speed_s=_latest_local_eta(nominal, speed_etas, lever="speed"),
+        eta_latest_path_s=_latest_local_eta(nominal, path_etas, lever="path"),
+        speed_action_eta_evidence=tuple(speed_action_eta_evidence),
+        path_action_eta_evidence=tuple(path_action_eta_evidence),
     )
 
 
@@ -205,6 +221,8 @@ def simulator_reachability_map(
     earliest = earliest_resource_eta_s(simulator, flight_id, resource_id)
     speed_etas: list[float] = []
     path_etas: list[float] = []
+    speed_evidence: list[tuple[str, float]] = []
+    path_evidence: list[tuple[str, float]] = []
     parent_hash = dynamic_content_fingerprint(simulator)
 
     for index, action in enumerate(action_candidates):
@@ -226,10 +244,13 @@ def simulator_reachability_map(
         except InfeasibleActionError:
             continue
         eta = resource_eta_s(branch, flight_id, resource_id)
+        action_id = candidate_ids[index]
         if lever_value == "speed":
             speed_etas.append(eta)
+            speed_evidence.append((action_id, eta))
         else:
             path_etas.append(eta)
+            path_evidence.append((action_id, eta))
 
     if dynamic_content_fingerprint(simulator) != parent_hash:
         raise RuntimeError("reachability action evaluation mutated its parent simulator")
@@ -238,6 +259,8 @@ def simulator_reachability_map(
         eta_earliest_s=earliest,
         speed_action_etas_s=speed_etas,
         path_action_etas_s=path_etas,
+        speed_action_eta_evidence=speed_evidence,
+        path_action_eta_evidence=path_evidence,
     )
     if cache is not None:
         if len(cache) >= 512:

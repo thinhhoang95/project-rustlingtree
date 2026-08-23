@@ -154,6 +154,27 @@ only across states produced by `Simulator.advance_next()`. If no compiled route
 graph is supplied, the CLI discovers `route_graph.json` next to the corpus or
 compiles a sibling `route_graph_input.json` in memory.
 
+The fixed map and right-side Flights, Actions, Objective, Vector, and Queue tabs
+also support immutable action previews. A preview compares the selected action
+with the canonical no-op from one parent, frozen cohort, horizon, and
+continuation policy. The objective tab exposes the exact pair, propagation,
+intervention, and throughput terms produced by `score_simulator_outcome`; the
+vector tab exposes every ordered learning value together with its role binding,
+operands, units, clipping rules, and configuration. Slowdowns show matched-time
+no-op/action positions, while path stretches expose the realized route and the
+realizer's candidate-selection audit. Infeasible realization remains visible as
+validation evidence.
+
+By default all later decisions in both arms are suppressed with `NoOpPolicy`.
+Pass an exported deployment rulebook when validation must use the same frozen
+continuation policy as a deployed rollout:
+
+```bash
+hailmary-visualize-event-queue \
+  --window-start "2026-04-01 09:00" \
+  --rulebook data/artifacts/hailmary/learning/exported_rulebook.json
+```
+
 The step-by-step visual checks requested by the design are in
 `notebooks/hailmary/01_clusters.ipynb` and
 `notebooks/hailmary/02_templates.ipynb`.

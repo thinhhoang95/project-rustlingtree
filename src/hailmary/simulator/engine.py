@@ -514,6 +514,7 @@ class Simulator:
         horizon_s: float,
         *,
         policy: Any | None = None,
+        observer: Callable[["Simulator", EventBatchResult | None], None] | None = None,
     ) -> tuple[EventBatchResult, ...]:
         horizon = float(horizon_s)
         if not math.isfinite(horizon):
@@ -542,18 +543,32 @@ class Simulator:
                     )
                     if action is not None:
                         self.apply(action)
+                if observer is not None:
+                    observer(self, batch)
         if horizon > self.state.sim_time_s:
             self.state = evolve_state(
                 self.state,
                 transition=f"advance-time:{horizon:.9f}",
                 sim_time_s=horizon,
             )
+        if observer is not None:
+            observer(self, None)
         return tuple(batches)
 
-    def run_until(self, horizon_s: float, *, policy: Any | None = None) -> "Simulator":
+    def run_until(
+        self,
+        horizon_s: float,
+        *,
+        policy: Any | None = None,
+        observer: Callable[["Simulator", EventBatchResult | None], None] | None = None,
+    ) -> "Simulator":
         """Advance to ``horizon_s`` and return this branch for rollout chaining."""
 
-        self.last_run_batches = self.advance_until(horizon_s, policy=policy)
+        self.last_run_batches = self.advance_until(
+            horizon_s,
+            policy=policy,
+            observer=observer,
+        )
         return self
 
     def run(self) -> tuple[EventBatchResult, ...]:

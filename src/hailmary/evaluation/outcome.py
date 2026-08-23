@@ -380,6 +380,15 @@ def score_semi_local_outcome(
                 "throughput": cfg.throughput_weight,
             },
             "intervention_components": intervention_components,
+            "crossing_times_s": tuple(
+                (flight_id, float(times[flight_id]))
+                for flight_id in cohort.ordered_flight_ids
+            ),
+            "feasible_by_flight": tuple(
+                (flight_id, bool(feasibility.get(flight_id, True)))
+                for flight_id in cohort.ordered_flight_ids
+            ),
+            "intervention_summary": summary,
         },
     )
 

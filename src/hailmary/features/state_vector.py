@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
@@ -218,6 +218,250 @@ def _capacity_ratio(
     return clipped, undefined, diagnostic_raw
 
 
+def _feature_value_provenance(
+    *,
+    inputs: LeaderFollowerFeatureInputs,
+    schema: FeatureSchema,
+    named: Mapping[str, float],
+    feature_config: FeatureConfig,
+    scenario_config: ScenarioConfig,
+    spacing: Any,
+    commitment: CommitmentComponents,
+    pressure_count: int,
+    pressure_capacity: float,
+    speed_ratio_raw: float | None,
+    path_ratio_raw: float | None,
+) -> dict[str, Mapping[str, Any]]:
+    """Explain every emitted scalar from the same canonical derivation inputs.
+
+    This sidecar is diagnostic only: the learner still consumes ``named`` in
+    the schema's immutable order.  Keeping the evidence beside the derivation
+    prevents verifier clients from growing a second implementation of the
+    feature formulas.
+    """
+
+    reachability = inputs.reachability
+    units = {field.name: field.unit for field in schema.fields}
+
+    def evidence(
+        name: str,
+        operation: str,
+        operands: Mapping[str, Any],
+        *,
+        configuration: Mapping[str, Any] | None = None,
+        note: str | None = None,
+    ) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {
+            "value": float(named[name]),
+            "unit": units[name],
+            "operation": operation,
+            "operands": dict(operands),
+        }
+        if configuration:
+            payload["configuration"] = dict(configuration)
+        if note:
+            payload["note"] = note
+        return payload
+
+    common_eta = {
+        "leader_eta_s": float(inputs.leader_eta_s),
+        "follower_eta_s": float(inputs.follower_eta_s),
+    }
+    delay = float(spacing.required_delay_s)
+    speed_capacity = float(reachability.speed_capacity_s)
+    path_capacity = float(reachability.path_capacity_s)
+    trailing = tuple(float(value) for value in inputs.trailing_spacing_margins_s)
+    provenance = {
+        "spacing_deviation_s": evidence(
+            "spacing_deviation_s",
+            "follower_eta_s - leader_eta_s - required_interval_s",
+            {**common_eta, "required_interval_s": inputs.required_interval_s},
+        ),
+        "abs_spacing_deviation_s": evidence(
+            "abs_spacing_deviation_s",
+            "abs(spacing_deviation_s)",
+            {"spacing_deviation_s": spacing.spacing_deviation_s},
+        ),
+        "required_delay_s": evidence(
+            "required_delay_s",
+            "max(0, -spacing_deviation_s)",
+            {"spacing_deviation_s": spacing.spacing_deviation_s},
+        ),
+        "predicted_interval_s": evidence(
+            "predicted_interval_s",
+            "follower_eta_s - leader_eta_s",
+            common_eta,
+        ),
+        "required_interval_s": evidence(
+            "required_interval_s",
+            "bound resource separation requirement",
+            {"required_interval_s": inputs.required_interval_s},
+        ),
+        "follower_time_to_resource_s": evidence(
+            "follower_time_to_resource_s",
+            "follower_eta_s - simulation_time_s",
+            {
+                "follower_eta_s": inputs.follower_eta_s,
+                "simulation_time_s": inputs.sim_time_s,
+            },
+        ),
+        "leader_time_to_resource_s": evidence(
+            "leader_time_to_resource_s",
+            "leader_eta_s - simulation_time_s",
+            {
+                "leader_eta_s": inputs.leader_eta_s,
+                "simulation_time_s": inputs.sim_time_s,
+            },
+        ),
+        "follower_distance_to_resource_m": evidence(
+            "follower_distance_to_resource_m",
+            "canonical follower sample station - resource station",
+            {
+                "distance_m": inputs.follower_distance_to_resource_m,
+            },
+        ),
+        "leader_distance_to_resource_m": evidence(
+            "leader_distance_to_resource_m",
+            "canonical leader sample station - resource station",
+            {
+                "distance_m": inputs.leader_distance_to_resource_m,
+            },
+        ),
+        "follower_cas_kts": evidence(
+            "follower_cas_kts",
+            "canonical follower sample CAS converted to knots",
+            {"cas_kts": inputs.follower_cas_kts},
+        ),
+        "follower_cas_lower_kts": evidence(
+            "follower_cas_lower_kts",
+            "active variant lower CAS envelope at follower elapsed time",
+            {"lower_cas_kts": inputs.follower_cas_lower_kts},
+        ),
+        "follower_cas_margin_kts": evidence(
+            "follower_cas_margin_kts",
+            "follower_cas_kts - follower_cas_lower_kts",
+            {
+                "follower_cas_kts": inputs.follower_cas_kts,
+                "follower_cas_lower_kts": inputs.follower_cas_lower_kts,
+            },
+        ),
+        "speed_capacity_s": evidence(
+            "speed_capacity_s",
+            "max(0, eta_latest_speed_s - eta_nominal_s)",
+            {
+                "eta_latest_speed_s": reachability.eta_latest_speed_s,
+                "eta_nominal_s": reachability.eta_nominal_s,
+                "action_eta_evidence": reachability.speed_action_eta_evidence,
+            },
+            note="Only currently enumerated feasible slowdown actions are evaluated.",
+        ),
+        "path_capacity_s": evidence(
+            "path_capacity_s",
+            "max(0, eta_latest_path_s - eta_nominal_s)",
+            {
+                "eta_latest_path_s": reachability.eta_latest_path_s,
+                "eta_nominal_s": reachability.eta_nominal_s,
+                "action_eta_evidence": reachability.path_action_eta_evidence,
+            },
+            note="Only currently enumerated feasible path-stretch actions are evaluated.",
+        ),
+        "required_delay_over_speed_capacity": evidence(
+            "required_delay_over_speed_capacity",
+            "clip(required_delay_s / max(speed_capacity_s, ratio_capacity_floor_s), 0, ratio_clip_max)",
+            {
+                "required_delay_s": delay,
+                "speed_capacity_s": speed_capacity,
+                "unclipped_ratio": speed_ratio_raw,
+            },
+            configuration={
+                "ratio_capacity_floor_s": feature_config.ratio_capacity_floor_s,
+                "ratio_clip_max": feature_config.ratio_clip_max,
+            },
+        ),
+        "required_delay_over_path_capacity": evidence(
+            "required_delay_over_path_capacity",
+            "clip(required_delay_s / max(path_capacity_s, ratio_capacity_floor_s), 0, ratio_clip_max)",
+            {
+                "required_delay_s": delay,
+                "path_capacity_s": path_capacity,
+                "unclipped_ratio": path_ratio_raw,
+            },
+            configuration={
+                "ratio_capacity_floor_s": feature_config.ratio_capacity_floor_s,
+                "ratio_clip_max": feature_config.ratio_clip_max,
+            },
+        ),
+        "commitment_fraction": evidence(
+            "commitment_fraction",
+            "clip(time_weight*time + freedom_weight*freedom + gate_weight*gate, 0, 1)",
+            {
+                "time_component": commitment.time_component,
+                "freedom_component": commitment.freedom_component,
+                "gate_component": commitment.gate_component,
+            },
+            configuration={
+                "time_weight": feature_config.time_weight,
+                "freedom_weight": feature_config.freedom_weight,
+                "gate_weight": feature_config.gate_weight,
+                "commitment_time_scale_s": feature_config.commitment_time_scale_s,
+            },
+        ),
+        "intercept_or_final_gate_flag": evidence(
+            "intercept_or_final_gate_flag",
+            "max(within final commitment gate, live intercept gate)",
+            {"gate_component": commitment.gate_component},
+        ),
+        "remaining_action_station_fraction": evidence(
+            "remaining_action_station_fraction",
+            "effective remaining eligible stations / total stations, capped by prior intervention state",
+            {
+                "remaining_action_station_count": inputs.remaining_action_station_count,
+                "total_action_station_count": inputs.total_action_station_count,
+                "effective_fraction": commitment.remaining_station_fraction,
+            },
+        ),
+        "local_flow_count": evidence(
+            "local_flow_count",
+            "count(live nominal ETAs in the bound segment flow)",
+            {"live_nominal_etas_s": tuple(inputs.live_nominal_etas_s)},
+        ),
+        "pressure_ratio": evidence(
+            "pressure_ratio",
+            "count(ETA in [now, now + window)) / (window_s / required_interval_s)",
+            {
+                "live_nominal_etas_s": tuple(inputs.live_nominal_etas_s),
+                "pressure_count": pressure_count,
+                "capacity_slots": pressure_capacity,
+                "simulation_time_s": inputs.sim_time_s,
+            },
+            configuration={"pressure_window_s": scenario_config.pressure_window_s},
+        ),
+        "trailing_min_spacing_margin_s": evidence(
+            "trailing_min_spacing_margin_s",
+            "min(trailing adjacent interval - required_interval_s), or 0 when undefined",
+            {"trailing_spacing_margins_s": trailing},
+        ),
+        "speed_capacity_undefined_mask": evidence(
+            "speed_capacity_undefined_mask",
+            "1 if speed_capacity_s <= 0 else 0",
+            {"speed_capacity_s": speed_capacity},
+        ),
+        "path_capacity_undefined_mask": evidence(
+            "path_capacity_undefined_mask",
+            "1 if path_capacity_s <= 0 else 0",
+            {"path_capacity_s": path_capacity},
+        ),
+        "trailing_spacing_undefined_mask": evidence(
+            "trailing_spacing_undefined_mask",
+            "1 when no downstream adjacent trailer margin exists else 0",
+            {"trailing_spacing_margins_s": trailing},
+        ),
+    }
+    if set(provenance) != set(schema.names):
+        raise RuntimeError("feature provenance does not cover the active schema")
+    return provenance
+
+
 def derive_leader_follower_state_vector(
     inputs: LeaderFollowerFeatureInputs,
     *,
@@ -345,6 +589,19 @@ def derive_leader_follower_state_vector(
             },
         },
         "reachability": inputs.reachability,
+        "provenance": _feature_value_provenance(
+            inputs=inputs,
+            schema=active_schema,
+            named=named,
+            feature_config=feature_cfg,
+            scenario_config=scenario_cfg,
+            spacing=spacing,
+            commitment=commitment,
+            pressure_count=pressure_count,
+            pressure_capacity=pressure_capacity,
+            speed_ratio_raw=speed_ratio_raw,
+            path_ratio_raw=path_ratio_raw,
+        ),
     }
     return active_schema.encode(
         named,
@@ -546,10 +803,15 @@ def simulator_state_vector(
         for flight_id in ordered[follower_index + 1 : follower_index + 4]
     )
     trailing_margins: list[float] = []
+    trailing_edges: list[tuple[str, str, float]] = []
     previous_eta = follower.eta_s
+    previous_flight_id = anchor.follower_id
     for trailer in trailing:
-        trailing_margins.append(float(trailer.eta_s - previous_eta - required_interval))
+        margin = float(trailer.eta_s - previous_eta - required_interval)
+        trailing_margins.append(margin)
+        trailing_edges.append((previous_flight_id, trailer.flight_id, margin))
         previous_eta = trailer.eta_s
+        previous_flight_id = trailer.flight_id
 
     def cluster_label(flight_id: str) -> str:
         definition_flight = state.definition.flight(flight_id)
@@ -603,12 +865,56 @@ def simulator_state_vector(
         effective_remaining_action_station_fraction=effective_station_fraction,
         effective_remaining_intervention_budget_fraction=effective_budget_fraction,
     )
-    return derive_leader_follower_state_vector(
+    vector = derive_leader_follower_state_vector(
         inputs,
         feature_config=feature_cfg,
         scenario_config=scenario_config,
         schema=schema,
     )
+    diagnostics = dict(vector.diagnostics)
+    provenance = dict(diagnostics["provenance"])
+    trailing_provenance = dict(provenance["trailing_min_spacing_margin_s"])
+    trailing_operands = dict(trailing_provenance["operands"])
+    trailing_operands["directed_trailing_edges"] = tuple(trailing_edges)
+    trailing_provenance["operands"] = trailing_operands
+    provenance["trailing_min_spacing_margin_s"] = trailing_provenance
+    diagnostics["provenance"] = provenance
+    diagnostics["bindings"] = {
+        "anchor_id": anchor.anchor_id,
+        "leader_id": anchor.leader_id,
+        "follower_id": anchor.follower_id,
+        "opportunity_aircraft_id": anchor.follower_id,
+        "resource_id": anchor.resource_id,
+        "segment_id": anchor.segment_id,
+        "entry_resource_id": anchor.entry_resource_id,
+        "ordering_basis": anchor.ordering_basis,
+        "predicted_exit_interval_s": anchor.predicted_exit_interval_s,
+        "catch_up": anchor.catch_up,
+        "flow_order": tuple(ordered),
+        "trailer_ids": tuple(item.flight_id for item in trailing),
+        "trailing_edges": tuple(trailing_edges),
+        "live_eta_by_flight_s": tuple(
+            (flight_id, float(by_flight[flight_id].eta_s)) for flight_id in ordered
+        ),
+        "action_candidates": tuple(
+            {
+                "action_id": str(getattr(candidate, "action_id", "")),
+                "lever": str(
+                    getattr(
+                        getattr(candidate, "lever", ""),
+                        "value",
+                        getattr(candidate, "lever", ""),
+                    )
+                ),
+                "band": str(getattr(candidate, "band", "")),
+                "station_index": int(getattr(candidate, "station_index", -1)),
+                "station_m": float(getattr(candidate, "s_m", 0.0)),
+                "feasible": bool(getattr(candidate, "feasible", True)),
+            }
+            for candidate in action_candidates
+        ),
+    }
+    return replace(vector, diagnostics=diagnostics)
 
 
 def _simulator_intervention_freedom(
