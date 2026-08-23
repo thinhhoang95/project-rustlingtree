@@ -237,6 +237,153 @@ Then we can visualize the corpus by running the script:
 ## 3bis. Route Graph Building & Shared Resource
 The route graph is necessary to extract the route structure from ADS-B cluster medoids. The key problem is that the medoid tracks are rarely precisely correct and conform to the actual route structure. As a result, identifying the leader-follower pairs are inherently difficult. The idea is that by "snapping" almost *similar* segments together, we can collapse *multiple close-enough route segments into one*, and from there we can identify the *common* segments shared between different approach patterns. For instance, approaches from the North West and North East might share a common trunk at final. Hail Mary also supports even bizzare patterns like merging and splitting multiple times before finals—just to be sure. 
 
+Route graph building methodology:
+The route graph turns a small set of representative arrival paths into shared traffic corridors. Think of laying each runway’s routes on transparent sheets, marking where they remain close and parallel for long enough, then cutting the sheets whenever the set of overlapping routes changes.
+
+### Intuitive example
+
+Suppose runway `RW18R` has two arrival clusters:
+
+```text
+C1  ──────────╲
+               ╲
+                ═══════════════▶ runway
+               ╱
+C2  ──────────╱
+```
+
+Assume:
+
+- C1 and C2 are separate outside 12 NM.
+- From 12 NM to the runway, they remain about 0.3 NM apart.
+- Their headings differ by only 4°.
+
+The builder produces three segments:
+
+| Segment | Station range | Member clusters | Meaning |
+|---|---:|---|---|
+| `S_C1` | 25 → 12 NM | C1 | Exclusive C1 branch |
+| `S_C2` | 23 → 12 NM | C2 | Exclusive C2 branch |
+| `S_COMMON` | 12 → 0 NM | C1, C2 | Shared traffic corridor |
+
+The stored traversals are:
+
+```text
+C1:  [0: S_C1, 1: S_COMMON]
+C2:  [0: S_C2, 1: S_COMMON]
+```
+
+Both clusters therefore use the same `S_COMMON:entry` and `S_COMMON:exit` resources. That shared identity—not merely lines overlapping on a map—is what allows Hailmary to construct one merged traffic queue.
+
+### End-to-end construction
+
+1. The offline corpus selects one medoid per arrival cluster.
+
+   A medoid is the observed route chosen as the most representative member of its cluster. Only clusters whose templates compiled successfully enter `route_graph_input.json`. The input also records cluster dispersion, which represents how spread out the observed cluster is. See [build_offline_corpus.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/cli/build_offline_corpus.py:67).
+
+2. Routes are separated by airport and runway.
+
+   Routes for different runways are never compared. This prevents two geometrically close approaches to different runway thresholds from accidentally becoming one traffic corridor.
+
+3. Every route is converted to runway-relative station coordinates.
+
+   Internally:
+
+   ```text
+   station 0       = runway endpoint
+   increasing s    = farther upstream
+   flight direction = high s → low s
+   ```
+
+   Each route is projected into local east/north coordinates and resampled every 0.25 NM. This gives all routes comparable samples such as 20.00, 19.75, 19.50 NM from the runway. See [`_sample_route()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:301).
+
+4. Every route pair is compared at equal remaining-distance stations.
+
+   At each station, C1 and C2 are considered related when both conditions hold:
+
+   ```text
+   lateral distance ≤ max(0.5 NM, C1 dispersion, C2 dispersion)
+   tangent-angle difference ≤ 15°
+   ```
+
+   Comparing at the same runway-relative station is important. It asks, “Are these flights occupying the same arrival corridor at the same phase of the approach?” It does not search for arbitrary nearest points anywhere along the two paths.
+
+5. Noise is removed using spatial hysteresis.
+
+   The raw comparison produces a Boolean sequence:
+
+   ```text
+   station:  15  14.75  14.50  14.25  14.00 ...
+   related:   ✓     ✓      ✗      ✓      ✓
+   ```
+
+   Two filters are applied:
+
+   - False gaps up to 0.75 NM are filled if related samples exist on both sides.
+   - Related runs shorter than 5 NM are discarded.
+
+   Thus a sparse ADS-B wobble does not split an otherwise stable corridor, while a brief crossing does not become a shared segment. The defaults are defined in [RouteGraphConfig](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:30).
+
+6. Pairwise relations become cluster-membership components.
+
+   At each station, the builder creates a small undirected relation graph. Its connected components define the corridor memberships.
+
+   For example:
+
+   ```text
+   18 NM:  {C1}  {C2}  {C3}
+   12 NM:  {C1,C2}     {C3}
+    8 NM:  {C1,C2,C3}
+    0 NM:  {C1,C2,C3}
+   ```
+
+   Every uninterrupted run with the same membership becomes one `RouteSegment`. Whenever membership changes, the builder creates a merge boundary. This logic is in [`build_route_graph()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:380).
+
+7. Stable segments, traversals, and resources are emitted.
+
+   Each segment receives:
+
+   - a deterministic content-based ID;
+   - entry and exit nodes;
+   - its member cluster IDs;
+   - representative geometry;
+   - length and corridor width;
+   - `segment_id:entry` and `segment_id:exit` resource IDs.
+
+   Each cluster receives an ordered list of traversals from upstream toward the runway. The entire artifact is content-hashed, so identical inputs and settings reproduce the same graph and hash.
+
+### How it reaches the event queue
+
+The graph itself is static; it does not contain live aircraft queues.
+
+When a traffic scenario is created, [`attach_route_graph()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:586) copies the cluster’s ordered traversals and entry/exit crossings into each flight definition. The simulator then schedules normal `RESOURCE_CROSSED` events for those gates.
+
+At each decision epoch, [`build_current_segment_anchors()`](/Volumes/CrucialX/project-rustlingtree/src/hailmary/features/anchors.py:311) reconstructs the live queue for every unpassed segment:
+
+1. Aircraft already inside the segment come first, ordered by physical progress toward the exit.
+2. Committed aircraft still upstream come afterward, ordered by entry ETA.
+3. Flight ID breaks equal-ETA ties deterministically.
+4. Exit ETA measures predicted spacing and catch-up, but never reverses the established physical order.
+
+For the example, a possible `S_COMMON` queue is:
+
+```text
+C1-A  70% through common segment
+C2-B  25% through common segment
+C2-C  future entrant, entry ETA 10:02
+C1-D  future entrant, entry ETA 10:04
+```
+
+The learner’s leader/follower anchors are derived from this order.
+
+### Important nuances when verifying the GUI
+
+- A thick shared line means `len(segment.cluster_ids) > 1`; it is not a visual-overlap guess.
+- Membership is transitive. If C1 relates to C2 and C2 relates to C3, all three form one component even if C1 and C3 narrowly fail the direct test. This is worth inspecting for “bridge cluster” mistakes.
+- Shared-segment geometry comes from the lexicographically first member route; it is not an average centerline. Membership and resource identity are more authoritative than the exact displayed centerline.
+- Cluster dispersion can widen the corridor beyond the 0.5-NM floor. A very diffuse cluster can therefore create unexpectedly broad sharing.
+- Runtime routing follows ordered traversal records. It does not perform a shortest-path search through the displayed nodes.
+
 To build route-graph (which is required for the event queue initialization and the functioning of the rest of the `hailmary` framework), use:
 ```bash
 hailmary-build-route-graph \

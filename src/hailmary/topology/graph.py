@@ -33,9 +33,9 @@ from hailmary.scenario.models import (
 @dataclass(frozen=True, slots=True)
 class RouteGraphConfig:
     pair_match_tolerance_nm: float = 0.5
-    component_diameter_limit_nm: float = 0.5
+    component_diameter_limit_nm: float = 1.0
     maximum_match_gap_nm: float = 0.25
-    gate_alignment_tolerance_nm: float = 0.5
+    gate_alignment_tolerance_nm: float = 1.0
     maximum_medoid_dispersion_nm: float = 5.0
     tangent_tolerance_deg: float = 15.0
     minimum_common_length_nm: float = 5.0

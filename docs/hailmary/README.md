@@ -79,9 +79,9 @@ so a shared corridor can have different route-local station values. Samples
 match within a fixed 0.5-NM lateral tolerance and 15-degree tangent tolerance;
 route dispersion never widens that physical test. Candidate matches form
 deterministic complete-link components whose total diameter is also limited to
-0.5 NM, preventing transitive A-near-B-near-C chaining. Gaps up to 0.25 NM are
+1 NM, preventing unbounded transitive A-near-B-near-C chaining. Gaps up to 0.25 NM are
 closed, while related runs shorter than 5 NM are discarded. Both physical
-gates must satisfy a separate 0.5-NM alignment check or the candidate is
+gates must satisfy a separate 1-NM alignment check or the candidate is
 conservatively emitted as exclusive route segments.
 
 Medoids whose mean dispersion exceeds 5 NM are uncertain and excluded together

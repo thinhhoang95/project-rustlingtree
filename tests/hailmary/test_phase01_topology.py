@@ -182,11 +182,39 @@ def test_complete_link_components_prevent_transitive_proximity_chaining() -> Non
                 ((-30_000.0, 2.0 * offset), (0.0, 2.0 * offset)),
                 runway="RW20R",
             ),
-        )
+        ),
+        config=RouteGraphConfig(component_diameter_limit_nm=0.5),
     )
 
     assert not any(len(item.cluster_ids) == 3 for item in graph.segments)
     assert any(len(item.cluster_ids) == 2 for item in graph.segments)
+
+
+def test_default_route_graph_allows_one_nm_component_and_gate_diameters() -> None:
+    config = RouteGraphConfig()
+
+    assert config.pair_match_tolerance_nm == pytest.approx(0.5)
+    assert config.component_diameter_limit_nm == pytest.approx(1.0)
+    assert config.gate_alignment_tolerance_nm == pytest.approx(1.0)
+
+    offset = 0.4 * M_PER_NM
+    graph = build_route_graph(
+        (
+            _route("A", ((-30_000.0, 0.0), (0.0, 0.0)), runway="RW18R"),
+            _route(
+                "B",
+                ((-30_000.0, offset), (0.0, offset)),
+                runway="RW19L",
+            ),
+            _route(
+                "C",
+                ((-30_000.0, 2.0 * offset), (0.0, 2.0 * offset)),
+                runway="RW20R",
+            ),
+        )
+    )
+
+    assert any(len(item.cluster_ids) == 3 for item in graph.segments)
 
 
 def test_uncertain_medoid_is_absent_from_route_graph_artifact() -> None:

@@ -156,6 +156,9 @@ def test_route_graph_cli_builds_hashed_artifact(tmp_path: Path, capsys) -> None:
     assert result == 0
     assert summary["artifact_content_hash"] == artifact.artifact_content_hash
     assert summary["cluster_count"] == 2
+    assert artifact.config.pair_match_tolerance_nm == 0.5
+    assert artifact.config.component_diameter_limit_nm == 1.0
+    assert artifact.config.gate_alignment_tolerance_nm == 1.0
     assert artifact.traversals_for("KATL:RW18R:C1")
     assert "KATL:RW18R:UNCERTAIN" in captured.err
     assert not artifact.traversals_for("KATL:RW18R:UNCERTAIN")
