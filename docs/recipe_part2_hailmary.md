@@ -327,39 +327,6 @@ Infeasible actions are omitted. This happens through [`ActionCatalog`](/Volumes/
 
 > **Notice:** Even though the simulator may stop at every action station for every flight, the actions that can be considered are strictly reserved for the pertaining flight only. In other words, if flight `A` hits the action station, then flight `B` does not have the chance to take action.
 
-### Shared Resources
-
-Shared resources are what let Hailmary correctly identify leader–follower pairs, and they provide the necessary delay baseline to compute the pair's features such as `required_delay_s`, `required_delay_over_speed_capacity`, and `required_delay_over_path_capacity`.
-
-Resources represent shared sequencing gates, including merge boundaries. They are used to establish flows, leader–follower ordering, ETAs, and required spacing. Shared resources produce events (entering and exiting shared resources such as runway threshold or segment begin/end, which defines the keyframes where the event-driven simulator will hop to).
-
-In the current implementation, the concrete resources are:
-
-| Resource | Example identity | Purpose |
-|---|---|---|
-| Runway threshold | `KATL:RW18R:threshold` | Final runway crossing and throughput/spacing reference |
-| Route-segment entry | `segment_<hash>:entry` | Marks entry into a shared corridor; often corresponds to a merge/intercept boundary |
-| Route-segment exit | `segment_<hash>:exit` | The downstream gate where that segment’s sequence spacing is evaluated |
-
-Every route segment automatically receives entry and exit resources ([graph.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:207)). The underlying boundary node is classified as `merge`, `corridor`, or `runway_endpoint`, depending on how route-cluster membership changes there ([graph.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/topology/graph.py:522)). So the “merge resource” is normally represented as a segment entry/exit gate rather than a separately named `MERGE_POINT` resource.
-
-A resource also carries a required crossing interval—90 seconds by default ([models.py](/Volumes/CrucialX/project-rustlingtree/src/hailmary/scenario/models.py:261)).
-
-Concretely, suppose A and B approach a shared final segment from different branches:
-
-1. The shared segment’s entry resource represents the merge boundary.
-2. Before entry, aircraft are ordered by predicted entry ETA.
-3. After crossing the entry resource, they become physical occupants, ordered by actual progress.
-4. Their predicted times at the segment’s exit resource determine the spacing:
-   `B exit ETA − A exit ETA`.
-5. If that interval is 55 seconds against a required 90 seconds, Hailmary derives a 35-second required delay. This delay value will be used to compute the pair's features such as `required_delay_s`, `required_delay_over_speed_capacity`, `required_delay_over_path_capacity`. 
-
-> **Notice:**  this delay value is not enforced by the simulator, it's sole purpose is to compute the feature values. 
-
-Remark: the (global) conflict detector's use is to be employed by the low-medium-high path stretch to measure which variant of the path stretching is optimal. 
-
-> **Notice:** the `hailmary` code does not use the global conflict detector to grade the rule's reward and therefore use a conflict related value for rule credit assignment. It uses a score that is pair-based, which suits the TMA application more, and provides better causality signal to the learner. 
-
 ## Step 4 — Compute the Feature Vector
 
 Hailmary converts the current pair and surrounding traffic into features, including concepts such as:

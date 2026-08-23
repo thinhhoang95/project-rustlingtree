@@ -105,4 +105,4 @@ def test_local_web_app_serves_map_and_canonical_payload() -> None:
     assert "Common traffic segment" in page.text
     assert "Runtime interpretation" in page.text
     assert response.status_code == 200
-    assert response.json()["schema_version"] == "hailmary.route_graph.viewer.v2"
+    assert response.json()["schema_version"] == "hailmary.route_graph.viewer.v3"

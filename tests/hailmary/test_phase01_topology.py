@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from hailmary.config import M_PER_NM
 from hailmary.features import build_current_segment_anchors
 from hailmary.geometry import LocalFrame
 from hailmary.scenario import (
@@ -14,7 +15,12 @@ from hailmary.scenario import (
 )
 from hailmary.simulator import Simulator
 from hailmary.templates import TrajectoryVariant
-from hailmary.topology import MedoidRoute, RouteGraphArtifact, build_route_graph
+from hailmary.topology import (
+    MedoidRoute,
+    RouteGraphArtifact,
+    RouteGraphConfig,
+    build_route_graph,
+)
 
 
 def _route(
@@ -159,6 +165,47 @@ def test_airport_graph_can_join_split_rejoin_and_split_across_runways() -> None:
             left.exit_s_m == pytest.approx(right.entry_s_m)
             for left, right in zip(traversals, traversals[1:], strict=False)
         )
+
+
+def test_complete_link_components_prevent_transitive_proximity_chaining() -> None:
+    offset = 0.4 * M_PER_NM
+    graph = build_route_graph(
+        (
+            _route("A", ((-30_000.0, 0.0), (0.0, 0.0)), runway="RW18R"),
+            _route(
+                "B",
+                ((-30_000.0, offset), (0.0, offset)),
+                runway="RW19L",
+            ),
+            _route(
+                "C",
+                ((-30_000.0, 2.0 * offset), (0.0, 2.0 * offset)),
+                runway="RW20R",
+            ),
+        )
+    )
+
+    assert not any(len(item.cluster_ids) == 3 for item in graph.segments)
+    assert any(len(item.cluster_ids) == 2 for item in graph.segments)
+
+
+def test_uncertain_medoid_is_absent_from_route_graph_artifact() -> None:
+    certain = _route("CERTAIN", ((-20_000.0, 0.0), (0.0, 0.0)))
+    uncertain = MedoidRoute(
+        dataset_id=certain.dataset_id,
+        airport=certain.airport,
+        runway=certain.runway,
+        cluster_id="UNCERTAIN",
+        lat_deg=certain.lat_deg,
+        lon_deg=certain.lon_deg,
+        dispersion_m=5.1 * M_PER_NM,
+    )
+
+    graph = build_route_graph((certain, uncertain), config=RouteGraphConfig())
+
+    assert {item.qualified_cluster_id for item in graph.traversals} == {
+        certain.qualified_cluster_id
+    }
 
 
 def _variant(cluster: str, speed_mps: float) -> TrajectoryVariant:

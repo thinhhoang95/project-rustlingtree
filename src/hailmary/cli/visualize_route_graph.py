@@ -189,7 +189,7 @@ def build_route_graph_view(
     merge_nodes = [item for item in nodes if item["kind"] in {"merge", "merge_split"}]
     split_nodes = [item for item in nodes if item["kind"] in {"split", "merge_split"}]
     payload: dict[str, object] = {
-        "schema_version": "hailmary.route_graph.viewer.v2",
+        "schema_version": "hailmary.route_graph.viewer.v3",
         "dataset_id": artifact.dataset_id,
         "artifact_content_hash": artifact.artifact_content_hash,
         "route_graph_source": route_graph_source,
@@ -219,8 +219,9 @@ def build_route_graph_view(
                 "sharing from rendered geometry."
             ),
             "shared_segment_rule": (
-                "A segment is shared exactly when cluster_count > 1, regardless "
-                "of the routes' destination runways."
+                "A segment is shared exactly when cluster_count > 1 and its "
+                "complete-link sample component plus both physical gates satisfy "
+                "the configured diameter limits, regardless of destination runway."
             ),
             "geometry_direction": (
                 "Every segment polyline runs from upstream entry gate to downstream "

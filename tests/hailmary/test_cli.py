@@ -110,6 +110,12 @@ def test_cluster_cli_builds_canonical_artifact_from_npz(tmp_path: Path, capsys) 
 
 
 def test_route_graph_cli_builds_hashed_artifact(tmp_path: Path, capsys) -> None:
+    help_text = build_route_graph.build_parser().format_help()
+    assert "--pair-match-tolerance-nm" in help_text
+    assert "--component-diameter-limit-nm" in help_text
+    assert "--gate-alignment-tolerance-nm" in help_text
+    assert "--lateral-floor-nm" not in help_text
+
     source = tmp_path / "routes.json"
     source.write_text(
         json.dumps(
@@ -122,8 +128,19 @@ def test_route_graph_cli_builds_hashed_artifact(tmp_path: Path, capsys) -> None:
                         "cluster_id": cluster,
                         "lat_deg": [0.0, 0.0, 0.0],
                         "lon_deg": [0.0, 0.1, 0.2],
+                        "dispersion_m": 0.0,
                     }
                     for cluster in ("C1", "C2")
+                ]
+                + [
+                    {
+                        "airport": "KATL",
+                        "runway": "18R",
+                        "cluster_id": "UNCERTAIN",
+                        "lat_deg": [0.0, 0.0, 0.0],
+                        "lon_deg": [0.0, 0.1, 0.2],
+                        "dispersion_m": 6.0 * 1_852.0,
+                    }
                 ],
             }
         ),
@@ -131,16 +148,17 @@ def test_route_graph_cli_builds_hashed_artifact(tmp_path: Path, capsys) -> None:
     )
     output = tmp_path / "route_graph.json"
 
-    result = build_route_graph.main(
-        ["--input", str(source), "--output", str(output)]
-    )
+    result = build_route_graph.main(["--input", str(source), "--output", str(output)])
 
     artifact = RouteGraphArtifact.read(output)
-    summary = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
     assert result == 0
     assert summary["artifact_content_hash"] == artifact.artifact_content_hash
     assert summary["cluster_count"] == 2
     assert artifact.traversals_for("KATL:RW18R:C1")
+    assert "KATL:RW18R:UNCERTAIN" in captured.err
+    assert not artifact.traversals_for("KATL:RW18R:UNCERTAIN")
 
 
 def test_variant_npz_round_trip_is_content_exact_and_byte_deterministic(tmp_path: Path) -> None:

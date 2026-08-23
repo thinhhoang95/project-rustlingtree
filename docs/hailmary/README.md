@@ -73,19 +73,33 @@ remaining-distance convention where station zero is the runway and distance
 increases upstream. All medoids at one airport are compared together—destination
 runway partitions and waypoint names are not used to decide physical sharing.
 
-The builder resamples every medoid at 0.25 NM. Two routes are aligned by
-reciprocal nearest physical samples rather than equal distance-to-runway, so a
-shared corridor can have different route-local station values. Samples match
-when their lateral distance is no greater than the larger of the 0.5-NM floor
-and their observed cluster dispersions, and their tangents are within 15
-degrees. Gaps up to 0.75 NM are closed, while related runs shorter than 5 NM
-are discarded. Connected matches become uninterrupted directed corridors;
-incidence between corridors creates explicit route-entry, merge, split,
-merge/split, and runway-endpoint nodes. The same routes may share one trunk,
-split, rejoin on another trunk, and split toward different runways. The result
-is content-hashed as schema-v2 `route_graph.json`. During scenario generation,
-every segment contributes explicit `:entry` and `:exit` event resources with
-the configured spacing interval (90 seconds by default).
+The schema-v3 builder resamples every medoid at 0.25 NM. Two routes are aligned
+by reciprocal nearest physical samples rather than equal distance-to-runway,
+so a shared corridor can have different route-local station values. Samples
+match within a fixed 0.5-NM lateral tolerance and 15-degree tangent tolerance;
+route dispersion never widens that physical test. Candidate matches form
+deterministic complete-link components whose total diameter is also limited to
+0.5 NM, preventing transitive A-near-B-near-C chaining. Gaps up to 0.25 NM are
+closed, while related runs shorter than 5 NM are discarded. Both physical
+gates must satisfy a separate 0.5-NM alignment check or the candidate is
+conservatively emitted as exclusive route segments.
+
+Medoids whose mean dispersion exceeds 5 NM are uncertain and excluded together
+with their templates and assigned corpus arrivals. Their identities and measured
+dispersion are reported only on stderr while the corpus or graph is built; they
+are absent from the route graph and verifier payload. Accepted corridor geometry
+is the consensus of its route-local spans and is snapped to canonical graph
+nodes. Incidence creates explicit route-entry, merge, split, merge/split, and
+runway-endpoint nodes. Routes may share one trunk, split, rejoin on another, and
+split toward different runways. Every segment contributes explicit `:entry` and
+`:exit` resources with a 90-second spacing interval by default.
+
+The physical tightness controls are independent CLI options:
+`--pair-match-tolerance-nm`, `--component-diameter-limit-nm`,
+`--maximum-match-gap-nm`, and `--gate-alignment-tolerance-nm`. For example,
+setting both diameter and gate limits to `0.35` guarantees that every published
+shared gate is within 0.35 NM; candidates that cannot satisfy it remain
+exclusive rather than failing compilation or being widened.
 
 For artifact-oriented workflows, the installed commands are:
 

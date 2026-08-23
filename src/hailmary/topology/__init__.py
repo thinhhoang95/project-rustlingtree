@@ -9,6 +9,7 @@ from .graph import (
     RouteSegment,
     attach_route_graph,
     build_route_graph,
+    partition_medoid_routes,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "RouteSegment",
     "attach_route_graph",
     "build_route_graph",
+    "partition_medoid_routes",
 ]

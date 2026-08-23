@@ -14,6 +14,7 @@ from typing import Sequence
 import numpy as np
 
 from hailmary.clustering import build_all_runway_cluster_libraries_from_adsb
+from hailmary.config import M_PER_NM
 from hailmary.data import load_arrival_catalog, load_catalog_raw_adsb_tracks, load_manifest
 from hailmary.scenario import ArrivalClusterKey, ObservedArrival, TerminalEntryCorpus
 from hailmary.templates import ClusterTemplate, TemplateCompiler, TemplateStore
@@ -25,11 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-id")
     parser.add_argument("--airport", default="KDFW")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--maximum-medoid-dispersion-nm", type=float, default=5.0)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if (
+        not np.isfinite(args.maximum_medoid_dispersion_nm)
+        or args.maximum_medoid_dispersion_nm <= 0.0
+    ):
+        raise ValueError("maximum medoid dispersion must be finite and positive")
     dataset = load_manifest(args.manifest).select(args.dataset_id)
     catalog = load_arrival_catalog(
         dataset.require("landings_and_departures"), airport=args.airport
@@ -50,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     template_by_cluster: dict[str, ClusterTemplate] = {}
     traffic_arrivals: list[ObservedArrival] = []
     rejection_counts = Counter(dict(result.rejection_counts))
+    uncertain_clusters: set[str] = set()
     hdbscan_outlier_rejections_by_runway: dict[str, int] = {}
     cluster_diagnostics_by_runway: dict[str, list[dict[str, object]]] = {}
     selected_clustering_by_runway: dict[str, dict[str, object]] = {}
@@ -66,7 +74,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         library.write(args.output_dir / f"clusters_{library.runway}.json")
         medoid_tracks = runway_result.template_medoid_tracks
         for medoid in library.medoids:
-            qualified_cluster = f"{library.airport}:{library.runway}:{medoid.cluster_id}"
+            qualified_cluster = (
+                f"{library.airport}:{library.runway}:{medoid.cluster_id}"
+            )
+            dispersion_nm = medoid.mean_distance_m / M_PER_NM
+            if dispersion_nm > args.maximum_medoid_dispersion_nm:
+                uncertain_clusters.add(qualified_cluster)
+                print(
+                    "uncertain medoid excluded: "
+                    f"{qualified_cluster} dispersion_nm={dispersion_nm:.3f} "
+                    f"limit_nm={args.maximum_medoid_dispersion_nm:.3f}",
+                    file=sys.stderr,
+                )
+                continue
             source = medoid_tracks[medoid.medoid_flight_id]
             try:
                 template = compiler.compile(
@@ -118,7 +138,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             template = template_by_cluster.get(qualified_cluster)
             if template is None:
-                rejection_counts[f"{library.runway}:template_compilation_failed"] += 1
+                if qualified_cluster not in uncertain_clusters:
+                    rejection_counts[
+                        f"{library.runway}:template_compilation_failed"
+                    ] += 1
                 continue
             raw = prepared.raw_track
             index = prepared.terminal_entry.segment_index
@@ -152,6 +175,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         hdbscan_outlier_rejections_by_runway.setdefault(library.runway, 0)
+    for runway, diagnostics in cluster_diagnostics_by_runway.items():
+        accepted_diagnostics = [
+            item
+            for item in diagnostics
+            if f"{str(args.airport).strip().upper()}:{runway}:{item['cluster_id']}"
+            not in uncertain_clusters
+        ]
+        cluster_diagnostics_by_runway[runway] = accepted_diagnostics
+        selected_clustering_by_runway[runway]["cluster_count"] = len(
+            accepted_diagnostics
+        )
     store.write(args.output_dir / "hailmary_templates.json")
     route_input = {
         "dataset_id": dataset.dataset_id,
@@ -175,7 +209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "accepted_terminal_entry_count": result.accepted_track_count,
         "runway_count": len(result.runway_results),
         "runways": [item.library.runway for item in result.runway_results],
-        "cluster_count": sum(len(item.library.medoids) for item in result.runway_results),
+        "cluster_count": len(route_records),
         "template_count": len(store.templates),
         "traffic_arrival_count": len(traffic_arrivals),
         "traffic_corpus_hash": corpus.corpus_content_hash,

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from importlib import import_module
 import json
 from pathlib import Path
+import sys
 import threading
 import webbrowser
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import numpy as np
 
 from hailmary.actions import ActionCatalog
+from hailmary.config import M_PER_NM
 from hailmary.features import build_current_segment_anchors
 from hailmary.scenario import (
     DemandWindowConfig,
@@ -26,7 +28,13 @@ from hailmary.scenario import (
 )
 from hailmary.simulator import EventBatchResult, ScheduledEvent, Simulator
 from hailmary.templates import TemplateStore
-from hailmary.topology import MedoidRoute, RouteGraphArtifact, build_route_graph
+from hailmary.topology import (
+    MedoidRoute,
+    RouteGraphArtifact,
+    RouteGraphConfig,
+    build_route_graph,
+    partition_medoid_routes,
+)
 
 from .event_queue_web import EVENT_QUEUE_HTML
 from .visualize_demand_scaling import (
@@ -539,8 +547,19 @@ def _resolve_route_graph(
         return RouteGraphArtifact.read(compiled), compiled.resolve().as_posix()
     source = corpus_path.parent / "route_graph_input.json"
     if source.is_file():
+        config = RouteGraphConfig()
+        routes, uncertain = partition_medoid_routes(_route_input(source), config=config)
+        for route in uncertain:
+            print(
+                "uncertain medoid excluded: "
+                f"{route.qualified_cluster_id} "
+                f"dispersion_nm={route.dispersion_m / M_PER_NM:.3f} "
+                f"limit_nm={config.maximum_medoid_dispersion_nm:.3f}",
+                file=sys.stderr,
+            )
         graph = build_route_graph(
-            _route_input(source),
+            routes,
+            config=config,
             provenance={"input": source.resolve().as_posix(), "in_memory": True},
         )
         return graph, f"{source.resolve().as_posix()} (compiled in memory)"

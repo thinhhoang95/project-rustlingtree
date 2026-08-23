@@ -5,9 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Mapping, Sequence
 
-from hailmary.topology import MedoidRoute, RouteGraphConfig, build_route_graph
+from hailmary.config import M_PER_NM
+from hailmary.topology import (
+    MedoidRoute,
+    RouteGraphConfig,
+    build_route_graph,
+    partition_medoid_routes,
+)
 
 
 def _load_routes(path: Path) -> tuple[MedoidRoute, ...]:
@@ -45,11 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--lateral-floor-nm", type=float, default=0.5)
+    parser.add_argument("--pair-match-tolerance-nm", type=float, default=0.5)
+    parser.add_argument("--component-diameter-limit-nm", type=float, default=0.5)
+    parser.add_argument("--maximum-match-gap-nm", type=float, default=0.25)
+    parser.add_argument("--gate-alignment-tolerance-nm", type=float, default=0.5)
+    parser.add_argument("--maximum-medoid-dispersion-nm", type=float, default=5.0)
     parser.add_argument("--tangent-tolerance-deg", type=float, default=15.0)
     parser.add_argument("--minimum-common-length-nm", type=float, default=5.0)
     parser.add_argument("--resample-step-nm", type=float, default=0.25)
-    parser.add_argument("--hysteresis-gap-nm", type=float, default=0.75)
     return parser
 
 
@@ -57,19 +67,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     routes = _load_routes(args.input)
     config = RouteGraphConfig(
-        lateral_floor_nm=args.lateral_floor_nm,
+        pair_match_tolerance_nm=args.pair_match_tolerance_nm,
+        component_diameter_limit_nm=args.component_diameter_limit_nm,
+        maximum_match_gap_nm=args.maximum_match_gap_nm,
+        gate_alignment_tolerance_nm=args.gate_alignment_tolerance_nm,
+        maximum_medoid_dispersion_nm=args.maximum_medoid_dispersion_nm,
         tangent_tolerance_deg=args.tangent_tolerance_deg,
         minimum_common_length_nm=args.minimum_common_length_nm,
         resample_step_nm=args.resample_step_nm,
-        hysteresis_gap_nm=args.hysteresis_gap_nm,
     )
+    accepted, uncertain = partition_medoid_routes(routes, config=config)
+    for route in uncertain:
+        print(
+            "uncertain medoid excluded: "
+            f"{route.qualified_cluster_id} "
+            f"dispersion_nm={route.dispersion_m / M_PER_NM:.3f} "
+            f"limit_nm={config.maximum_medoid_dispersion_nm:.3f}",
+            file=sys.stderr,
+        )
     artifact = build_route_graph(
-        routes,
+        accepted,
         config=config,
         provenance={
             "input": args.input.resolve().as_posix(),
             "source_hashes": sorted(
-                {item.source_hash for item in routes if item.source_hash}
+                {item.source_hash for item in accepted if item.source_hash}
             ),
         },
     )
@@ -78,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(
             {
                 "artifact_content_hash": artifact.artifact_content_hash,
-                "cluster_count": len({item.qualified_cluster_id for item in routes}),
+                "cluster_count": len(accepted),
                 "segment_count": len(artifact.segments),
                 "node_count": len(artifact.nodes),
                 "output": args.output.resolve().as_posix(),

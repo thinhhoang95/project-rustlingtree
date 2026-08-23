@@ -32,19 +32,25 @@ from hailmary.scenario.models import (
 
 @dataclass(frozen=True, slots=True)
 class RouteGraphConfig:
-    lateral_floor_nm: float = 0.5
+    pair_match_tolerance_nm: float = 0.5
+    component_diameter_limit_nm: float = 0.5
+    maximum_match_gap_nm: float = 0.25
+    gate_alignment_tolerance_nm: float = 0.5
+    maximum_medoid_dispersion_nm: float = 5.0
     tangent_tolerance_deg: float = 15.0
     minimum_common_length_nm: float = 5.0
     resample_step_nm: float = 0.25
-    hysteresis_gap_nm: float = 0.75
     required_interval_s: float = 90.0
-    schema_version: str = "hailmary.route_graph.config.v2"
+    schema_version: str = "hailmary.route_graph.config.v3"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "hailmary.route_graph.config.v2":
+        if self.schema_version != "hailmary.route_graph.config.v3":
             raise ValueError("unsupported route-graph configuration schema")
         positive = (
-            self.lateral_floor_nm,
+            self.pair_match_tolerance_nm,
+            self.component_diameter_limit_nm,
+            self.gate_alignment_tolerance_nm,
+            self.maximum_medoid_dispersion_nm,
             self.tangent_tolerance_deg,
             self.minimum_common_length_nm,
             self.resample_step_nm,
@@ -54,8 +60,11 @@ class RouteGraphConfig:
             raise ValueError("route-graph thresholds must be finite and positive")
         if self.tangent_tolerance_deg >= 90.0:
             raise ValueError("tangent_tolerance_deg must be below 90 degrees")
-        if not math.isfinite(self.hysteresis_gap_nm) or self.hysteresis_gap_nm < 0.0:
-            raise ValueError("hysteresis_gap_nm must be finite and non-negative")
+        if (
+            not math.isfinite(self.maximum_match_gap_nm)
+            or self.maximum_match_gap_nm < 0.0
+        ):
+            raise ValueError("maximum_match_gap_nm must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,11 +157,11 @@ class RouteGraphArtifact:
     segments: tuple[RouteSegment, ...]
     traversals: tuple[ClusterSegmentTraversal, ...]
     provenance: Mapping[str, Any] = field(default_factory=dict)
-    schema_version: str = "hailmary.route_graph.v2"
+    schema_version: str = "hailmary.route_graph.v3"
     artifact_content_hash: str = ""
 
     def __post_init__(self) -> None:
-        if self.schema_version != "hailmary.route_graph.v2":
+        if self.schema_version != "hailmary.route_graph.v3":
             raise ValueError("unsupported route-graph artifact schema")
         if not str(self.dataset_id).strip():
             raise ValueError("route graph dataset_id must be non-empty")
@@ -170,6 +179,7 @@ class RouteGraphArtifact:
             for item in self.segments
         ):
             raise ValueError("route graph segment references an unknown node")
+        node_by_id = {item.node_id: item for item in self.nodes}
         if any(item.segment_id not in segment_ids for item in self.traversals):
             raise ValueError("route graph traversal references an unknown segment")
         for segment in self.segments:
@@ -177,6 +187,18 @@ class RouteGraphArtifact:
                 raise ValueError("route graph segment must serve at least one runway")
             if segment.length_m <= 0.0 or segment.corridor_width_m <= 0.0:
                 raise ValueError("route graph segment dimensions must be positive")
+            if len(segment.lat_deg) != len(segment.lon_deg) or len(segment.lat_deg) < 2:
+                raise ValueError("route graph segment geometry must contain two points")
+            entry = node_by_id[segment.entry_node_id]
+            exit_node = node_by_id[segment.exit_node_id]
+            if (segment.lat_deg[0], segment.lon_deg[0]) != (
+                entry.lat_deg,
+                entry.lon_deg,
+            ) or (segment.lat_deg[-1], segment.lon_deg[-1]) != (
+                exit_node.lat_deg,
+                exit_node.lon_deg,
+            ):
+                raise ValueError("route graph segment geometry must terminate at its nodes")
         traversals_by_cluster: dict[str, list[ClusterSegmentTraversal]] = {}
         for traversal in self.traversals:
             if traversal.entry_s_m <= traversal.exit_s_m:
@@ -196,7 +218,7 @@ class RouteGraphArtifact:
             ):
                 raise ValueError("route graph traversals must cover a contiguous route")
         payload = self._content_payload()
-        computed = content_hash(payload, namespace="hailmary.route_graph.v2")
+        computed = content_hash(payload, namespace="hailmary.route_graph.v3")
         if self.artifact_content_hash and self.artifact_content_hash != computed:
             raise ValueError("route graph artifact_content_hash does not match content")
         object.__setattr__(self, "provenance", dict(sorted(self.provenance.items())))
@@ -288,6 +310,8 @@ class RouteGraphArtifact:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RouteGraphArtifact":
+        if str(payload.get("schema_version", "")) != "hailmary.route_graph.v3":
+            raise ValueError("unsupported route-graph artifact schema")
         return cls(
             dataset_id=str(payload["dataset_id"]),
             config=RouteGraphConfig(**dict(payload["config"])),
@@ -403,6 +427,50 @@ class _UnionFind:
         return result
 
 
+class _DiameterBoundedSampleUnion(_UnionFind):
+    """Deterministic complete-link components for route samples.
+
+    Pairwise matches are only candidate edges.  A merge is accepted when the
+    combined component contains at most one sample from each route and every
+    sample remains within the configured physical diameter.  This prevents
+    connected-component chaining from turning A-near-B and B-near-C into an
+    A/B/C corridor when A and C are not themselves colocated.
+    """
+
+    def __init__(
+        self,
+        items: Iterable[tuple[str, int]],
+        *,
+        points_by_token: Mapping[tuple[str, int], np.ndarray],
+        maximum_diameter_m: float,
+    ) -> None:
+        super().__init__(items)
+        self._points_by_token = points_by_token
+        self._maximum_diameter_m = float(maximum_diameter_m)
+        self._members = {item: {item} for item in self.parent}
+
+    def union(self, left: Any, right: Any) -> bool:
+        left_root = self.find(left)
+        right_root = self.find(right)
+        if left_root == right_root:
+            return True
+        proposed = self._members[left_root] | self._members[right_root]
+        route_ids = [item[0] for item in proposed]
+        if len(route_ids) != len(set(route_ids)):
+            return False
+        points = np.asarray([self._points_by_token[item] for item in proposed])
+        offsets = points[:, None, :] - points[None, :, :]
+        squared_distance = np.einsum("ijk,ijk->ij", offsets, offsets)
+        if float(np.max(squared_distance)) > self._maximum_diameter_m**2 + 1.0e-6:
+            return False
+        super().union(left, right)
+        root = self.find(left)
+        discarded = right_root if root == left_root else left_root
+        self._members[root] = proposed
+        self._members.pop(discarded, None)
+        return True
+
+
 def _sample_route(
     route: MedoidRoute, frame: LocalFrame, step_m: float
 ) -> _SampledRoute:
@@ -447,7 +515,7 @@ def _fill_short_false_gaps(mask: np.ndarray, maximum_samples: int) -> np.ndarray
 def _fill_short_membership_gaps(
     memberships: list[frozenset[str]], maximum_samples: int
 ) -> list[frozenset[str]]:
-    """Apply the same corridor hysteresis to transient membership changes."""
+    """Close transient membership changes within the configured match gap."""
 
     result = list(memberships)
     changed = True
@@ -495,7 +563,7 @@ def _directed_sustained_matches(
     dot = np.clip(np.sum(source.tangents * target_tangents, axis=1), -1.0, 1.0)
     angle = np.degrees(np.arccos(dot))
     raw = (distance <= width_m) & (angle <= config.tangent_tolerance_deg)
-    gap_samples = int(math.floor(config.hysteresis_gap_nm / config.resample_step_nm))
+    gap_samples = int(math.floor(config.maximum_match_gap_nm / config.resample_step_nm))
     mask = _fill_short_false_gaps(raw, gap_samples)
     minimum_m = config.minimum_common_length_nm * M_PER_NM
     matches: set[tuple[int, int]] = set()
@@ -524,11 +592,7 @@ def _pair_matches(
     right: _SampledRoute,
     config: RouteGraphConfig,
 ) -> set[tuple[int, int]]:
-    width_m = max(
-        config.lateral_floor_nm * M_PER_NM,
-        left.source.dispersion_m,
-        right.source.dispersion_m,
-    )
+    width_m = config.pair_match_tolerance_nm * M_PER_NM
     forward = _directed_sustained_matches(left, right, width_m=width_m, config=config)
     reverse = _directed_sustained_matches(right, left, width_m=width_m, config=config)
     # Requiring reciprocal evidence prevents one sample on a diverging branch
@@ -540,7 +604,8 @@ def _pair_matches(
     ordered = sorted(reciprocal)
     densified = set(reciprocal)
     maximum_gap = max(
-        1, int(math.floor(config.hysteresis_gap_nm / config.resample_step_nm)) + 1
+        1,
+        int(math.floor(config.maximum_match_gap_nm / config.resample_step_nm)) + 1,
     )
     for (left_a, right_a), (left_b, right_b) in zip(ordered, ordered[1:], strict=False):
         left_gap = left_b - left_a
@@ -587,6 +652,86 @@ def _node_kind(incoming: set[str], outgoing: set[str]) -> str:
     return "corridor"
 
 
+def _maximum_pairwise_distance(points: Iterable[np.ndarray]) -> float:
+    values = np.asarray(tuple(points), dtype=float)
+    if len(values) < 2:
+        return 0.0
+    offsets = values[:, None, :] - values[None, :, :]
+    return float(np.sqrt(np.max(np.einsum("ijk,ijk->ij", offsets, offsets))))
+
+
+def _gate_diameter_m(
+    grouped: list[_RouteRun], sampled: Mapping[str, _SampledRoute]
+) -> float:
+    return max(
+        _maximum_pairwise_distance(
+            sampled[item.cluster_id].point(
+                item.high_s_m if gate == "entry" else item.low_s_m
+            )
+            for item in grouped
+        )
+        for gate in ("entry", "exit")
+    )
+
+
+def _segment_draft(
+    airport: str,
+    grouped: list[_RouteRun],
+    sampled: Mapping[str, _SampledRoute],
+    frame: LocalFrame,
+    *,
+    step_m: float,
+    corridor_width_m: float,
+) -> _SegmentDraft:
+    cluster_scope = tuple(sorted(item.cluster_id for item in grouped))
+    runways = tuple(sorted({sampled[item].source.runway for item in cluster_scope}))
+    lengths = np.asarray([item.high_s_m - item.low_s_m for item in grouped])
+    geometry_count = max(2, int(math.ceil(float(np.mean(lengths)) / step_m)) + 1)
+    fractions = np.linspace(0.0, 1.0, geometry_count)
+    aligned_points = []
+    for run in grouped:
+        route = sampled[run.cluster_id]
+        stations = run.high_s_m - fractions * (run.high_s_m - run.low_s_m)
+        aligned_points.append(
+            np.column_stack(
+                (
+                    np.interp(stations, route.stations_m, route.points_m[:, 0]),
+                    np.interp(stations, route.stations_m, route.points_m[:, 1]),
+                )
+            )
+        )
+    consensus = np.mean(np.asarray(aligned_points), axis=0)
+    lat_values, lon_values = frame.unproject(consensus[:, 0], consensus[:, 1])
+    lat = tuple(float(value) for value in lat_values)
+    lon = tuple(float(value) for value in lon_values)
+    ranges = tuple(
+        sorted((item.cluster_id, item.high_s_m, item.low_s_m) for item in grouped)
+    )
+    segment_payload = {
+        "airport": airport,
+        "runway_ids": runways,
+        "cluster_ids": cluster_scope,
+        "ranges_m": tuple(
+            (cluster_id, round(high, 3), round(low, 3))
+            for cluster_id, high, low in ranges
+        ),
+        "geometry": tuple(
+            (round(a, 8), round(b, 8)) for a, b in zip(lat, lon, strict=True)
+        ),
+    }
+    return _SegmentDraft(
+        segment_id=stable_id("segment", segment_payload, length=28),
+        airport=airport,
+        runway_ids=runways,
+        cluster_ids=cluster_scope,
+        lat_deg=lat,
+        lon_deg=lon,
+        length_m=float(np.mean(lengths)),
+        corridor_width_m=corridor_width_m,
+        ranges=ranges,
+    )
+
+
 def _build_airport_graph(
     airport: str,
     routes: list[MedoidRoute],
@@ -607,7 +752,16 @@ def _build_airport_graph(
         for cluster_id in cluster_ids
         for index in range(len(sampled[cluster_id].stations_m))
     ]
-    sample_union = _UnionFind(sample_tokens)
+    points_by_token = {
+        (cluster_id, index): point
+        for cluster_id in cluster_ids
+        for index, point in enumerate(sampled[cluster_id].points_m)
+    }
+    sample_union = _DiameterBoundedSampleUnion(
+        sample_tokens,
+        points_by_token=points_by_token,
+        maximum_diameter_m=config.component_diameter_limit_nm * M_PER_NM,
+    )
     match_edges: list[tuple[tuple[str, int], tuple[str, int]]] = []
     for left_position, left_id in enumerate(cluster_ids):
         for right_id in cluster_ids[left_position + 1 :]:
@@ -616,8 +770,8 @@ def _build_airport_graph(
             ):
                 left_token = (left_id, left_index)
                 right_token = (right_id, right_index)
-                sample_union.union(left_token, right_token)
-                match_edges.append((left_token, right_token))
+                if sample_union.union(left_token, right_token):
+                    match_edges.append((left_token, right_token))
 
     membership_by_token: dict[tuple[str, int], frozenset[str]] = {}
     for members in sample_union.groups().values():
@@ -637,7 +791,7 @@ def _build_airport_graph(
                 membership_by_token[(cluster_id, sample_index)]
                 for sample_index in range(len(route.stations_m))
             ],
-            int(math.floor(config.hysteresis_gap_nm / config.resample_step_nm)),
+            int(math.floor(config.maximum_match_gap_nm / config.resample_step_nm)),
         )
         index = 0
         while index < len(route.stations_m):
@@ -673,66 +827,34 @@ def _build_airport_graph(
     for run_ids in sorted(run_union.groups().values(), key=lambda items: min(items)):
         grouped = [runs[item] for item in sorted(run_ids)]
         grouped_clusters = [item.cluster_id for item in grouped]
-        if len(set(grouped_clusters)) != len(grouped_clusters):
-            details = tuple(
-                (item.run_id, item.cluster_id, item.start_index, item.stop_index)
-                for item in grouped
+        # A sample component can satisfy the complete-link threshold while its
+        # independently interpolated run boundaries differ by a small amount.
+        # Gate identity is the runtime resource contract, so a candidate that
+        # repeats one route or exceeds the hard gate tolerance is conservatively
+        # emitted as exclusive segments instead of becoming a false shared gate.
+        repeats_route = len(set(grouped_clusters)) != len(grouped_clusters)
+        draft_groups = (
+            [[item] for item in grouped]
+            if repeats_route
+            or (
+                len(grouped) > 1
+                and _gate_diameter_m(grouped, sampled)
+                > config.gate_alignment_tolerance_nm * M_PER_NM + 1.0e-6
             )
-            raise ValueError(
-                "ambiguous corridor alignment repeats one route in a segment: "
-                f"{details!r}"
+            else [grouped]
+        )
+        for draft_group in draft_groups:
+            draft = _segment_draft(
+                airport,
+                draft_group,
+                sampled,
+                frame,
+                step_m=step_m,
+                corridor_width_m=config.pair_match_tolerance_nm * M_PER_NM,
             )
-        cluster_scope = tuple(sorted(grouped_clusters))
-        runways = tuple(sorted({sampled[item].source.runway for item in cluster_scope}))
-        representative = min(grouped, key=lambda item: item.cluster_id)
-        representative_route = sampled[representative.cluster_id]
-        geometry_stations = np.linspace(
-            representative.high_s_m,
-            representative.low_s_m,
-            max(
-                2,
-                int(
-                    math.ceil(
-                        (representative.high_s_m - representative.low_s_m) / step_m
-                    )
-                )
-                + 1,
-            ),
-        )
-        lat, lon = representative_route.lat_lon(geometry_stations)
-        ranges = tuple(
-            sorted((item.cluster_id, item.high_s_m, item.low_s_m) for item in grouped)
-        )
-        segment_payload = {
-            "airport": airport,
-            "runway_ids": runways,
-            "cluster_ids": cluster_scope,
-            "ranges_m": tuple(
-                (cluster_id, round(high, 3), round(low, 3))
-                for cluster_id, high, low in ranges
-            ),
-            "geometry": tuple(
-                (round(a, 8), round(b, 8)) for a, b in zip(lat, lon, strict=True)
-            ),
-        }
-        segment_id = stable_id("segment", segment_payload, length=28)
-        draft = _SegmentDraft(
-            segment_id=segment_id,
-            airport=airport,
-            runway_ids=runways,
-            cluster_ids=cluster_scope,
-            lat_deg=lat,
-            lon_deg=lon,
-            length_m=float(np.mean([item.high_s_m - item.low_s_m for item in grouped])),
-            corridor_width_m=max(
-                config.lateral_floor_nm * M_PER_NM,
-                *(sampled[item].source.dispersion_m for item in cluster_scope),
-            ),
-            ranges=ranges,
-        )
-        drafts.append(draft)
-        for run in grouped:
-            segment_by_run[run.run_id] = segment_id
+            drafts.append(draft)
+            for run in draft_group:
+                segment_by_run[run.run_id] = draft.segment_id
 
     endpoint_tokens = [
         (draft.segment_id, gate) for draft in drafts for gate in ("entry", "exit")
@@ -805,21 +927,31 @@ def _build_airport_graph(
         for token in endpoint_group:
             node_by_endpoint[token] = node_id
 
-    segments = [
-        RouteSegment(
-            segment_id=draft.segment_id,
-            airport=draft.airport,
-            runway_ids=draft.runway_ids,
-            entry_node_id=node_by_endpoint[(draft.segment_id, "entry")],
-            exit_node_id=node_by_endpoint[(draft.segment_id, "exit")],
-            cluster_ids=draft.cluster_ids,
-            lat_deg=draft.lat_deg,
-            lon_deg=draft.lon_deg,
-            length_m=draft.length_m,
-            corridor_width_m=draft.corridor_width_m,
+    node_by_id = {item.node_id: item for item in nodes}
+    segments = []
+    for draft in drafts:
+        entry_node_id = node_by_endpoint[(draft.segment_id, "entry")]
+        exit_node_id = node_by_endpoint[(draft.segment_id, "exit")]
+        entry_node = node_by_id[entry_node_id]
+        exit_node = node_by_id[exit_node_id]
+        lat = list(draft.lat_deg)
+        lon = list(draft.lon_deg)
+        lat[0], lon[0] = entry_node.lat_deg, entry_node.lon_deg
+        lat[-1], lon[-1] = exit_node.lat_deg, exit_node.lon_deg
+        segments.append(
+            RouteSegment(
+                segment_id=draft.segment_id,
+                airport=draft.airport,
+                runway_ids=draft.runway_ids,
+                entry_node_id=entry_node_id,
+                exit_node_id=exit_node_id,
+                cluster_ids=draft.cluster_ids,
+                lat_deg=tuple(lat),
+                lon_deg=tuple(lon),
+                length_m=draft.length_m,
+                corridor_width_m=draft.corridor_width_m,
+            )
         )
-        for draft in drafts
-    ]
 
     traversals: list[ClusterSegmentTraversal] = []
     for cluster_id, route_run_ids in runs_by_cluster.items():
@@ -838,6 +970,21 @@ def _build_airport_graph(
     return nodes, segments, traversals
 
 
+def partition_medoid_routes(
+    routes: Iterable[MedoidRoute],
+    *,
+    config: RouteGraphConfig | None = None,
+) -> tuple[tuple[MedoidRoute, ...], tuple[MedoidRoute, ...]]:
+    """Split certain routes from console-only uncertain medoid inputs."""
+
+    cfg = RouteGraphConfig() if config is None else config
+    threshold_m = cfg.maximum_medoid_dispersion_nm * M_PER_NM
+    ordered = tuple(sorted(routes, key=lambda item: item.qualified_cluster_id))
+    accepted = tuple(item for item in ordered if item.dispersion_m <= threshold_m)
+    uncertain = tuple(item for item in ordered if item.dispersion_m > threshold_m)
+    return accepted, uncertain
+
+
 def build_route_graph(
     routes: Iterable[MedoidRoute],
     *,
@@ -847,14 +994,17 @@ def build_route_graph(
     """Build a deterministic airport-wide graph without waypoint identities."""
 
     cfg = RouteGraphConfig() if config is None else config
-    sources = tuple(sorted(routes, key=lambda item: item.qualified_cluster_id))
-    if not sources:
+    provided = tuple(sorted(routes, key=lambda item: item.qualified_cluster_id))
+    if not provided:
         raise ValueError("route graph requires at least one medoid route")
-    if len({item.qualified_cluster_id for item in sources}) != len(sources):
+    if len({item.qualified_cluster_id for item in provided}) != len(provided):
         raise ValueError("route graph medoid cluster identities must be unique")
-    dataset_ids = {item.dataset_id for item in sources}
+    dataset_ids = {item.dataset_id for item in provided}
     if len(dataset_ids) != 1:
         raise ValueError("one route graph artifact cannot mix datasets")
+    sources, _ = partition_medoid_routes(provided, config=cfg)
+    if not sources:
+        raise ValueError("route graph has no certain medoid routes")
 
     partitions: dict[str, list[MedoidRoute]] = {}
     for route in sources:
@@ -917,4 +1067,5 @@ __all__ = [
     "RouteSegment",
     "attach_route_graph",
     "build_route_graph",
+    "partition_medoid_routes",
 ]
