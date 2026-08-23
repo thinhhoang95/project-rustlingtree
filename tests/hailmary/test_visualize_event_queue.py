@@ -173,6 +173,9 @@ def test_local_web_app_serves_gui_and_trace_api() -> None:
     assert "Previous Event" in page.text
     assert "Next Event" in page.text
     assert "Pending event queue" in page.text
+    assert "minmax(430px,.95fr)" in page.text
+    assert ".inspector::-webkit-scrollbar{display:none}" in page.text
+    assert "overscroll-behavior-x:contain" in page.text
     assert response.status_code == 200
     assert response.json()["scenario_id"] == "QUEUE-GUI"
 

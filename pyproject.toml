@@ -38,6 +38,7 @@ dependencies = [
     "tqdm>=4.67.3",
     "uvicorn>=0.35.0",
     "black>=26.5.1",
+    "pytest>=9.1.1",
 ]
 
 [project.scripts]

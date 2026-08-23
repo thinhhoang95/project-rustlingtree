@@ -200,6 +200,52 @@ def test_live_stretch_then_speed_preserves_splices_and_maps_future_events() -> N
     assert remapped_merge_event.time_s > merge_event.time_s
 
 
+def test_large_unix_epoch_station_roundtrip_keeps_speed_action_applicable() -> None:
+    """An exact station event must survive absolute-time float cancellation."""
+
+    initial = _live_action_simulator()
+    station_s_m = 77_537.19798326492
+    release_time_s = 1_775_034_000.0
+    flight = replace(
+        initial.definition.flights[0],
+        release_time_s=release_time_s,
+        observed_release_time_s=release_time_s,
+        action_stations=(ActionStationDefinition(1, station_s_m, "speed"),),
+    )
+    simulator = Simulator(
+        replace(initial.definition, flights=(flight,)),
+        action_applier=apply_action,
+        runtime_configuration_hash="test-native-apply-action-v1",
+    )
+    batch = _next_station_batch(simulator, "speed")
+    action = next(
+        candidate
+        for candidate in ActionCatalog().enumerate_for_batch(
+            simulator,
+            batch,
+            anchor_id="SPEED_ANCHOR",
+            bound_flight_id="F1",
+            resource_id="RWY",
+            segment_id="FINAL",
+        )
+        if candidate.lever is ActionLever.SPEED and candidate.band == "light"
+    )
+    before = simulator.sample_flight("F1")
+
+    # The event was scheduled from this exact station, but adding its elapsed
+    # time to a large Unix epoch and subtracting the origin loses a few ULPs.
+    assert abs(before.s_m - action.s_m) > 1.0e-5
+    result = apply_action(simulator, action)
+    after = simulator.sample_flight("F1")
+
+    assert result.realized_delay_s > 0.0
+    assert simulator.state.flight("F1").speed_action_count == 1
+    assert after.elapsed_time_s == pytest.approx(before.elapsed_time_s)
+    assert after.east_m == pytest.approx(before.east_m, abs=1.0e-4)
+    assert after.north_m == pytest.approx(before.north_m, abs=1.0e-4)
+    assert after.cas_mps == pytest.approx(before.cas_mps, abs=1.0e-6)
+
+
 def test_replacement_rejects_a_splice_mapping_that_moves_the_live_aircraft() -> None:
     simulator = _live_action_simulator()
     stretch_batch = _next_station_batch(simulator, "path_stretch")

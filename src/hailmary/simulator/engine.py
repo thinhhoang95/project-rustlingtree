@@ -1148,6 +1148,22 @@ def _assert_splice_position_continuity(
         )
 
 
+def _absolute_clock_tolerance_s(*times_s: float) -> float:
+    """Resolve sub-second trajectory clocks carried on Unix timestamps.
+
+    Event times are materialized as ``trajectory_origin + elapsed`` and later
+    recovered by subtraction.  Near contemporary Unix epochs, one float64 ULP
+    is larger than the fixed tolerances used for the local trajectory clock.
+    Summing the participating ULPs bounds that harmless add/subtract roundtrip
+    without relaxing validation at the millisecond or physical-station scale.
+    """
+
+    values = tuple(float(value) for value in times_s)
+    if not values or not all(math.isfinite(value) for value in values):
+        raise ValueError("clock tolerance inputs must be finite")
+    return max(1.0e-7, sum(math.ulp(value) for value in values))
+
+
 def _validated_variant_splice(
     state: SimulationState,
     dynamic: FlightDynamic,
@@ -1172,11 +1188,19 @@ def _validated_variant_splice(
     requested_splice_s_m = (
         current_station_s_m if splice_s_m is None else float(splice_s_m)
     )
+    requested_elapsed_s = current_trajectory.elapsed_at_station(
+        requested_splice_s_m
+    )
     station_tolerance_m = max(1e-5, current_trajectory.upstream_s_m * 1e-10)
     if abs(requested_splice_s_m - current_station_s_m) > station_tolerance_m:
-        raise ValueError(
-            "variant replacement splice does not match the aircraft's current station"
+        clock_tolerance_s = _absolute_clock_tolerance_s(
+            state.sim_time_s,
+            dynamic.trajectory_clock_origin_s,
         )
+        if abs(requested_elapsed_s - current_elapsed_s) > clock_tolerance_s:
+            raise ValueError(
+                "variant replacement splice does not match the aircraft's current station"
+            )
     mapped_splice_s_m = _mapped_station_s_m(
         requested_splice_s_m,
         station_mapping_m,
@@ -1188,7 +1212,7 @@ def _validated_variant_splice(
     )
     replacement_origin_s = state.sim_time_s - replacement_elapsed_s
     _assert_splice_position_continuity(
-        current_trajectory.sample(current_elapsed_s),
+        current_trajectory.sample(requested_elapsed_s),
         replacement_trajectory.sample(replacement_elapsed_s),
     )
     _assert_historical_prefix_continuity(
@@ -1196,7 +1220,8 @@ def _validated_variant_splice(
         replacement_trajectory,
         current_origin_s=dynamic.trajectory_clock_origin_s,
         replacement_origin_s=replacement_origin_s,
-        through_time_s=state.sim_time_s,
+        current_through_elapsed_s=requested_elapsed_s,
+        replacement_through_elapsed_s=replacement_elapsed_s,
     )
     return (
         current_trajectory,
@@ -1253,38 +1278,58 @@ def _assert_historical_prefix_continuity(
     *,
     current_origin_s: float,
     replacement_origin_s: float,
-    through_time_s: float,
+    current_through_elapsed_s: float,
+    replacement_through_elapsed_s: float,
 ) -> None:
     """Prove that replacing the current variant cannot reinterpret its past."""
 
-    clock_tolerance_s = 1e-7
+    clock_tolerance_s = _absolute_clock_tolerance_s(
+        current_origin_s,
+        replacement_origin_s,
+    )
     if abs(float(current_origin_s) - float(replacement_origin_s)) > clock_tolerance_s:
         raise ValueError(
             "variant replacement would rewrite history by changing the "
             "trajectory clock origin"
         )
 
-    current_elapsed_s = float(through_time_s - current_origin_s)
-    replacement_elapsed_s = float(through_time_s - replacement_origin_s)
-    current_knots = current_origin_s + current.elapsed_time_s[
-        current.elapsed_time_s <= current_elapsed_s + clock_tolerance_s
+    origin_offset_s = float(replacement_origin_s - current_origin_s)
+    current_elapsed_s = float(current_through_elapsed_s)
+    replacement_elapsed_s = float(replacement_through_elapsed_s)
+    replacement_through_on_current_clock_s = (
+        origin_offset_s + replacement_elapsed_s
+    )
+    through_elapsed_s = min(
+        current_elapsed_s,
+        replacement_through_on_current_clock_s,
+    )
+    if (
+        abs(current_elapsed_s - replacement_through_on_current_clock_s)
+        > clock_tolerance_s
+    ):
+        raise ValueError(
+            "variant replacement would rewrite history by changing the "
+            "trajectory clock origin"
+        )
+    current_knots = current.elapsed_time_s[
+        current.elapsed_time_s <= through_elapsed_s + clock_tolerance_s
     ]
-    replacement_knots = replacement_origin_s + replacement.elapsed_time_s[
-        replacement.elapsed_time_s <= replacement_elapsed_s + clock_tolerance_s
+    replacement_knots = origin_offset_s + replacement.elapsed_time_s[
+        replacement.elapsed_time_s
+        <= replacement_elapsed_s + clock_tolerance_s
     ]
-    absolute_times = np.unique(
+    relative_times = np.unique(
         np.concatenate(
             (
                 current_knots,
                 replacement_knots,
-                np.asarray([current_origin_s, through_time_s], dtype=np.float64),
+                np.asarray([0.0, through_elapsed_s], dtype=np.float64),
             )
         )
     )
-    absolute_times = absolute_times[
-        (absolute_times >= current_origin_s - clock_tolerance_s)
-        & (absolute_times <= through_time_s + clock_tolerance_s)
-    ]
+    relative_times = np.unique(
+        np.clip(relative_times, 0.0, through_elapsed_s)
+    )
 
     compared_fields = 0
     for label, names, tolerance in _HISTORICAL_PROFILE_FIELDS:
@@ -1299,12 +1344,12 @@ def _assert_historical_prefix_continuity(
             )
         compared_fields += 1
         current_samples = np.interp(
-            absolute_times - current_origin_s,
+            relative_times,
             current.elapsed_time_s,
             current_values,
         )
         replacement_samples = np.interp(
-            absolute_times - replacement_origin_s,
+            relative_times - origin_offset_s,
             replacement.elapsed_time_s,
             replacement_values,
         )
