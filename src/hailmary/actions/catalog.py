@@ -35,6 +35,19 @@ def _future_conflicts(
     from hailmary.evaluation.conflict import TimedTrajectory, detect_conflicts
 
     state = getattr(simulator, "state")
+    interval_start = float(start_time_s)
+    interval_end = float(horizon_s)
+    if not np.isfinite(interval_start) or not np.isfinite(interval_end):
+        raise ValueError("conflict evaluation interval must be finite")
+    if interval_end < interval_start:
+        raise ValueError("conflict evaluation interval is reversed")
+
+    # Conflict geometry is invariant under a shared time translation.  Work in
+    # a clock centered on this rollout interval instead of materializing every
+    # fine trajectory knot on a ~1.8e9 Unix timestamp.  The latter can collapse
+    # distinct nanosecond-scale local knots to the same float64 value even when
+    # the source trajectory is strictly monotone.
+    time_reference_s = interval_start
     trajectories: list[TimedTrajectory] = []
     for dynamic in state.flights:
         variant = state.definition.variant(dynamic.current_variant_id)
@@ -42,18 +55,22 @@ def _future_conflicts(
             TimedTrajectory.from_variant(
                 variant,
                 flight_id=dynamic.flight_id,
-                release_time_s=dynamic.trajectory_clock_origin_s,
+                release_time_s=(
+                    float(dynamic.trajectory_clock_origin_s) - time_reference_s
+                ),
             )
         )
-    interval_start = float(start_time_s)
-    interval_end = float(horizon_s)
-    if not np.isfinite(interval_start) or not np.isfinite(interval_end):
-        raise ValueError("conflict evaluation interval must be finite")
-    if interval_end < interval_start:
-        raise ValueError("conflict evaluation interval is reversed")
+    records = tuple(
+        replace(
+            record,
+            start_time_s=float(record.start_time_s) + time_reference_s,
+            end_time_s=float(record.end_time_s) + time_reference_s,
+        )
+        for record in detect_conflicts(trajectories)
+    )
     return tuple(
         record
-        for record in detect_conflicts(trajectories)
+        for record in records
         if record.end_time_s >= interval_start - 1.0e-9
         and record.start_time_s <= interval_end + 1.0e-9
     )

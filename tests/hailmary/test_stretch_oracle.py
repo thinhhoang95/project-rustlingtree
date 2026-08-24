@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from hailmary.actions import ActionCatalog, ActionLever, PathStretchRealizer, apply_action
@@ -172,6 +174,35 @@ def test_conflict_window_remains_frozen_after_inner_branch_reaches_horizon() -> 
     assert records
     assert all(record.end_time_s < horizon_s for record in records)
     assert any(record.end_time_s > decision_time_s for record in records)
+
+
+def test_future_conflicts_centers_large_epoch_before_materializing_fine_knots() -> None:
+    epoch_s = 1_775_035_134.1680675
+    variant = SimpleNamespace(
+        # Canonical threshold-to-upstream order.  The first two flight-order
+        # knots are distinct locally but collapse if added directly to epoch_s.
+        elapsed_time_s=np.asarray([10.0, 2.31730723498913e-9, 0.0]),
+        east_m=np.asarray([0.0, 1.0e-6, 2.0e-6]),
+        north_m=np.zeros(3),
+        altitude_m=np.zeros(3),
+    )
+    dynamic = SimpleNamespace(
+        flight_id="FINE_CLOCK",
+        current_variant_id="variant",
+        trajectory_clock_origin_s=epoch_s,
+    )
+    simulator = SimpleNamespace(
+        state=SimpleNamespace(
+            flights=(dynamic,),
+            definition=SimpleNamespace(variant=lambda _variant_id: variant),
+        )
+    )
+
+    assert _future_conflicts(
+        simulator,
+        start_time_s=epoch_s + 1.0,
+        horizon_s=epoch_s + 5.0,
+    ) == ()
 
 
 def test_default_selector_accumulates_conflicts_before_a_future_time_shift() -> None:

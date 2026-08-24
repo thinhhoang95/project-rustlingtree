@@ -10,11 +10,19 @@ from hailmary.errors import InfeasibleActionError
 from hailmary.templates.models import ResourceCrossing, TrajectoryVariant
 
 
-_PHYSICAL_PROFILE_NAMES = (
+_VARIANT_PROFILE_NAMES = (
+    "lat_deg",
+    "lon_deg",
+    "east_m",
+    "north_m",
     "altitude_m",
     "cas_mps",
     "tas_mps",
     "ground_speed_mps",
+    "command_cas_mps",
+    "reference_command_cas_mps",
+    "lower_cas_mps",
+    "upper_cas_mps",
 )
 
 
@@ -38,9 +46,10 @@ def preserve_compiled_live_prefix(
 
     parent_anchor = float(parent_anchor_s_m)
     child_anchor = float(child_anchor_s_m)
-    child_s = np.asarray(compiled.s_m, dtype=np.float64)
+    compiled_s = np.asarray(compiled.s_m, dtype=np.float64)
     if station_mapping_m is None:
-        parent_for_child = child_s
+        parent_s = np.asarray(parent.s_m, dtype=np.float64)
+        mapped_child_s = parent_s
     else:
         mapping = np.asarray(station_mapping_m, dtype=np.float64)
         if mapping.ndim != 2 or mapping.shape[1:] != (2,) or len(mapping) < 2:
@@ -49,45 +58,62 @@ def preserve_compiled_live_prefix(
         mapped_child_s = mapping[:, 1]
         if np.any(np.diff(parent_s) <= 0.0) or np.any(np.diff(mapped_child_s) <= 0.0):
             raise InfeasibleActionError("compiled splice station mapping is not monotone")
-        parent_for_child = np.interp(child_s, mapped_child_s, parent_s)
 
     tolerance_m = max(1.0e-7, float(compiled.path_length_m) * 1.0e-12)
-    historical = child_s >= child_anchor - tolerance_m
+    # Retain the replay grid only downstream of the live point.  Upstream, use
+    # every parent knot (mapped onto the child's station axis), plus an exact
+    # anchor knot.  Merely sampling the parent profile onto replay knots is not
+    # sufficient: the simulator compares both trajectories on the union of
+    # their *time* knots, so two different spatial grids can otherwise imply a
+    # slightly different piecewise-linear history between matching samples.
+    future = compiled_s < child_anchor - tolerance_m
+    parent_stations = np.asarray(parent.s_m, dtype=np.float64)
+    upstream_parent = parent_stations > parent_anchor + tolerance_m
+    prefix_parent_s = np.concatenate(
+        (np.asarray([parent_anchor], dtype=np.float64), parent_stations[upstream_parent])
+    )
+    prefix_child_s = np.interp(prefix_parent_s, parent_s, mapped_child_s)
+    prefix_child_s[0] = child_anchor
+    child_s = np.concatenate((compiled_s[future], prefix_child_s))
+    if len(child_s) < 2 or np.any(np.diff(child_s) <= 0.0):
+        raise InfeasibleActionError(
+            "causal replay splice produced a non-monotone station grid"
+        )
+
     profiles: dict[str, np.ndarray] = {}
-    for name in _PHYSICAL_PROFILE_NAMES:
-        values = np.array(getattr(compiled, name), dtype=np.float64, copy=True)
-        values[historical] = np.interp(
-            parent_for_child[historical],
-            parent.s_m,
-            getattr(parent, name),
+    for name in _VARIANT_PROFILE_NAMES:
+        values = np.concatenate(
+            (
+                np.asarray(getattr(compiled, name), dtype=np.float64)[future],
+                np.interp(
+                    prefix_parent_s,
+                    parent_stations,
+                    getattr(parent, name),
+                ),
+            )
         )
         profiles[name] = values
 
-    parent_anchor_elapsed = float(
-        np.interp(parent_anchor, parent.s_m, parent.elapsed_time_s)
-    )
-    compiled_anchor_elapsed = float(
-        np.interp(child_anchor, compiled.s_m, compiled.elapsed_time_s)
-    )
-    elapsed = np.array(compiled.elapsed_time_s, dtype=np.float64, copy=True)
-    elapsed[historical] = np.interp(
-        parent_for_child[historical],
-        parent.s_m,
+    prefix_elapsed = np.interp(
+        prefix_parent_s,
+        parent_stations,
         parent.elapsed_time_s,
     )
-    future = ~historical
-    elapsed[future] = (
+    parent_anchor_elapsed = float(prefix_elapsed[0])
+    compiled_anchor_elapsed = float(
+        np.interp(child_anchor, compiled_s, compiled.elapsed_time_s)
+    )
+    future_elapsed = (
         parent_anchor_elapsed
-        + compiled.elapsed_time_s[future]
+        + np.asarray(compiled.elapsed_time_s, dtype=np.float64)[future]
         - compiled_anchor_elapsed
     )
-    anchor_index = int(np.argmin(np.abs(child_s - child_anchor)))
-    elapsed[anchor_index] = parent_anchor_elapsed
+    elapsed = np.concatenate((future_elapsed, prefix_elapsed))
     if np.any(np.diff(elapsed) >= -1.0e-10):
         raise InfeasibleActionError("causal replay splice produced a non-monotone clock")
 
-    lower = np.asarray(compiled.lower_cas_mps, dtype=np.float64)
-    upper = np.asarray(compiled.upper_cas_mps, dtype=np.float64)
+    lower = profiles["lower_cas_mps"]
+    upper = profiles["upper_cas_mps"]
     envelope_tolerance = float(envelope_tolerance_mps)
     if not np.isfinite(envelope_tolerance) or envelope_tolerance < 0.0:
         raise ValueError("envelope_tolerance_mps must be finite and nonnegative")
@@ -115,6 +141,7 @@ def preserve_compiled_live_prefix(
             "live_splice_replay_elapsed_s": compiled_anchor_elapsed,
             "live_splice_prefix_source": "parent_physical_profile",
             "live_splice_suffix_source": "simap_public_coupled_replay",
+            "live_splice_parent_prefix_knots": int(len(prefix_parent_s)),
         }
     )
     timing_reference = details.get("simap_kinematic_duration_s")
@@ -135,19 +162,19 @@ def preserve_compiled_live_prefix(
     return TrajectoryVariant(
         template_id=compiled.template_id,
         cluster_id=compiled.cluster_id,
-        s_m=compiled.s_m,
-        lat_deg=compiled.lat_deg,
-        lon_deg=compiled.lon_deg,
-        east_m=compiled.east_m,
-        north_m=compiled.north_m,
+        s_m=child_s,
+        lat_deg=profiles["lat_deg"],
+        lon_deg=profiles["lon_deg"],
+        east_m=profiles["east_m"],
+        north_m=profiles["north_m"],
         altitude_m=profiles["altitude_m"],
         cas_mps=profiles["cas_mps"],
         tas_mps=profiles["tas_mps"],
         ground_speed_mps=profiles["ground_speed_mps"],
-        command_cas_mps=compiled.command_cas_mps,
-        reference_command_cas_mps=compiled.reference_command_cas_mps,
-        lower_cas_mps=compiled.lower_cas_mps,
-        upper_cas_mps=compiled.upper_cas_mps,
+        command_cas_mps=profiles["command_cas_mps"],
+        reference_command_cas_mps=profiles["reference_command_cas_mps"],
+        lower_cas_mps=profiles["lower_cas_mps"],
+        upper_cas_mps=profiles["upper_cas_mps"],
         elapsed_time_s=elapsed,
         resource_crossings=crossings,
         diagnostics=diagnostics,

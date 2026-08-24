@@ -115,7 +115,8 @@ def _variant_with_exact_station(
             "path-stretch anchor is outside the controllable trajectory"
         )
     nearest = int(np.argmin(np.abs(current.s_m - station)))
-    if abs(float(current.s_m[nearest]) - station) <= 1e-7:
+    station_tolerance_m = max(1.0e-6, current.path_length_m * 1.0e-11)
+    if abs(float(current.s_m[nearest]) - station) <= station_tolerance_m:
         return current
     insertion_index = int(np.searchsorted(current.s_m, station))
     stations = np.insert(current.s_m, insertion_index, station)
@@ -296,29 +297,33 @@ def _compile_geometry_variant(
             ),
         ),
     )
+    child_anchor_s_m = float(
+        np.interp(
+            current.s_m[action],
+            np.asarray(station_mapping)[:, 0],
+            np.asarray(station_mapping)[:, 1],
+        )
+    )
+    compile_variant = (
+        None if validator is None else getattr(validator, "compile", None)
+    )
+    if callable(compile_variant):
+        compiled = compile_variant(variant)
+        if not isinstance(compiled, TrajectoryVariant):
+            raise TypeError("variant compiler must return TrajectoryVariant")
+        variant = compiled
+    variant = preserve_compiled_live_prefix(
+        current,
+        variant,
+        parent_anchor_s_m=float(current.s_m[action]),
+        child_anchor_s_m=child_anchor_s_m,
+        station_mapping_m=station_mapping,
+        envelope_tolerance_mps=float(
+            getattr(validator, "physical_envelope_tolerance_mps", 0.5)
+        ),
+    )
     if validator is not None:
-        compile_variant = getattr(validator, "compile", None)
         if callable(compile_variant):
-            compiled = compile_variant(variant)
-            if not isinstance(compiled, TrajectoryVariant):
-                raise TypeError("variant compiler must return TrajectoryVariant")
-            child_anchor_s_m = float(
-                np.interp(
-                    current.s_m[action],
-                    np.asarray(station_mapping)[:, 0],
-                    np.asarray(station_mapping)[:, 1],
-                )
-            )
-            variant = preserve_compiled_live_prefix(
-                current,
-                compiled,
-                parent_anchor_s_m=float(current.s_m[action]),
-                child_anchor_s_m=child_anchor_s_m,
-                station_mapping_m=station_mapping,
-                envelope_tolerance_mps=float(
-                    getattr(validator, "physical_envelope_tolerance_mps", 0.5)
-                ),
-            )
             validated = variant.diagnostics
         else:
             validated = validator.validate(variant)
@@ -368,7 +373,14 @@ class PathStretchRealizer:
         minimum_rejoin_station_m: float | None = None,
     ) -> tuple[StretchCandidateResult, ...]:
         geometry_source = _variant_with_exact_station(current, float(anchor_s_m))
-        action_index = int(np.searchsorted(geometry_source.s_m, float(anchor_s_m)))
+        # The event clock can recover a station a few float ULPs away from an
+        # existing knot.  `_variant_with_exact_station` deliberately treats a
+        # sub-micrometre difference as the same physical station, so bind the
+        # dogleg to that nearest represented knot instead of advancing to the
+        # next knot through `searchsorted`.
+        action_index = int(
+            np.argmin(np.abs(geometry_source.s_m - float(anchor_s_m)))
+        )
         base_points = np.column_stack((geometry_source.east_m, geometry_source.north_m))
         gate_m = self.template_config.commitment_gate_nm * M_PER_NM
         if minimum_rejoin_station_m is not None:

@@ -9,7 +9,9 @@ from hailmary.actions.stretch import PathStretchRealizer
 from hailmary.adapters import SIMAPAdapter
 from hailmary.config import M_PER_NM, StretchConfig
 from hailmary.geometry.dogleg import construct_runway_away_dogleg
-from hailmary.templates.models import VariantDiagnostics
+from hailmary.geometry.frame import LocalFrame
+from hailmary.simulator import MonotoneTrajectory
+from hailmary.templates.models import TrajectoryVariant, VariantDiagnostics
 
 from .test_templates import _straight_variant
 from .test_adapters import _ConstantPerformanceBackend, _aircraft_config
@@ -93,6 +95,134 @@ def test_realizer_compiles_short_medium_long_to_target_distance() -> None:
         )
         assert candidate.geometry.runway_away_displacement_m > 0.0
         assert candidate.variant.duration_s >= baseline.duration_s
+
+
+def test_kinematic_dogleg_preserves_clock_and_geometry_before_live_splice() -> None:
+    source = _straight_variant()
+    stations = source.s_m
+    east = stations + 5_000.0
+    north = np.full_like(stations, 3_000.0)
+    lat, lon = LocalFrame(32.8, -97.1).unproject(east, north)
+    speed = 90.0 + 30.0 * stations / float(stations[-1])
+    baseline = TrajectoryVariant.from_kinematic_profile(
+        template_id=source.template_id,
+        cluster_id=source.cluster_id,
+        s_m=stations,
+        lat_deg=lat,
+        lon_deg=lon,
+        east_m=east,
+        north_m=north,
+        altitude_m=source.altitude_m,
+        cas_mps=speed,
+        tas_mps=speed,
+        ground_speed_mps=speed,
+        command_cas_mps=speed,
+        reference_command_cas_mps=speed,
+        lower_cas_mps=np.full_like(speed, 70.0),
+        upper_cas_mps=np.full_like(speed, 130.0),
+        threshold_resource_id="RWY",
+        resource_stations_m=(("MERGE", 50_000.0),),
+    )
+    anchor_s_m = 90_000.0
+    candidate = next(
+        item
+        for item in PathStretchRealizer(
+            config=StretchConfig(max_turn_deg=120.0)
+        ).candidates(baseline, anchor_s_m=anchor_s_m)
+        if item.feasible
+    )
+    assert candidate.variant is not None
+    mapping = np.asarray(candidate.station_mapping_m, dtype=np.float64)
+    child_anchor_s_m = float(
+        np.interp(anchor_s_m, mapping[:, 0], mapping[:, 1])
+    )
+    parent_elapsed_s = MonotoneTrajectory.from_variant(
+        baseline
+    ).elapsed_at_station(anchor_s_m)
+    child_elapsed_s = MonotoneTrajectory.from_variant(
+        candidate.variant
+    ).elapsed_at_station(child_anchor_s_m)
+    upstream_parent_s_m = 95_000.0
+    upstream_child_s_m = float(
+        np.interp(upstream_parent_s_m, mapping[:, 0], mapping[:, 1])
+    )
+
+    assert child_elapsed_s == pytest.approx(parent_elapsed_s, abs=1.0e-9)
+    for name in ("lat_deg", "lon_deg", "east_m", "north_m"):
+        parent_value = float(
+            np.interp(upstream_parent_s_m, baseline.s_m, getattr(baseline, name))
+        )
+        child_value = float(
+            np.interp(
+                upstream_child_s_m,
+                candidate.variant.s_m,
+                getattr(candidate.variant, name),
+            )
+        )
+        assert child_value == pytest.approx(parent_value, abs=1.0e-10)
+
+    # Historical continuity is a curve-in-time requirement, not just an exact
+    # match at the action station.  Preserve every original parent knot so a
+    # differently sampled dogleg grid cannot change interpolation between the
+    # already-flown samples.
+    parent_prefix = baseline.s_m >= anchor_s_m
+    mapped_prefix_s_m = np.interp(
+        baseline.s_m[parent_prefix], mapping[:, 0], mapping[:, 1]
+    )
+    for name, tolerance in (
+        ("lat_deg", 1.0e-12),
+        ("lon_deg", 1.0e-12),
+        ("east_m", 1.0e-8),
+        ("north_m", 1.0e-8),
+        ("altitude_m", 1.0e-8),
+        ("cas_mps", 1.0e-10),
+        ("tas_mps", 1.0e-10),
+        ("ground_speed_mps", 1.0e-10),
+    ):
+        np.testing.assert_allclose(
+            np.interp(
+                mapped_prefix_s_m,
+                candidate.variant.s_m,
+                getattr(candidate.variant, name),
+            ),
+            getattr(baseline, name)[parent_prefix],
+            rtol=0.0,
+            atol=tolerance,
+        )
+    np.testing.assert_allclose(
+        np.interp(
+            mapped_prefix_s_m,
+            candidate.variant.s_m,
+            candidate.variant.elapsed_time_s,
+        ),
+        baseline.elapsed_time_s[parent_prefix],
+        rtol=0.0,
+        atol=1.0e-10,
+    )
+    details = dict(candidate.variant.diagnostics.details)
+    assert details["live_splice_prefix_source"] == "parent_physical_profile"
+    assert details["live_splice_parent_prefix_knots"] == int(
+        np.count_nonzero(parent_prefix)
+    )
+
+
+def test_near_knot_live_anchor_does_not_create_a_sub_ulp_time_segment() -> None:
+    baseline = _straight_variant()
+    represented_anchor_s_m = float(baseline.s_m[-6])
+    recovered_event_station_s_m = represented_anchor_s_m - 3.7e-7
+    candidates = PathStretchRealizer(
+        config=StretchConfig(max_turn_deg=120.0)
+    ).candidates(baseline, anchor_s_m=recovered_event_station_s_m)
+
+    feasible = [item.variant for item in candidates if item.variant is not None]
+    assert feasible
+    contemporary_epoch_s = 1_775_035_134.1680675
+    for variant in feasible:
+        ordered_elapsed_s = variant.elapsed_time_s[::-1]
+        absolute_time_s = contemporary_epoch_s + (
+            ordered_elapsed_s - float(ordered_elapsed_s[0])
+        )
+        assert np.all(np.diff(absolute_time_s) > 0.0)
 
 
 def test_smooth_doglegs_preserve_splices_and_never_fold_back() -> None:
